@@ -24,6 +24,7 @@ public final class LocalMonitorService {
     private var watcher: FSEventsWatcher?
     private var timer: DispatchSourceTimer?
     private var inventory: LocalInventory?
+    private var activityLog: SyncActivityLog?
     private var roots: [MonitorRoot] = []
     private var lastFullScan: Date?
     private var recoveryRequired = false
@@ -57,6 +58,7 @@ public final class LocalMonitorService {
                 let since = FSEventsWatcher.currentEventID()
                 self.roots = checked
                 self.inventory = store
+                self.activityLog = try SyncActivityLog(path: databasePath)
                 self.report("Creazione inventario locale in corso…", active: false)
 
                 for root in checked {
@@ -147,6 +149,10 @@ public final class LocalMonitorService {
                 totalChanges += result.queuedUpserts + result.queuedDeletes
             }
             if totalChanges > 0 {
+                try? activityLog?.record(
+                    level: .info, rootID: "monitor", action: "detected",
+                    message: "Modifiche locali rilevate: \(totalChanges)"
+                )
                 report("Modifiche locali registrate: \(totalChanges)", active: true)
             }
         } catch {
@@ -176,6 +182,10 @@ public final class LocalMonitorService {
                     }
                     self.lastFullScan = Date()
                     self.recoveryRequired = false
+                    try? self.activityLog?.record(
+                        level: .info, rootID: "monitor", action: "audit",
+                        message: "Verifica locale completata"
+                    )
                     self.report("Verifica completa locale conclusa", active: true)
                 }
             } catch {
@@ -193,6 +203,7 @@ public final class LocalMonitorService {
         watcher?.stop()
         watcher = nil
         inventory = nil
+        activityLog = nil
         roots = []
         lastFullScan = nil
         recoveryRequired = false
