@@ -54,7 +54,9 @@ final class MountedFolderCopyTests: XCTestCase {
         let history = try logger.recent()
         XCTAssertEqual(history.first?.action, "copy")
         XCTAssertEqual(history.first?.relativePath, "set 1/foto àè.dng")
-        XCTAssertTrue(try logger.exportText().contains("Trasferimento completato"))
+        XCTAssertTrue(try logger.exportText().contains("Nuovo file copiato"))
+        XCTAssertEqual(outcome.created, 1)
+        XCTAssertEqual(outcome.updated, 0)
     }
 
     func testMirrorDeletionJobsRemainPending() throws {
