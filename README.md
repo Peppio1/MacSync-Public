@@ -7,7 +7,7 @@ Applicazione nativa macOS per la futura sincronizzazione **unidirezionale Sorgen
 ## Configurazione approvata
 
 Per ognuna delle due coppie iniziali (Cartella_1 e Cartella_2):
-- **Sorgente**: selezionare con Sfoglia oppure trascinare una cartella dal Finder nell'area.
+- **Sorgente**: selezionare con Sfoglia oppure trascinare una cartella **locale del Mac** dal Finder nell'area (il monitor FSEvents non tratta cartelle SMB come sorgenti).
 - **Destinazione**: selezionare con Sfoglia oppure trascinare una cartella dal Finder nell'area.
 - La destinazione può essere una normale cartella locale del Mac (per test sullo stesso computer) oppure una condivisione SMB **già montata e accessibile nel Finder**.
 - MacSync non richiede server/IP, dominio, username, password SMB, Keychain dedicato, rclone, script di shell o installazione sul Windows Server 2016. Autenticazione e montaggio della condivisione sono gestiti da macOS.
