@@ -1,50 +1,53 @@
-# MacSync — prototipo v0.4.0
+# MacSync — prototipo v0.5.0
 
-App macOS per futura replica unidirezionale iMac -> Windows Server 2016 via SMB/VPN, senza installare nulla sul server.
+Applicazione nativa macOS per la futura sincronizzazione **unidirezionale Sorgente → Destinazione**, con copie selettive ogni 5 minuti, SQLite e FSEvents.
 
-**IMPORTANTE:** questa versione NON è pronta per i 100 GB di produzione e non replica le eliminazioni. Le COPIE sono disponibili solo su attivazione esplicita e solo dentro la sottocartella MacSync_TEST_ONLY della condivisione scelta. Le operazioni sulla cartella principale di produzione restano esclusivamente di LETTURA.
+> **STATO: PROTOTIPO DA TESTARE, NON VERSIONE DI PRODUZIONE.** Le copie sono disabilitate per impostazione predefinita e si attivano solo su conferma per la sessione corrente. Le cancellazioni speculari non vengono eseguite. Per ora selezionare **solo cartelle di prova**, senza dati di produzione.
 
-## Cosa è implementato
+## Configurazione approvata
 
-- App SwiftUI nella barra dei menu macOS, selezione delle due cartelle locali Cartella_1 e Cartella_2.
-- Monitoraggio ricorsivo con FSEvents, inventario SQLite e coda persistente delle modifiche.
-- Scansioni locali mirate sui singoli file o sottoalberi interessati; riconciliazione locale all'avvio, dopo errori/eventi persi, e periodicamente.
-- Coda dei trasferimenti selettivi con retry per errori di copia e file sorgente ancora in modifica. Non viene usato rclone sync per l'intero archivio ogni 5 minuti.
-- Trasferimento rclone SMB di un singolo file in una posizione temporanea remota .macsync-staging, verifica successiva dei metadati locali e pubblicazione tramite moveto.
-- Nessuna propagazione di cancellazioni al server, nessun purge, nessuna pulizia automatica di file temporanei remoti.
-- Credenziali SMB: password nel Portachiavi macOS (Keychain), host/utente/dominio/nome condivisione nelle preferenze locali non segrete. La configurazione rclone viene creata per i singoli processi tramite variabili d'ambiente; non è necessario scrivere una password in rclone.conf.
-- Pannello di test con attivazione manuale e temporanea delle copie ogni 5 minuti.
-- Anteprima iniziale in SOLA LETTURA della condivisione vera: rclone lsjson ricorsivo solo su richiesta, confronto con scansione locale, differenze, file presenti solo sul server, nomi che collidono su Windows, residui di staging.
-- Compilazione e test automatici su GitHub Actions macOS 15, con pacchetto sperimentale .app ad hoc NON notarizzato.
+Per ognuna delle due coppie iniziali (Cartella_1 e Cartella_2):
+- **Sorgente**: selezionare con Sfoglia oppure trascinare una cartella dal Finder nell'area.
+- **Destinazione**: selezionare con Sfoglia oppure trascinare una cartella dal Finder nell'area.
+- La destinazione può essere una normale cartella locale del Mac (per test sullo stesso computer) oppure una condivisione SMB **già montata e accessibile nel Finder**.
+- MacSync non richiede server/IP, dominio, username, password SMB, Keychain dedicato, rclone, script di shell o installazione sul Windows Server 2016. Autenticazione e montaggio della condivisione sono gestiti da macOS.
+- Non è consentito configurare una destinazione dentro una sorgente, due sorgenti sovrapposte o due destinazioni sovrapposte. Il monitoraggio è locale e la replica è sempre a senso unico.
 
-## Sicurezza delle operazioni
+## Funzionalità sviluppate
 
-- Le copie di test sono SEMPRE indirizzate a macsync_smb:NOME_CONDIVISIONE/MacSync_TEST_ONLY/Cartella_1 e macsync_smb:NOME_CONDIVISIONE/MacSync_TEST_ONLY/Cartella_2. NON eseguono scritture nelle sottocartelle Cartella_1 o Cartella_2 di produzione.
-- L'anteprima iniziale legge invece le vere sottocartelle di produzione con rclone lsjson: non modifica né marca come sincronizzati i file.
-- Un match tra dimensione e timestamp è soltanto una CORRISPONDENZA PRESUNTA, non una verifica byte-per-byte. Non abilita automaticamente salti di copia né cancellazioni.
-- I file temporanei caricati su server possono rimanere in .macsync-staging dopo un errore. La pulizia automatica è da sviluppare e testare; NON eliminare manualmente cartelle di altri utenti.
-- rclone moveto può SOVRASCRIVERE un file già esistente nella cartella di test; comportamento di rinomina e atomicità deve essere verificato realmente contro Windows Server 2016.
-- Condivisione SMB interrotta, dati locali assenti e altre anomalie devono lasciare operazioni in coda. La politica di mirror con eliminazioni rimane disabilitata.
-- Tenere un backup versionato indipendente: MacSync è progettato come copia speculare, non come archivio storico.
+- Monitoraggio delle cartelle con **FSEvents** e inventario **SQLite** in ~/Library/Application Support/MacSync/inventory.sqlite.
+- Scansione completa delle sorgenti locali all'avvio, poi rilevamento file e sottoalberi modificati. Riconciliazione locale programmata o in caso di eventi persi.
+- Coda persistente per i file aggiunti e modificati. Le cancellazioni sono memorizzate come eventi ma **NON sono mai applicate alla destinazione** in v0.5.
+- Motore **Foundation/FileManager** che copia un file alla volta verso la cartella destinazione selezionata, con staging nella directory .macsync-staging, controllo dei metadati sorgente prima/dopo la copia, rinvio dei file ancora in scrittura e retry di file non disponibili.
+- Per un file già presente alla destinazione, tentativo di replace con copia di backup locale, senza cancellazione speculare. Su share SMB, atomicità/compatibilità devono ancora essere verificate con prove reali.
+- Verifica dell'identità del volume di destinazione (filesystem e mount point), così la scomparsa di una share SMB montata non viene trattata come un normale percorso locale di ripiego.
+- **Registro SQLite** consultabile dall'app: avvii, rilevamento modifiche, ciclo di sincronizzazione, file trasferiti, byte, tempi e anomalie. Esportazione in testo TSV da leggere con editor o Excel. I log registrano percorsi relativi, non password o indirizzi IP. Prima di condividere un log controllare comunque i nomi dei file, che possono essere sensibili.
+- **Anteprima iniziale in sola lettura**: confronto su richiesta fra cartelle sorgenti e destinazioni, incluse cartelle SMB già montate. Segnala differenze, file presenti solo a destinazione e possibili conflitti di maiuscole/minuscole. I match di timestamp e dimensione sono **presunti**, non una verifica byte per byte.
 
-## Configurazione SOLO PER TEST su un Mac disponibile
+## Come effettuare prove interamente su Mac
 
-1. Installare rclone solo sull'iMac. Windows Server non richiede programmi aggiuntivi.
-2. Aprire MacSync, selezionare due cartelle locali di prova con file sintetici.
-3. Inserire host/IP VPN SMB, nome utente, dominio (di default WORKGROUP), nome della condivisione Windows, password e percorso dell'eseguibile rclone (di norma /opt/homebrew/bin/rclone su Mac Apple Silicon o /usr/local/bin/rclone su Mac Intel).
-4. Premere Salva: password nel Keychain, nessun rclone config manuale richiesto.
-5. Premere Anteprima iniziale (sola lettura) per confrontare le cartelle reali del server: operazione potenzialmente lunga, da fare solo quando necessario; non parte ogni 5 minuti.
-6. Premere Attiva copie di prova e confermare l'avviso: MacSync scriverà soltanto in MacSync_TEST_ONLY all'interno della share, senza cancellare o modificare file nelle vere cartelle di produzione.
-7. Premere Ferma copie per bloccare nuovi cicli. Un upload già iniziato può terminare.
+1. Creare due cartelle locali di test separate: una per la **Sorgente** e una vuota per la **Destinazione**. Mettere nella sorgente alcuni file sintetici, NON fotografie originali.
+2. Aprire MacSync dalla barra dei menu. Per una coppia, trascinare la cartella sorgente nell'area **Sorgente** e la cartella destinazione nell'area **Destinazione**, oppure selezionarle tramite i due pulsanti **Sfoglia…**.
+3. MacSync costruisce un inventario SQLite. Premere **Anteprima iniziale (sola lettura)** per un controllo non distruttivo facoltativo.
+4. Premere **Attiva copie di prova** e confermare l'avviso: solo allora avvia copie della coda, con controllo circa ogni 5 minuti. Il processo può sovrascrivere file già esistenti nella destinazione scelta.
+5. Consultare **Registro sincronizzazioni**. Verificare il numero di file, la durata e gli eventuali errori; premere **Esporta registro…** per ottenere un TSV.
+6. Premere **Ferma copie** prima di cambiare cartelle. Un singolo trasferimento già in corso potrebbe finire.
 
-**Attenzione:** il primo giro registra nella coda SQLite tutti i file locali. Per ora il sistema NON riconcilia automaticamente le copie manuali già presenti sul server senza ritrasferirle. È un requisito di produzione ancora da implementare dopo verifica dell'anteprima.
+### Per una cartella SMB del server
 
-## Limitazioni e attività aperte
+Montare e aprire la condivisione da Finder con le credenziali **già salvate in macOS**, quindi selezionare o trascinare la sottocartella desiderata nell'area Destinazione. MacSync **non** effettua ora il montaggio automatico dopo lo spegnimento, il login o le interruzioni VPN: verifica la disponibilità e si sospende in caso di problemi. Questa parte andrà sviluppata e collaudata prima di poterlo "configurare e dimenticare".
 
-- I test GitHub Actions confermano compilazione, logica della coda, simulazioni del motore rclone e test nativi FSEvents. Non verificano autenticazione reale, Keychain sbloccato su un Mac di test o copie reali sulla VPN.
-- Manca collaudo su SMB reale, prestazioni e semantica della rinomina verso Windows Server 2016; la pubblicazione atomica non è garantita fino al test.
-- Manca pulizia controllata dei file temporanei, bootstrap sicuro senza ricopiare i file già seminati sul server, gestione delle cancellazioni/rinomine remote e protezioni contro cancellazioni di massa.
-- Manca avvio automatico al login, distribuzione di rclone insieme all'app, notifiche degli errori, interfaccia separata delle impostazioni, notarizzazione Apple e collaudo di lungo periodo.
-- Il passaggio a funzionamento completamente autonomo sarà consentito solo dopo test end-to-end su macOS Sequoia e VPN.
+## Test, limiti e sicurezza
 
-Per gli sviluppatori e Codex: leggere AGENTS.md e docs/ARCHITECTURE.md. Tutto il codice è destinato all'uso commerciale gratuito; non caricare foto, credenziali, indirizzi VPN, log o database reali nel repository.
+GitHub Actions macOS 15 esegue swift test, swift build -c release e prepara un pacchetto sperimentale .app, firmato ad hoc e non notarizzato. I test usano cartelle locali sintetiche; **non verificano la VPN di test, una condivisione SMB effettiva né le prestazioni con 100 GB**.
+
+Prima della versione di produzione servono:
+- login item e verifica della riconnessione/riapertura condivisione SMB tramite macOS;
+- robustezza su interruzioni, file grandi PSD, temporanei e backup di versioni;
+- bootstrap sicuro per file già copiati sul server (senza riconfronti integrali a ogni ciclo);
+- gestione delle cancellazioni e rinomine remote con protezioni anti-cancellazione di massa;
+- collaudo sul vero iMac/macOS Sequoia e Windows Server 2016.
+
+**MacSync sarà una replica, non un backup storico:** mantenere backup versionati indipendenti. Non caricare foto, password, dati VPN, log sensibili o database reali nel repository.
+
+Per proseguire con Codex leggere AGENTS.md e docs/ARCHITECTURE.md.
