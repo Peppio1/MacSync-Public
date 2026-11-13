@@ -1,60 +1,42 @@
-# AGENTS.md — MacSync instructions for Codex
+# AGENTS.md — MacSync
 
-## Objective
-Deliver a reliable, unattended one-way iMac to Windows Server 2016 SMB/VPN mirror. Maintain source in public GitHub repo Videomakercd/MacSync-Public.
+## Obiettivo
+App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell'iMac verso due cartelle di destinazione, locali (test sullo stesso Mac) o su condivisioni SMB già montate dal Finder. repository pubblico Videomakercd/MacSync-Public. Disponibile in uso commerciale senza componenti a pagamento, nessun servizio da installare sul server Windows 2016.
 
-## Non-negotiable rules
-1. No installation, agent or service on the Windows server. Only an existing SMB share.
-2. No paid license requirement for commercial use.
-3. One-way Mac -> server. Never mirror server changes into Mac.
-4. Deletions and renames must propagate, but **never interpret inaccessible source, disconnected volume or broken VPN as deletions**.
-5. Avoid recursively traversing the SMB destination every five minutes; use FSEvents, local SQLite inventory and persistent queue, with occasional audited full reconciliation.
-6. Avoid committing credentials, private paths, images, database contents, logs with secrets or test production data.
-7. Handle interrupted transfers, partial files and retries idempotently.
-8. When in doubt, skip destructive operations and report an explicit error. Require recovery validation before resuming.
-9. NEVER enable production remote deletion before thorough end-to-end tests and safe initial inventory reconciliation.
+## REQUISITI CONFERMATI (novembre 2026)
+- UI con configurazione per entrambe le coppie: Sorgente → Destinazione. Le due cartelle si scelgono con NSOpenPanel o drag & drop dal Finder. I nomi di riferimento sono Cartella_1 e Cartella_2 ma sono configurabili gli effettivi percorsi.
+- Destinazioni locali e SMB già montate; sfruttare le credenziali memorizzate nel sistema operativo. Niente form IP/utente/password/dominio, niente rclone o Keychain proprietario per il trasferimento.
+- SQLite locale per inventario, coda persistente, attività e log esportabili. FSEvents per rilevare modifiche, con scansioni locali mirate e audit periodici.
+- Copie ogni circa 5 minuti quando abilitate; non enumerare ricorsivamente la destinazione a ogni ciclo.
+- Obiettivo finale: installo/configuro/dimentico, avvio automatico al login, recupero VPN e verifica monte SMB, mirror di cancellazioni e rinomine.
+- Gli altri utenti hanno accesso in lettura alla copia server; permessi gestiti da Windows. L'iMac è fonte di verità.
 
-## Planned components
-- SwiftUI menu bar GUI and settings.
-- FSEvents watcher storing event IDs; dropped-event handling; local recovery scanning.
-- SQLite WAL inventory, event journal, queues with transactionality and retry states.
-- Selective rclone SMB file transfers and remote delete commands only for validated tracked paths.
-- Source stability checks before copying Photoshop/large files; temporary target then final commit where possible.
-- Network availability checks, Keychain secrets, login-item registration, 5-minute worker and actionable error notifications.
-- Mass-delete circuit breaker, dry-run mode, bootstrap non-destructive alignment.
+## Regole di sicurezza obbligatorie
+1. MAI replicare una cancellazione per fonte assente, volume SMB smontato, errori, timeout o percorso errato.
+2. In v0.5 **NESSUNA cancellazione speculare remota**, persino se evento delete è in SQLite. Solo copie di prova, esplicitamente abilitate per la sessione.
+3. Validare che nessuna sorgente/destinazione si sovrapponga, anche tra coppie, e che il volume destinazione risponda alla fingerprint di selezione (filesystem + mount point).
+4. Trasferimenti per file singolo, via staging nella destinazione stessa. Verificare sorgente stabile prima della pubblicazione. Sovrascritture in fase test devono avere backup non cancellato.
+5. Non loggare password, IP/host di server, percorsi assoluti, variabili d'ambiente con credenziali. Registro SQLite contiene percorso relativo del file e metadati: avvisare prima dell'esportazione.
+6. Versioni di codice e test sempre sul repository; GitHub Actions macOS 15 deve passare PR/commit. Nessun test GitHub sostituisce il collaudo SMB reale con iMac vero.
+7. **Non dichiarare pronto per i 100 GB** finché bootstrap, cleanup staging, password Finder/VPN, macOS login, SMB rename e resilienza non sono collaudati.
+8. In assenza di certezze sull'API Foundation o sul comportamento di SMB, interrompere l'azione distruttiva e loggare l'errore senza peggiorare lo stato.
 
-## User defaults
-Names (not absolute paths): Cartella_1, Cartella_2; SMB parent Condivisione_SMB. Exact paths and credentials must be configured locally.
+## Architettura v0.5
+- Sources/MacSync/MacSyncApp.swift: menu bar SwiftUI, due coppie di cartelle, browse e drop, monitor e log viewer.
+- Sources/MacSync/MountedCopyController.swift: worker di test in background, intervallo 5 minuti, registro, anteprima iniziale read-only.
+- Sources/MacSyncCore/LocalMonitorService.swift + FSEventsWatcher.swift: watcher nativo e recupero.
+- Sources/MacSyncCore/LocalInventory.swift + ChangeJournal.swift: inventario e coda SQLite.
+- Sources/MacSyncCore/MountedFolderCopy.swift: FileManager copia locale/macOS SMB già montato, fingerprint volume e staging.
+- Sources/MacSyncCore/SyncActivityLog.swift: storico persistente, operazione, byte, secondi ed esportazione TSV.
+- Sources/MacSyncCore/BootstrapPreview.swift + MountedBootstrapPreview.swift: confronto una tantum per archivi pre-esistenti senza modifiche.
 
-## Stato verificato (13 novembre 2026)
-- Implementati: watcher FSEvents, scansione locale ricorsiva e mirata, inventario SQLite, coda differenze, gestione cancellazioni solo come eventi locali, recupero dopo eventi persi o errori, interfaccia menu bar.
-- GitHub Actions macOS 15: compilazione e test di integrazione FSEvents superati.
-- NON implementati: rclone SMB, copia/cancellazioni remote, Keychain, avvio automatico al login, collaudo VPN di test.
-- Prossima priorità: issue #2 (motore SMB selettivo), senza abilitare cancellazioni remote fino ai test di sicurezza issue #3.
-
-## Progress, v0.3.0 (13 November 2026)
-- DONE: local FSEvents watcher, targeted SQLite reconciliation and durable event queue.
-- DONE (experimental, opt-in): selective rclone copyto for a single regular file; mkdir for a single tracked directory; local source stability checks, strict path validation, retry and queue acknowledgement only after success; UI session-only copy toggle.
-- NEVER performed by the upload worker: remote delete, purge, sync, moveto. Local delete events remain queued, untouched.
-- CI macOS unit tests exercise a fake rclone executor; real SMB/VPN and credentials are NOT tested.
-- Next: test rclone against synthetic remote; safe initial bootstrap, staging for partial file writes, robust retry, macOS Keychain, login item; then separately gate deletion policy.
-- Do not declare Issue #2 production complete before real SMB test and atomic transfer safeguards.
-
-## Stato v0.4.0 — 13 novembre 2026
-- Implementati e testati in CI: monitor FSEvents, inventario SQLite, coda persistente, worker selettivo SMB con copia temporanea e successivo moveto, password macOS Keychain e profilo SMB generato in variabili d'ambiente anziché rclone.conf.
-- ANTEPRIMA INIZIALE: sola lettura sulle cartelle REALI del server usando rclone lsjson; classifica metadati presuntamente coincidenti, file da rivedere, file solo server, conflitti di maiuscole/minuscole. Non marca file come sincronizzati e NON cancella nulla.
-- SCRITTURA TEST: consentita SOLTANTO nelle sottocartelle MacSync_TEST_ONLY di una condivisione; mai nelle cartelle di produzione in questa versione. Richiede attivazione esplicita per sessione.
-- Non implementati: recupero/smaltimento sicuro di .macsync-staging orfani, import iniziale con riconciliazione senza ritrasferimento, propagazione cancellazioni e rinomine remote, avvio automatico, rclone incluso nel bundle.
-- Non dichiarare rilascio finale: prove end-to-end con Mac Sequoia e SMB Windows Server 2016 via VPN NON eseguite. GitHub Actions è test codice, non collaudo di rete.
-- PROSSIMO: test di integrazione con SMB reale e rinomina, pulizia sicura dello staging; bootstrap non distruttivo con conferma; solo poi politiche di cancellazione.
-
-## Development phases
-1. SwiftPM base, SQLite, models, safety tests, macOS CI.
-2. FSEvents, durable event ID, recovery after shutdown and missed events.
-3. Selective SMB copy with resumable retry, no remote full traverse each cycle.
-4. Rename/delete propagation with safety gates and non-destructive bootstrap.
-5. Keychain, native UI, login item, logs, notification and periodic audits.
-6. Real-world test with macOS Sequoia + Windows Server 2016 VPN and representative large archive.
+## Prossime fasi
+1. Confermare CI completo versione 0.5, testare drop e sostituzione file Mac localmente.
+2. Rendere trasparente e sicura la sostituzione di file grossi, metadati, e cleanup degli staging/backups; test di interruzione e retry.
+3. Bootstrap guidato dei 100 GB già presenti (differenze per dimensione/data solo presunte; verifica robusta prima di marcare come sincronizzati).
+4. Auto-login e riconnessione mount Finder dopo VPN, sospensione e riavvio; notifiche e politiche log rotation.
+5. Cancellazioni/rinomine remote rigorosamente protette da baseline, conferme e interruttori anti-mass-delete.
+6. Collaudo reale su macOS Sequoia + Windows Server 2016/VPN (test iniziali locali e su sottocartelle sintetiche).
 
 ## Definition of done
-Build success on GitHub macOS runners is NOT production validation. Test initial sync and steady state, VPN loss, source unavailable, sleep/restart, delete batches, active PSD files, and interrupted transfers before release.
+Sincronizzazione automatica per molte settimane con ripresa da errori VPN, nessuna perdita di dati, nessun software aggiuntivo sul server, performance misurate e manuale essenziale. V0.5 è solo prototipo, non produzione.
