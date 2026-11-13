@@ -237,6 +237,7 @@ public final class MirrorDeletionWorker {
     private let baselines: [String: MirrorRootIdentity]
     private let armedAt: Date
     private let cancellation: MirrorDeletionCancellation
+    private var appliedDuringSession = 0
 
     public init(
         journal: ChangeJournal, manifest: RecoveryManifest, log: SyncActivityLog,
@@ -295,9 +296,13 @@ public final class MirrorDeletionWorker {
         // Check mass-delete thresholds for ALL candidate jobs, not only the
         // batch size, to prevent evading the gate by paging.
         let baselineCount = baselines.values.reduce(0) { $0 + $1.baselineCount }
+        // Include deletions completed in earlier five-minute cycles of THIS
+        // session. Otherwise repeated small batches could evade the limit.
+        let cumulative = total > Int.max - appliedDuringSession
+            ? Int.max : total + appliedDuringSession
         let decision = DeletionSafety.evaluate(
             sourceAvailable: true, serverAvailable: true, baselineVerified: true,
-            trackedFileCount: baselineCount, pendingDeleteCount: total
+            trackedFileCount: baselineCount, pendingDeleteCount: cumulative
         )
         guard decision.allowed else {
             result.blocked = true
@@ -344,7 +349,10 @@ public final class MirrorDeletionWorker {
                 guard let target = try Self.statIfPresent(destination) else {
                     if try journal.acknowledgeDeletion(
                         id: job.id, rootID: job.rootID, relativePath: job.relativePath
-                    ) { result.missing += 1 }
+                    ) {
+                        result.missing += 1
+                        appliedDuringSession += 1
+                    }
                     continue
                 }
                 try verifyRoots(mapping, baseline)
@@ -382,6 +390,7 @@ public final class MirrorDeletionWorker {
                 } else {
                     throw MirrorDeletionFailure.unsupportedObject
                 }
+                appliedDuringSession += 1
                 _ = try journal.acknowledgeDeletion(
                     id: job.id, rootID: job.rootID, relativePath: job.relativePath
                 )
