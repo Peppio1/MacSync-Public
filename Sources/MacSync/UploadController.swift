@@ -16,6 +16,7 @@ final class ExperimentalUploadController: ObservableObject {
     ) ?? "/opt/homebrew/bin/rclone"
     @Published var status = "Copie disattivate. Credenziali nel Portachiavi macOS."
     @Published var active = false
+    @Published var baselineStatus = "Anteprima iniziale non eseguita"
 
     private let secretStore = SMBSecretStore()
     private let backgroundQueue = DispatchQueue(
@@ -151,6 +152,83 @@ final class ExperimentalUploadController: ObservableObject {
         } catch {
             active = false
             status = "Copie disattivate: " + error.localizedDescription
+        }
+    }
+
+    /// Explicit one-off preview. Does not acknowledge queued work or modify
+    /// the server. It is intentionally NOT scheduled every five minutes.
+    func inspectInitialBaseline(photoUploads: String, photoEditing: String) {
+        guard !active else {
+            baselineStatus = "Ferma prima le copie di prova"
+            return
+        }
+        guard save() else { return }
+        do {
+            let profile = try SMBSecureProfile(
+                host: host, username: username, domain: domain, share: share
+            )
+            let binary = URL(fileURLWithPath: rcloneExecutable)
+            guard let secret = try secretStore.load() else {
+                throw KeychainSecretError.invalidSecret
+            }
+            let obscured = try RclonePasswordObscurer.obscure(
+                password: secret, executable: binary
+            )
+            let environment = try profile.environment(obscuredPassword: obscured)
+            var roots: [(URL, String)] = []
+            if !photoUploads.isEmpty {
+                roots.append((
+                    URL(fileURLWithPath: photoUploads),
+                    profile.remoteParent + "/Cartella_1"
+                ))
+            }
+            if !photoEditing.isEmpty {
+                roots.append((
+                    URL(fileURLWithPath: photoEditing),
+                    profile.remoteParent + "/Cartella_2"
+                ))
+            }
+            guard !roots.isEmpty else {
+                throw UploadError.invalidMapping("Seleziona una cartella locale di prova")
+            }
+            baselineStatus = "Controllo iniziale in sola lettura…"
+            backgroundQueue.async { [weak self] in
+                do {
+                    var candidates = 0
+                    var discrepancies = 0
+                    var remoteOnly = 0
+                    var collisions = 0
+                    var remnants = 0
+                    for (root, remote) in roots {
+                        let preview = try ReadOnlySMBPreview.inspect(
+                            localRoot: root,
+                            remoteRoot: remote,
+                            rcloneExecutable: binary,
+                            environment: environment
+                        )
+                        candidates += preview.candidateMatches
+                        discrepancies += preview.requiresCopyOrReview.count
+                        remoteOnly += preview.remoteOnlyPaths.count
+                        collisions += preview.macOSCaseCollisions.count
+                        remnants += preview.stagingFiles
+                    }
+                    let summary =
+                        "Anteprima senza modifiche: \(candidates) corrispondenze " +
+                        "PRESUNTE da metadati, \(discrepancies) file da rivedere, " +
+                        "\(remoteOnly) solo sul server, \(collisions) conflitti di nome, " +
+                        "\(remnants) residui temporanei. Nessun dato cancellato."
+                    DispatchQueue.main.async { [weak self] in
+                        self?.baselineStatus = summary
+                    }
+                } catch {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.baselineStatus = "Controllo iniziale fallito: "
+                            + error.localizedDescription
+                    }
+                }
+            }
+        } catch {
+            baselineStatus = "Impossibile avviare l'anteprima: " + error.localizedDescription
         }
     }
 
