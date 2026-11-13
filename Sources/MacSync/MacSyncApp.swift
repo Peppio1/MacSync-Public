@@ -101,6 +101,11 @@ final class MacSyncViewModel: ObservableObject {
             guard values.isDirectory == true else {
                 throw MountedCopyError.rootUnavailable
             }
+            // FSEvents is intended for sources on the Mac itself; monitoring
+            // an SMB source would not provide the same reliable event stream.
+            if !destination && (try VolumeFingerprint.read(at: resolved)).isNetworkVolume {
+                throw MountedCopyError.invalidMapping
+            }
             let old = folderPath(slot: slot, destination: destination)
             if old == resolved.path { return }
 
