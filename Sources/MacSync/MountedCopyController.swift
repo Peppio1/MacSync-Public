@@ -8,6 +8,12 @@ import MacSyncCore
 final class MountedCopyController: ObservableObject {
     @Published var status = "Copie ferme: puoi selezionare cartelle locali o SMB già montate."
     @Published var active = false
+    @Published var automaticCopiesEnabled = UserDefaults.standard.bool(forKey: "MacSync.autoCopiesEnabled") {
+        didSet {
+            UserDefaults.standard.set(automaticCopiesEnabled, forKey: "MacSync.autoCopiesEnabled")
+        }
+    }
+    @Published private(set) var automaticSession = false
 
     // Preferences describe the desired policy only. Actual destructive work
     // remains OFF until explicit activation of the current test session.
@@ -110,7 +116,58 @@ final class MountedCopyController: ObservableObject {
             status = "Copie non attivate"
             return
         }
+        beginSession(sources: sources, policy: policy, automatic: false)
+    }
 
+    /// Explicit persistent opt-in: future app launches may copy or update,
+    /// but they must NEVER mirror DELETE jobs without separate confirmation.
+    func setAutomaticCopiesEnabled(_ enabled: Bool) {
+        if enabled {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Abilitare le copie automatiche dopo il login?"
+            alert.informativeText = """
+            Se abilitate, MacSync potrà CREARE e SOVRASCRIVERE file
+            automaticamente nella destinazione già configurata, senza
+            nuove conferme a ogni login. Solo copie e aggiornamenti:
+            le cancellazioni speculari NON saranno automatiche.
+
+            FUNZIONE SPERIMENTALE: usa esclusivamente cartelle con
+            dati di prova, non l'archivio di produzione originale.
+            """
+            alert.addButton(withTitle: "Abilita copie automatiche di prova")
+            alert.addButton(withTitle: "Annulla")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        automaticCopiesEnabled = enabled
+        if !enabled && automaticSession { stop() }
+    }
+
+    /// Called solely by the app-level coordinator after a user has previously
+    /// approved unattended COPY/UPDATE operations. No remote DELETE worker
+    /// is instantiated, regardless of the persisted mirror preference.
+    func startAutomaticSafeCopies(
+        sources: [(id: String, path: String, destination: String, expected: VolumeFingerprint?)]
+    ) {
+        guard automaticCopiesEnabled, !active, !maintaining, !seedBusy else { return }
+        let policy: MirrorDeletionPolicy
+        do {
+            policy = try MirrorDeletionPolicy(
+                enabled: false, recoveryEnabled: false, retentionDays: nil
+            )
+        } catch {
+            status = "Copie automatiche sospese: politica non valida"
+            return
+        }
+        beginSession(sources: sources, policy: policy, automatic: true)
+    }
+
+    private func beginSession(
+        sources: [(id: String, path: String, destination: String, expected: VolumeFingerprint?)],
+        policy: MirrorDeletionPolicy,
+        automatic: Bool
+    ) {
+        guard !active && !seedBusy && !maintaining else { return }
         do {
             let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
             guard !configured.isEmpty,
@@ -236,10 +293,13 @@ final class MountedCopyController: ObservableObject {
             lastCycleAt = nil
             completedCycles = 0
             active = true
+            automaticSession = automatic
             mirrorStatus = policy.enabled
                 ? "Configurazione armata: la verifica delle sorgenti avverrà al primo ciclo"
                 : "Cancellazioni speculari disattivate"
-            status = "Copie di prova attive; controllo ogni cinque minuti"
+            status = automatic
+                ? "Copie automatiche di prova attive (solo aggiunte e aggiornamenti)"
+                : "Copie di prova attive; controllo ogni cinque minuti"
             refresh()
             timer.resume()
         } catch {
@@ -653,6 +713,7 @@ final class MountedCopyController: ObservableObject {
     }
 
     func stop() {
+        automaticSession = false
         mirrorCancellation?.cancel()
         mirrorCancellation = nil
         timer?.cancel()
