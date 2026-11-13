@@ -30,8 +30,15 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 - Sources/MacSyncCore/SyncActivityLog.swift: storico persistente, operazione, byte, secondi ed esportazione TSV.
 - Sources/MacSyncCore/BootstrapPreview.swift + MountedBootstrapPreview.swift: confronto una tantum per archivi pre-esistenti senza modifiche.
 
+## Stato v0.6.0 — hardening motore di copia
+- Aggiunto preflight di capacità tramite statfs: stima la dimensione del nuovo staging, del backup dell'eventuale vecchio file e 16 MiB di riserva. Se la capacità dichiarata è insufficiente, lascia l'upsert in coda e segnala errore recuperabile. Alcune share SMB possono non riportare la capacità.
+- Aggiunto controllo del file di staging (tipo regolare e dimensione) prima della sostituzione; test automatici su cartelle Mac locali. Mancano verifica crittografica hash e garanzia di pubblicazione atomica su SMB Windows Server.
+- Aggiunta StagingMaintenance: ispezione non ricorsiva dei soli file UUID.partial oltre sette giorni in .macsync-staging, pulizia ESCLUSIVAMENTE dopo conferma e ripetizione dei controlli di volume/inode/data/dimensione. Mai eseguita dal timer, mai rimuovere foto o .macsync-backup.
+- Registro SQLite: filtri per livello e testo, export TSV filtrato, retention di 20.000 righe o 90 giorni; non registrare segreti/percorsi assoluti, controllare nomi file sensibili.
+- Lo scaricamento/copia di un file grande interrotto riparte dall'inizio. Continuare a vietare cancellazioni speculari e funzionamento unattended in questa fase; usare soltanto cartelle di prova.
+
 ## Prossime fasi
-1. Confermare CI completo versione 0.5, testare drop e sostituzione file Mac localmente.
+1. Confermare CI completo versione 0.6, testare drop e sostituzione file Mac localmente.
 2. Rendere trasparente e sicura la sostituzione di file grossi, metadati, e cleanup degli staging/backups; test di interruzione e retry.
 3. Bootstrap guidato dei 100 GB già presenti (differenze per dimensione/data solo presunte; verifica robusta prima di marcare come sincronizzati).
 4. Auto-login e riconnessione mount Finder dopo VPN, sospensione e riavvio; notifiche e politiche log rotation.
@@ -39,4 +46,4 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 6. Collaudo reale su macOS Sequoia + Windows Server 2016/VPN (test iniziali locali e su sottocartelle sintetiche).
 
 ## Definition of done
-Sincronizzazione automatica per molte settimane con ripresa da errori VPN, nessuna perdita di dati, nessun software aggiuntivo sul server, performance misurate e manuale essenziale. V0.5 è solo prototipo, non produzione.
+Sincronizzazione automatica per molte settimane con ripresa da errori VPN, nessuna perdita di dati, nessun software aggiuntivo sul server, performance misurate e manuale essenziale. V0.6 è solo prototipo, non produzione.
