@@ -187,6 +187,13 @@ public final class LocalInventory {
         }
     }
 
+    public func pendingCount() throws -> Int {
+        let statement = try prepare("SELECT COUNT(*) FROM change_queue WHERE completed=0;")
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { throw failure() }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
     public func itemCount(rootID: String) throws -> Int {
         let statement = try prepare("SELECT COUNT(*) FROM file_inventory WHERE root_id = ?;")
         defer { sqlite3_finalize(statement) }
