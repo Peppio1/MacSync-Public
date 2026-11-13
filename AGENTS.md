@@ -22,7 +22,7 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 8. In assenza di certezze sull'API Foundation o sul comportamento di SMB, interrompere l'azione distruttiva e loggare l'errore senza peggiorare lo stato.
 
 ## Architettura v0.5
-- Sources/MacSync/MacSyncApp.swift: menu bar SwiftUI, due coppie di cartelle, browse e drop, monitor e log viewer.
+- Sources/MacSync/MacSyncApp.swift: finestra persistente SwiftUI per la configurazione drag&drop delle due coppie, icona menu bar per aprirla, monitor e log viewer.
 - Sources/MacSync/MountedCopyController.swift: worker di test in background, intervallo 5 minuti, registro, anteprima iniziale read-only.
 - Sources/MacSyncCore/LocalMonitorService.swift + FSEventsWatcher.swift: watcher nativo e recupero.
 - Sources/MacSyncCore/LocalInventory.swift + ChangeJournal.swift: inventario e coda SQLite.
