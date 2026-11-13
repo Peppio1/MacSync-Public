@@ -128,6 +128,19 @@ final class MountedFolderCopyTests: XCTestCase {
         XCTAssertEqual(outcome.deferred, 1)
         XCTAssertEqual(try journal.pending().count, 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.target.path))
+        // Simulate the SAME destination becoming available again. A failed
+        // attempt must not discard the job or invent a fallback folder.
+        try FileManager.default.createDirectory(
+            at: fixture.target, withIntermediateDirectories: true
+        )
+        let resumed = try worker.runOnce(enabled: true)
+        XCTAssertEqual(resumed.created, 1)
+        XCTAssertEqual(resumed.failed, 0)
+        XCTAssertTrue(try journal.pending().isEmpty)
+        XCTAssertEqual(
+            try String(contentsOf: fixture.target.appendingPathComponent("file.psd"),
+                       encoding: .utf8), "important"
+        )
     }
 
     func testUnsafeRelativePathsAreRejected() throws {
