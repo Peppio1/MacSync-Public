@@ -124,9 +124,11 @@ final class MacSyncViewModel: ObservableObject {
             }
             // Two destinations must not overlap; two sources must not overlap.
             for group in [newSources, newTargets] where group.count > 1 {
-                for a in group {
-                    for b in group where a != b {
-                        if a.hasPrefix(b + "/") || b.hasPrefix(a + "/") {
+                for i in 0..<group.count {
+                    for j in (i + 1)..<group.count {
+                        let a = group[i]
+                        let b = group[j]
+                        if a == b || a.hasPrefix(b + "/") || b.hasPrefix(a + "/") {
                             throw MountedCopyError.invalidMapping
                         }
                     }
