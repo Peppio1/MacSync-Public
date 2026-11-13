@@ -106,6 +106,7 @@ public final class SeededArchiveVerifier {
         var differences = 0
         var deferred = 0
         var bytesRead: Int64 = 0
+        var lastByteProgress: Int64 = 0
 
         while true {
             if cancellation.isCancelled { throw SeedVerificationError.cancelled }
@@ -120,16 +121,23 @@ public final class SeededArchiveVerifier {
                     continue
                 }
                 do {
-                    let verified = try verifyOne(job, mapping: mapping, cancellation: cancellation)
-                    if let verified {
-                        matches.append(verified)
-                        // Both source and destination are read in full.
-                        let (twice, doubledOverflow) = verified.verifiedBytes.multipliedReportingOverflow(by: 2)
-                        let (newBytes, sumOverflow) = bytesRead.addingReportingOverflow(twice)
-                        bytesRead = doubledOverflow || sumOverflow ? Int64.max : newBytes
-                    } else {
-                        differences += 1
-                    }
+                    let verified = try verifyOne(
+                        job, mapping: mapping, cancellation: cancellation,
+                        onBytesRead: { chunkSize in
+                            let (sum, overflow) = bytesRead.addingReportingOverflow(chunkSize)
+                            bytesRead = overflow ? Int64.max : sum
+                            if bytesRead - lastByteProgress >= 64 * 1024 * 1024 {
+                                lastByteProgress = bytesRead
+                                progress?(SeedVerificationProgress(
+                                    inspected: inspected, verified: matches.count,
+                                    missingOrDifferent: differences, deferred: deferred,
+                                    bytesRead: bytesRead
+                                ))
+                            }
+                        }
+                    )
+                    if let verified { matches.append(verified) }
+                    else { differences += 1 }
                 } catch SeedVerificationError.cancelled {
                     throw SeedVerificationError.cancelled
                 } catch {
@@ -199,7 +207,8 @@ public final class SeededArchiveVerifier {
 
     private func verifyOne(
         _ job: QueuedChange, mapping: MountedFolderMapping,
-        cancellation: SeedVerificationCancellation
+        cancellation: SeedVerificationCancellation,
+        onBytesRead: (Int64) -> Void
     ) throws -> SeedVerifiedMatch? {
         try mapping.verify()
         let src = try safePath(job.relativePath, mapping: mapping, destination: false)
@@ -209,8 +218,12 @@ public final class SeededArchiveVerifier {
         // A size match is a cheap prefilter only; it is NEVER evidence of
         // equality until SHA-256 of BOTH complete files agrees.
         guard beforeSource.size == beforeTarget.size else { return nil }
-        let sourceDigest = try Self.sha256(src, cancellation: cancellation)
-        let targetDigest = try Self.sha256(dst, cancellation: cancellation)
+        let sourceDigest = try Self.sha256(
+            src, cancellation: cancellation, onBytesRead: onBytesRead
+        )
+        let targetDigest = try Self.sha256(
+            dst, cancellation: cancellation, onBytesRead: onBytesRead
+        )
         guard try Self.fingerprint(src) == beforeSource,
               try Self.fingerprint(dst) == beforeTarget else {
             throw SeedVerificationError.changedDuringRead
@@ -266,7 +279,8 @@ public final class SeededArchiveVerifier {
 
     private static func sha256(
         _ file: URL,
-        cancellation: SeedVerificationCancellation
+        cancellation: SeedVerificationCancellation,
+        onBytesRead: (Int64) -> Void
     ) throws -> Data {
         let reader = try FileHandle(forReadingFrom: file)
         defer { try? reader.close() }
@@ -277,6 +291,7 @@ public final class SeededArchiveVerifier {
                 break
             }
             hash.update(data: chunk)
+            onBytesRead(Int64(chunk.count))
         }
         return Data(hash.finalize())
     }
