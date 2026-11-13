@@ -1,4 +1,4 @@
-# MacSync — Architettura v0.8 (prototipo)
+# MacSync — Architettura v0.8.1 (prototipo)
 
 ## Flusso
 Cartella Sorgente macOS → FSEvents → inventario e coda SQLite → worker seriale → cartella Destinazione (locale oppure SMB già montata dal Finder). Nessun componente sul server Windows 2016; macOS gestisce il login SMB esistente.
@@ -9,7 +9,7 @@ L'app permette due coppie separate di cartelle: Cartella_1 e Cartella_2. Una fin
 - Alla partenza: scansione locale della sorgente, recupero modifiche durante lo spegnimento, FSEvents dal cursore impostato prima dell'inventario iniziale.
 - Durante l'attività: scansioni mirate a file o sottoalberi; query SQLite indicizzate. Nessuna scansione ricorsiva SMB ad ogni 5 minuti.
 - Eventi persi, root non disponibile ed errori: interrompere i processi potenzialmente distruttivi, ritentare con scansione locale programmata.
-- ChangeJournal ha righe upsert e delete, ma solo upsert sono consumati dal worker di copia. Nessun worker di cancellazione è disponibile.
+- ChangeJournal contiene job upsert e delete: MountedFolderCopyWorker tratta gli upsert; MirrorDeletionWorker tratta i delete solamente dopo un'autorizzazione esplicita per la sessione, controlli root/volume e limiti anti-mass-delete.
 - Cambio sorgente: dopo avviso esplicito, reset del solo inventario locale relativo, senza cancellare alcun file; cambio destinazione: riprepara gli upsert dei file sorgente tracciati.
 - SQLite WAL in ~/Library/Application Support/MacSync/inventory.sqlite.
 
@@ -50,13 +50,20 @@ Se il recupero è abilitato, invece di unlink il file target viene spostato all'
 ### Limiti da testare
 Transazioni SQLite e filesystem non formano una transazione distribuita: un crash dopo move/unlink può lasciare il job pendente, ma non determina una seconda cancellazione arbitraria. Il recupero resta nascosto dentro target, non esiste ancora un restore guidato e può consumare spazio. I test CI coprono cartelle locali; per cancellazioni reali, ACL Windows, VPN instabile e semantica SMB sono indispensabili test su share di prova. Rinominare/spostare oggi comporta copia del nuovo file e successiva cancellazione vecchio, non moveto nativo.
 
+## v0.8.1 — scanner locale corretto e dashboard
+- Il bug riscontrato in CI era causato da DirectoryEnumerator.skipDescendants invocato dopo un file regolare: in certi ordini di enumerazione ometteva i file figli della directory successiva. Il LocalScanner ora applica skipDescendants solo ai collegamenti simbolici. Regression test: file al primo livello, sottocartella multilivello, cancellazione completa della subtree.
+- MountedFolderCopyWorker distingue in modo deterministico file nuovi da file sovrascritti, oltre alle directory. Mantiene il contatore storico copied per compatibilità dei test, ma fornisce created/updated/directoriesCreated.
+- SyncDashboardStats costruisce statistiche di ciclo da MountedCopySummary e MirrorDeletionSummary, più gli elementi scaduti. La vista SwiftUI presenta una striscia di KPI e un dettaglio con selector ultimo ciclo/sessione. I dati sono relativi agli esiti effettivi e non inferiti dai pending job.
+- I conteggi sessione sono in memoria e ripartono all'attivazione; il log SQLite resta la fonte durevole per la diagnostica e l'export. Test dedicati verificano mapping e aggregazione dei contatori.
+- Nuovi test MirrorDeletion verificano stop con DELETE pendente, restart senza replay e preservazione di directory server non vuote.
+
 ## Rischi non ancora risolti
 - Automatic login SMB e rimontaggio Finder dopo cambio VPN/sospensione/riavvio.
 - Foundation.replaceItemAt e atomicità su Windows SMB: test con vere grandi foto richiesti.
 - La verifica SHA-256 dei file già caricati evita la ricopia ma legge comunque tutto il loro contenuto su SMB; valutare il primo seed USB con manifest hash e prove reali di banda.
 - Pulizia temporanei vecchi disponibile su approvazione; verifica backup/versionamento e quota spazio server ancora necessari.
 - FSEvents e file in scrittura/rename/permessi: necessita collaudo prolungato.
-- Eventuali cancellazioni speculari in futuro richiedono policy fail-closed rigorosa e snapshot/verifiche dei percorsi.
+- Le cancellazioni speculari sperimentali richiedono test reali su SMB/VPN, soprattutto sui permessi, sul ripristino dopo crash e sulle rinomine di grandi directory.
 - Test GitHub Actions macOS 15 non provano la VPN o i volumi reali.
 
 ## Privacy
