@@ -399,6 +399,10 @@ private struct MacSyncConfigurationView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    Button("Apri cartella di recupero nel Finder") {
+                        copy.revealRecoveryFolders(sources: model.configuredPairs())
+                    }
+                    .font(.caption)
                 }
                 Divider()
                 HStack(alignment: .center, spacing: 12) {
