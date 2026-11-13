@@ -161,7 +161,7 @@ public final class LocalMonitorService {
                     }
                 }
                 // This is a LOCAL periodic audit, not a recurring SMB scan.
-                if self.recoveryRequired || self.lastFullScan.map({ Date().timeIntervalSince($0) >= 86_400 }) ?? true {
+                if self.recoveryRequired || (self.lastFullScan.map({ Date().timeIntervalSince($0) >= 86_400 }) ?? true) {
                     for root in self.roots {
                         _ = try store.reconcile(rootID: root.id, root: root.url)
                     }
