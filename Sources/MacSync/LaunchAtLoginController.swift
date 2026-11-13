@@ -44,6 +44,7 @@ final class LaunchAtLoginController: ObservableObject {
         case .notFound:
             enabled = false
             requiresApproval = false
+            isAvailable = false
             statusMessage = "App non registrabile da questa posizione; spostala in Applicazioni"
         @unknown default:
             enabled = false
