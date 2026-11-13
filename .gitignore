@@ -1,0 +1,25 @@
+# Swift / Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserdata/
+*.xcuserstate
+.DS_Store
+dist/
+# Private local state
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+*.log
+.env
+.env.*
+!*.env.example
+local-config/
+credentials/
+secrets/
+# artifacts
+*.app/
+*.dmg
+*.zip
