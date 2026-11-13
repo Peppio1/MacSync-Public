@@ -270,7 +270,7 @@ final class MirrorDeletionTests: XCTestCase {
         try Data("image".utf8).write(to: dstDir.appendingPathComponent("a.jpg"))
         let sourceScan = try LocalScanner.scan(root: f.source)
         XCTAssertTrue(sourceScan.contains(where: { $0.relativePath == "album/a.jpg" }),
-            "Scanner missed nested image: \(sourceScan.map(\\.relativePath))")
+            "Scanner missed nested image: \(sourceScan.map { $0.relativePath })")
         let inventory = try LocalInventory(path: f.database)
         _ = try inventory.reconcile(rootID: "photos", root: f.source)
         XCTAssertEqual(try inventory.itemCount(rootID: "photos"), 4, "Nested source inventory incomplete")
@@ -278,7 +278,7 @@ final class MirrorDeletionTests: XCTestCase {
         try FileManager.default.removeItem(at: srcDir)
         try LocalInventory(path: f.database).reconcile(rootID: "photos", root: f.source, subtree: srcDir)
         let pending = try f.journal.pending().filter { $0.kind == .delete }
-        XCTAssertEqual(pending.count, 2, "Expected child and parent DELETE entries; got \(pending.map(\\.relativePath))")
+        XCTAssertEqual(pending.count, 2, "Expected child and parent DELETE entries; got \(pending.map { $0.relativePath })")
         let summary = try mirror.runOnce()
         let warnings = try f.log.recent(limit: 20).map { $0.action + ": " + $0.message }.joined(separator: " | ")
         XCTAssertEqual(summary.removed, 1, "deferred=\(summary.deferred) blocked=\(summary.blocked) \(summary.detail) warnings=\(warnings)")
