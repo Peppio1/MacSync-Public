@@ -6,6 +6,15 @@ public struct SourceEvent: Sendable {
     public let flags: FSEventStreamEventFlags
     public let eventID: FSEventStreamEventId
 
+    /// These flags indicate global stream loss, so ALL watched roots must be
+    /// rescanned, not only the path carried by the individual event.
+    public var streamHistoryLost: Bool {
+        let lost = kFSEventStreamEventFlagUserDropped |
+            kFSEventStreamEventFlagKernelDropped |
+            kFSEventStreamEventFlagEventIdsWrapped
+        return flags & FSEventStreamEventFlags(lost) != 0
+    }
+
     public var requiresFullReconciliation: Bool {
         let unsafeFlags =
             kFSEventStreamEventFlagMustScanSubDirs |
