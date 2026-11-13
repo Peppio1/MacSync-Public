@@ -272,9 +272,12 @@ final class MirrorDeletionTests: XCTestCase {
         let mirror = try worker(f, recover: false)
         try FileManager.default.removeItem(at: srcDir)
         try LocalInventory(path: f.database).reconcile(rootID: "photos", root: f.source, subtree: srcDir)
+        let pending = try f.journal.pending().filter { $0.kind == .delete }
+        XCTAssertEqual(pending.count, 2, "Expected child and parent DELETE entries")
         let summary = try mirror.runOnce()
-        XCTAssertEqual(summary.removed, 1)
-        XCTAssertEqual(summary.directories, 1)
+        let warnings = try f.log.recent(limit: 20).map { $0.action + ": " + $0.message }.joined(separator: " | ")
+        XCTAssertEqual(summary.removed, 1, "deferred=\(summary.deferred) blocked=\(summary.blocked) \(summary.detail) warnings=\(warnings)")
+        XCTAssertEqual(summary.directories, 1, "deferred=\(summary.deferred) warnings=\(warnings)")
         XCTAssertFalse(FileManager.default.fileExists(atPath: dstDir.path))
     }
 }
