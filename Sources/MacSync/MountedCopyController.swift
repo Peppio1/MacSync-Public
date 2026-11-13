@@ -224,7 +224,9 @@ final class MountedCopyController: ObservableObject {
         for pair in sources where !pair.destination.isEmpty {
             let base = URL(fileURLWithPath: pair.destination)
                 .standardizedFileURL.resolvingSymlinksInPath()
-            guard (try? VolumeFingerprint.read(at: base)) == pair.expected,
+            guard let expected = pair.expected,
+                  let actual = try? VolumeFingerprint.read(at: base),
+                  actual == expected,
                   FileManager.default.fileExists(atPath: base.path) else { continue }
             let folder = base.appendingPathComponent(".macsync-recovery", isDirectory: true)
             var isDirectory: ObjCBool = false
