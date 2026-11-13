@@ -132,7 +132,7 @@ public struct UploadBatchResult: Equatable {
     public init() {}
 }
 
-/// Explicit opt-in and copy-only policy. No delete or move command exists.
+/// Explicit opt-in staging-and-publish policy. No source delete or mirror delete exists.
 /// Serialize this worker per DB. The database acknowledges a queue row ONLY
 /// after the rclone command returns success and the source snapshot is stable.
 public final class SelectiveSMBCopyWorker {
@@ -141,6 +141,7 @@ public final class SelectiveSMBCopyWorker {
     private let mappings: [String: SMBUploadMapping]
     private let minimumStableAge: TimeInterval
     private let now: () -> Date
+    private let uploadID: () -> String
     private var lastAttemptedID: Int64 = 0
 
     public init(
@@ -148,7 +149,8 @@ public final class SelectiveSMBCopyWorker {
         runner: RcloneCommandExecuting,
         mappings: [SMBUploadMapping],
         minimumStableAge: TimeInterval = 20,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        uploadID: @escaping () -> String = { UUID().uuidString }
     ) throws {
         guard !mappings.isEmpty,
               Dictionary(grouping: mappings, by: \.rootID).allSatisfy({ $0.value.count == 1 }) else {
@@ -159,6 +161,7 @@ public final class SelectiveSMBCopyWorker {
         self.mappings = Dictionary(uniqueKeysWithValues: mappings.map { ($0.rootID, $0) })
         self.minimumStableAge = max(0, minimumStableAge)
         self.now = now
+        self.uploadID = uploadID
     }
 
     /// This is an opt-in worker: callers must explicitly enable writes.
@@ -223,17 +226,46 @@ public final class SelectiveSMBCopyWorker {
             throw UploadError.sourceChanged
         }
 
+        // A uniquely named staging object prevents users from seeing a
+        // partially transferred file at the final destination. Stage remains
+        // on the SAME SMB share so the backend may perform a server-side rename.
+        // No deletion of stale staging objects is implemented in this preview.
+        let attemptID = uploadID()
+        guard !attemptID.isEmpty,
+              attemptID.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }),
+              attemptID.count <= 80 else {
+            throw UploadError.invalidMapping("Invalid staging identifier")
+        }
+        let staging = mapping.remoteRoot + "/.macsync-staging/" + attemptID + ".partial"
         try runner.run(
             arguments: [
-                "copyto", actual.path, destination,
+                "copyto", actual.path, staging,
                 "--retries", "1", "--low-level-retries", "1",
                 "--stats", "0", "--quiet"
             ],
             timeout: 7_200
         )
+
+        // A changed PSD must never be promoted to the final server pathname.
         guard try attributes(of: actual) == snapshot else {
-            // Queue stays pending for a safe retry when a source file changed
-            // mid-upload (e.g. an active PSD project).
+            throw UploadError.sourceChanged
+        }
+
+        // IMPORTANT: moveto can overwrite an existing destination.
+        // It MUST only be enabled for test destinations until the initial
+        // remote baseline and overwrite safeguards are verified.
+        try runner.run(
+            arguments: [
+                "moveto", staging, destination,
+                "--retries", "1", "--low-level-retries", "1",
+                "--quiet"
+            ],
+            timeout: 3_600
+        )
+
+        // If the source changed during publish, leave the job unacknowledged
+        // for a later new staging transfer.
+        guard try attributes(of: actual) == snapshot else {
             throw UploadError.sourceChanged
         }
     }
