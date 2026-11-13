@@ -1,4 +1,4 @@
-# MacSync — Architettura v0.6 (prototipo)
+# MacSync — Architettura v0.7 (prototipo)
 
 ## Flusso
 Cartella Sorgente macOS → FSEvents → inventario e coda SQLite → worker seriale → cartella Destinazione (locale oppure SMB già montata dal Finder). Nessun componente sul server Windows 2016; macOS gestisce il login SMB esistente.
@@ -33,10 +33,17 @@ MountedBootstrapPreview esegue una scansione completa delle due cartelle selezio
 - SyncActivityLog.recent supporta filtro esito e ricerca su file relativo/messaggi, export filtrato e prune del solo sync_activity (fino a 20.000 record o 90 giorni). Timer continua a lavorare ogni 5 minuti senza interrogazione ricorsiva SMB.
 - Limiti non risolti: mancanza di resume byte-per-byte, hash, spazio backup illimitato, atomicità effettiva SMB, test rete/permessi reali, montaggio automatico, bootstrap e cancellazioni speculari.
 
+## v0.7 — checksum forte dei file già seminati
+- `SeededArchiveVerifier` scorre con paginazione soltanto i job `upsert` pendenti in SQLite, senza lanciare un `rclone sync` né enumerare la destinazione completa ogni cinque minuti. Per il candidato con stessa dimensione, verifica percorsi e volume, quindi legge sorgente e destinazione in streaming a blocchi di 1 MiB, calcolando SHA-256 con CryptoKit. Dimensione e timestamp da soli non provano mai l'uguaglianza.
+- `SeedFileFingerprint` conserva dev/inode, size, mtime e ctime con precisione nanosecondi prima/dopo la lettura per accorgersi dei file cambiati. La GUI mostra progresso, byte letti e annullamento. Un file diverso o non disponibile resta in coda.
+- `approve` è una operazione SEPARATA, approvata esplicitamente: dopo verifica delle fingerprint, `ChangeJournal.acknowledgeVerifiedFiles` esegue una sola transazione SQL con UPDATE condizionale su id/root/path/kind upsert, metadati inventario e root associata. Job rimpiazzati da FSEvents, file cambiati o cambi di root non sono marcati; DELETE mai consumati. Nessun file viene scritto o eliminato alla destinazione da questa procedura.
+- La lettura SHA-256 del contenuto già presente su SMB CONSUMA comunque banda VPN, anche se evita la riscrittura. Potenziale lettura di 100 GB remoti per 100 GB già identici, oltre ai 100 GB locali. Il confronto su una cartella grande è un'operazione manuale una tantum.
+- Condizione di test: GitHub Actions macOS su cartelle locali; servono prove reali di latenza/performance SMB su server Windows 2016 e iMac Sequoia prima dell'attivazione nell'archivio di produzione.
+
 ## Rischi non ancora risolti
 - Automatic login SMB e rimontaggio Finder dopo cambio VPN/sospensione/riavvio.
 - Foundation.replaceItemAt e atomicità su Windows SMB: test con vere grandi foto richiesti.
-- Inventario iniziale dei file già caricati sul server, evitando ricopia molto lenta.
+- La verifica SHA-256 dei file già caricati evita la ricopia ma legge comunque tutto il loro contenuto su SMB; valutare il primo seed USB con manifest hash e prove reali di banda.
 - Pulizia temporanei vecchi disponibile su approvazione; verifica backup/versionamento e quota spazio server ancora necessari.
 - FSEvents e file in scrittura/rename/permessi: necessita collaudo prolungato.
 - Eventuali cancellazioni speculari in futuro richiedono policy fail-closed rigorosa e snapshot/verifiche dei percorsi.
