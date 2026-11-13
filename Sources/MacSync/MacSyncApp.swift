@@ -396,7 +396,7 @@ private struct MacSyncConfigurationView: View {
             path: model.folderPath(slot: slot, destination: destination),
             choose: {
                 guard !copy.seedBusy else { return }
-                copy.stop()
+                runtime.stopCopiesForCurrentLaunch()
                 copy.invalidateSeedReport()
                 let previous = model.folderPath(slot: slot, destination: destination)
                 model.chooseFolder(slot: slot, destination: destination)
@@ -407,7 +407,7 @@ private struct MacSyncConfigurationView: View {
             },
             onFolderDropped: { url in
                 guard !copy.seedBusy else { return }
-                copy.stop()
+                runtime.stopCopiesForCurrentLaunch()
                 copy.invalidateSeedReport()
                 let previous = model.folderPath(slot: slot, destination: destination)
                 model.setFolder(url: url, slot: slot, destination: destination)
@@ -627,6 +627,10 @@ private struct MacSyncConfigurationView: View {
                         Button("Ferma copie") { runtime.stopCopiesForCurrentLaunch() }
                     } else {
                         Button("Attiva copie di prova") {
+                            // A manual session may explicitly permit mirror
+                            // deletion. Keep the unattended coordinator idle
+                            // throughout its confirmation dialogue.
+                            runtime.stopCopiesForCurrentLaunch()
                             copy.start(sources: model.configuredPairs())
                         }
                     }
