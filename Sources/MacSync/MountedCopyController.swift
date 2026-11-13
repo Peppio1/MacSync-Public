@@ -22,6 +22,10 @@ final class MountedCopyController: ObservableObject {
         didSet { UserDefaults.standard.set(mirrorRetention, forKey: "MacSync.mirrorRetention") }
     }
     @Published var mirrorStatus = "Cancellazioni speculari non attive"
+    @Published var lastCycleStats = SyncDashboardStats()
+    @Published var sessionStats = SyncDashboardStats()
+    @Published var lastCycleAt: Date?
+    @Published var completedCycles = 0
     @Published var previewStatus = "Anteprima iniziale non eseguita"
     @Published var recentEntries: [SyncLogEntry] = []
     @Published var logLevel = "all"
@@ -165,6 +169,9 @@ final class MountedCopyController: ObservableObject {
                         mirrorSummary = try mirrorWorker.runOnce(maxFiles: 25)
                         expired = try mirrorWorker.pruneExpiredRecovery()
                     }
+                    let dashboard = SyncDashboardStats(
+                        copy: summary, mirror: mirrorSummary, expiredRecovery: expired
+                    )
                     let mirrorDetails = !policy.enabled ? "" :
                         " Specchio: \(mirrorSummary.removed) eliminati, "
                         + "\(mirrorSummary.recovered) recuperabili, "
@@ -188,6 +195,10 @@ final class MountedCopyController: ObservableObject {
                     DispatchQueue.main.async { [weak self] in
                         self?.status = result
                         self?.mirrorStatus = policy.enabled ? mirrorDetails : "Cancellazioni speculari disattivate"
+                        self?.lastCycleStats = dashboard
+                        self?.sessionStats.accumulate(dashboard)
+                        self?.completedCycles += 1
+                        self?.lastCycleAt = Date()
                         self?.refresh()
                     }
                 } catch {
@@ -197,11 +208,20 @@ final class MountedCopyController: ObservableObject {
                     )
                     DispatchQueue.main.async { [weak self] in
                         self?.status = "Copia sospesa: " + error.localizedDescription
+                        let failed = SyncDashboardStats(failed: 1)
+                        self?.lastCycleStats = failed
+                        self?.sessionStats.accumulate(failed)
+                        self?.completedCycles += 1
+                        self?.lastCycleAt = Date()
                         self?.refresh()
                     }
                 }
             }
             self.timer = timer
+            lastCycleStats = SyncDashboardStats()
+            sessionStats = SyncDashboardStats()
+            lastCycleAt = nil
+            completedCycles = 0
             active = true
             mirrorStatus = policy.enabled
                 ? "Configurazione armata: la verifica delle sorgenti avverrà al primo ciclo"
