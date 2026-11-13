@@ -26,6 +26,12 @@ Deliver a reliable, unattended one-way iMac to Windows Server 2016 SMB/VPN mirro
 ## User defaults
 Names (not absolute paths): Cartella_1, Cartella_2; SMB parent Condivisione_SMB. Exact paths and credentials must be configured locally.
 
+## Stato verificato (13 novembre 2026)
+- Implementati: watcher FSEvents, scansione locale ricorsiva e mirata, inventario SQLite, coda differenze, gestione cancellazioni solo come eventi locali, recupero dopo eventi persi o errori, interfaccia menu bar.
+- GitHub Actions macOS 15: compilazione e test di integrazione FSEvents superati.
+- NON implementati: rclone SMB, copia/cancellazioni remote, Keychain, avvio automatico al login, collaudo VPN di test.
+- Prossima priorità: issue #2 (motore SMB selettivo), senza abilitare cancellazioni remote fino ai test di sicurezza issue #3.
+
 ## Development phases
 1. SwiftPM base, SQLite, models, safety tests, macOS CI.
 2. FSEvents, durable event ID, recovery after shutdown and missed events.
