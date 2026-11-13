@@ -141,6 +141,7 @@ public final class SelectiveSMBCopyWorker {
     private let mappings: [String: SMBUploadMapping]
     private let minimumStableAge: TimeInterval
     private let now: () -> Date
+    private var lastAttemptedID: Int64 = 0
 
     public init(
         journal: ChangeJournal,
@@ -168,8 +169,13 @@ public final class SelectiveSMBCopyWorker {
             summary.disabled = true
             return summary
         }
-        let pending = try journal.pendingUploads(limit: maxJobs)
+        var pending = try journal.pendingUploads(limit: maxJobs, afterID: lastAttemptedID)
+        if pending.isEmpty, lastAttemptedID > 0 {
+            lastAttemptedID = 0
+            pending = try journal.pendingUploads(limit: maxJobs)
+        }
         for job in pending {
+            lastAttemptedID = job.id
             guard let mapping = mappings[job.rootID] else {
                 summary.failed += 1
                 continue
