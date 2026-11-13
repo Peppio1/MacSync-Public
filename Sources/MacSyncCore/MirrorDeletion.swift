@@ -257,6 +257,10 @@ public final class MirrorDeletionWorker {
         var captured: [String: MirrorRootIdentity] = [:]
         for mapping in mappings {
             try mapping.verify()
+            // The watcher's durable SQLite source mapping must agree with the
+            // selected folder; never apply historical deletes to a new root.
+            guard try journal.watchedRootPath(rootID: mapping.rootID) == mapping.source.path
+            else { throw MirrorDeletionFailure.noBaseline }
             let inventory = try LocalScanner.scan(root: mapping.source)
             // Never enable a mirror against a source that appears empty.
             guard !inventory.isEmpty else { throw MirrorDeletionFailure.noBaseline }
@@ -455,6 +459,8 @@ public final class MirrorDeletionWorker {
 
     private func verifyRoots(_ mapping: MountedFolderMapping, _ baseline: MirrorRootIdentity) throws {
         try mapping.verify()
+        guard try journal.watchedRootPath(rootID: mapping.rootID) == mapping.source.path
+        else { throw MirrorDeletionFailure.sourceChanged }
         let source = try Self.statFile(mapping.source)
         let target = try Self.statFile(mapping.target)
         guard Self.isDirectory(source),
