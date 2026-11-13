@@ -217,6 +217,19 @@ public final class ChangeJournal {
         }
     }
 
+    public func watchedRootPath(rootID: String) throws -> String? {
+        let stmt = try prepare("""
+            SELECT absolute_path FROM watched_roots WHERE root_id=?;
+            """)
+        defer { sqlite3_finalize(stmt) }
+        try bind(rootID, at: 1, in: stmt)
+        switch sqlite3_step(stmt) {
+        case SQLITE_DONE: return nil
+        case SQLITE_ROW: return columnText(stmt, at: 0)
+        default: throw databaseFailure()
+        }
+    }
+
     /// Pending DELETE events created AFTER the operator armed this session.
     /// Prior delete events are intentionally never executed retroactively.
     public func pendingDeletes(
