@@ -354,7 +354,7 @@ public final class MirrorDeletionWorker {
                     } else {
                         // No recovery was explicitly chosen. There is NO
                         // automatic way to restore this file in MacSync.
-                        try FileManager.default.removeItem(at: destination)
+                        try Self.unlinkLeaf(destination)
                         result.removed += 1
                         try? log.record(level: .success, rootID: job.rootID,
                                         action: "mirror_permanent",
@@ -366,7 +366,7 @@ public final class MirrorDeletionWorker {
                     // or a pending child operation will block automatically.
                     guard try FileManager.default.contentsOfDirectory(atPath: destination.path).isEmpty
                     else { throw MirrorDeletionFailure.destinationChanged }
-                    try FileManager.default.removeItem(at: destination)
+                    try Self.removeEmptyDirectory(destination)
                     result.directories += 1
                 } else {
                     throw MirrorDeletionFailure.unsupportedObject
@@ -410,7 +410,7 @@ public final class MirrorDeletionWorker {
                       Int64(current.st_size) == item.size,
                       abs(Self.modificationTime(current) - item.mtime) < 0.001 else { continue }
                 if cancellation.isCancelled { break }
-                try FileManager.default.removeItem(at: safe)
+                try Self.unlinkLeaf(safe)
                 try manifest.forget(id: item.id)
                 removed += 1
                 try? log.record(level: .info, rootID: item.rootID, action: "recovery_expired",
@@ -506,6 +506,21 @@ public final class MirrorDeletionWorker {
     private static func statFile(_ url: URL) throws -> stat {
         guard let info = try statIfPresent(url) else { throw MirrorDeletionFailure.sourceChanged }
         return info
+    }
+
+    /// POSIX unlink cannot recursively remove a directory even if one is
+    /// unexpectedly substituted at the path after our final lstat.
+    private static func unlinkLeaf(_ url: URL) throws {
+        let rc = url.path.withCString { Darwin.unlink($0) }
+        guard rc == 0 else { throw MirrorDeletionFailure.destinationChanged }
+    }
+
+    /// rmdir is deliberately used instead of FileManager.removeItem because
+    /// removeItem may recursively delete a directory populated by another
+    /// user between inspection and removal. rmdir fails when non-empty.
+    private static func removeEmptyDirectory(_ url: URL) throws {
+        let rc = url.path.withCString { Darwin.rmdir($0) }
+        guard rc == 0 else { throw MirrorDeletionFailure.destinationChanged }
     }
 
     private static func isRegularFile(_ info: stat) -> Bool {
