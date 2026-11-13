@@ -1,4 +1,4 @@
-# MacSync — Architettura v0.7 (prototipo)
+# MacSync — Architettura v0.8 (prototipo)
 
 ## Flusso
 Cartella Sorgente macOS → FSEvents → inventario e coda SQLite → worker seriale → cartella Destinazione (locale oppure SMB già montata dal Finder). Nessun componente sul server Windows 2016; macOS gestisce il login SMB esistente.
@@ -39,6 +39,16 @@ MountedBootstrapPreview esegue una scansione completa delle due cartelle selezio
 - `approve` è una operazione SEPARATA, approvata esplicitamente: dopo verifica delle fingerprint, `ChangeJournal.acknowledgeVerifiedFiles` esegue una sola transazione SQL con UPDATE condizionale su id/root/path/kind upsert, metadati inventario e root associata. Job rimpiazzati da FSEvents, file cambiati o cambi di root non sono marcati; DELETE mai consumati. Nessun file viene scritto o eliminato alla destinazione da questa procedura.
 - La lettura SHA-256 del contenuto già presente su SMB CONSUMA comunque banda VPN, anche se evita la riscrittura. Potenziale lettura di 100 GB remoti per 100 GB già identici, oltre ai 100 GB locali. Il confronto su una cartella grande è un'operazione manuale una tantum.
 - Condizione di test: GitHub Actions macOS su cartelle locali; servono prove reali di latenza/performance SMB su server Windows 2016 e iMac Sequoia prima dell'attivazione nell'archivio di produzione.
+
+## v0.8 — modello di sicurezza cancellazioni, recupero e retention
+### Autorizzazione
+`MirrorDeletionPolicy` espone tre opzioni persistenti: `enabled` (default false), `recoveryEnabled` (default true), `retentionDays` (1–30 o nil=never). Le impostazioni non sono una capability: solo una sessione espressamente confermata crea `MirrorDeletionWorker`. L'avvio avviene sulla worker queue, catturando timestamp baseline, conteggio locale >0, device/inode di source e target e fingerprint del volume. Gli eventi DELETE antecedenti all'arming restano esclusi.
+### Gate pre-rimozione
+Prima di ogni lotto si contano TUTTI i DELETE della sessione. Con >=250 eliminazioni, o >=25 e >=10% dei file iniziali, il worker blocca il lotto (nessun bypass frazionando l'elenco). Per ogni batch viene eseguita UNA scansione della sola Sorgente locale; le operazioni verificano root, volume, assenza reale sorgente anche nel caso di symlink, stato corrente in SQLite e nessun upload concorrente. Le cancellazioni su destinazione usano POSIX unlink per file regolari e rmdir solo per directory vuote; symlink e oggetti speciali non sono eliminati. La coda viene chiusa con UPDATE condizionale sul job originale.
+### Recupero
+Se il recupero è abilitato, invece di unlink il file target viene spostato all'interno dello stesso volume target in `.macsync-recovery/<UUID>/<percorso relativo>`: lo spostamento non ricopia i byte sulla VPN. Il manifest SQLite locale `mirror_recovery` tiene data, inode, mtime, size, durata e scadenza. `nil` significa conserva sempre. La funzione di scadenza opera soltanto quando la modalità speculare con recupero e retention finita è attiva; ricontrolla inode/mtime/size, root e volume prima di usare unlink. Non tenta cleanup su symlink, oggetti modificati o volumi sostituiti. Operazioni incompiute possono lasciare file orfani recuperabili, mai pulizia indiscriminata.
+### Limiti da testare
+Transazioni SQLite e filesystem non formano una transazione distribuita: un crash dopo move/unlink può lasciare il job pendente, ma non determina una seconda cancellazione arbitraria. Il recupero resta nascosto dentro target, non esiste ancora un restore guidato e può consumare spazio. I test CI coprono cartelle locali; per cancellazioni reali, ACL Windows, VPN instabile e semantica SMB sono indispensabili test su share di prova. Rinominare/spostare oggi comporta copia del nuovo file e successiva cancellazione vecchio, non moveto nativo.
 
 ## Rischi non ancora risolti
 - Automatic login SMB e rimontaggio Finder dopo cambio VPN/sospensione/riavvio.
