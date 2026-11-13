@@ -9,7 +9,7 @@ public enum MountedCopyError: Error, LocalizedError, Equatable {
     case sourceChanging
     case destinationConflict
     case sourceMissing
-    case copyFailed
+    case copyFailed(Int)
 
     public var errorDescription: String? {
         switch self {
@@ -20,7 +20,7 @@ public enum MountedCopyError: Error, LocalizedError, Equatable {
         case .sourceChanging: return "File ancora in modifica, trasferimento rimandato"
         case .destinationConflict: return "Destinazione incompatibile: elemento già esistente"
         case .sourceMissing: return "File sorgente mancante: copia rimandata"
-        case .copyFailed: return "Copia non riuscita; operazione mantenuta in coda"
+        case .copyFailed(let code): return "Copia non riuscita (codice filesystem: \(code)); operazione mantenuta in coda"
         }
     }
 }
@@ -268,7 +268,7 @@ public final class MountedFolderCopyWorker {
             // NEVER delete anything in the shared destination on failure;
             // interrupted stage objects remain for future safe GC.
             if let m = error as? MountedCopyError { throw m }
-            throw MountedCopyError.copyFailed
+            throw MountedCopyError.copyFailed((error as NSError).code)
         }
     }
 
