@@ -78,6 +78,8 @@ private struct MirrorRootIdentity {
     let device: UInt64
     let inode: UInt64
     let volume: VolumeFingerprint
+    let targetDevice: UInt64
+    let targetInode: UInt64
     let baselineCount: Int
 }
 
@@ -259,10 +261,14 @@ public final class MirrorDeletionWorker {
             // Never enable a mirror against a source that appears empty.
             guard !inventory.isEmpty else { throw MirrorDeletionFailure.noBaseline }
             let rootStamp = try Self.statFile(mapping.source)
-            guard Self.isDirectory(rootStamp) else { throw MirrorDeletionFailure.noBaseline }
+            let targetStamp = try Self.statFile(mapping.target)
+            guard Self.isDirectory(rootStamp), Self.isDirectory(targetStamp)
+            else { throw MirrorDeletionFailure.noBaseline }
             captured[mapping.rootID] = MirrorRootIdentity(
                 device: UInt64(rootStamp.st_dev), inode: UInt64(rootStamp.st_ino),
                 volume: try VolumeFingerprint.read(at: mapping.source),
+                targetDevice: UInt64(targetStamp.st_dev),
+                targetInode: UInt64(targetStamp.st_ino),
                 baselineCount: inventory.count
             )
         }
@@ -451,11 +457,16 @@ public final class MirrorDeletionWorker {
     private func verifyRoots(_ mapping: MountedFolderMapping, _ baseline: MirrorRootIdentity) throws {
         try mapping.verify()
         let source = try Self.statFile(mapping.source)
+        let target = try Self.statFile(mapping.target)
         guard Self.isDirectory(source),
               UInt64(source.st_dev) == baseline.device,
               UInt64(source.st_ino) == baseline.inode,
               try VolumeFingerprint.read(at: mapping.source) == baseline.volume
         else { throw MirrorDeletionFailure.sourceChanged }
+        guard Self.isDirectory(target),
+              UInt64(target.st_dev) == baseline.targetDevice,
+              UInt64(target.st_ino) == baseline.targetInode
+        else { throw MirrorDeletionFailure.volumeChanged }
     }
 
     private func validatedRecovery(
