@@ -1,4 +1,4 @@
-# MacSync — Architettura v0.5 (prototipo)
+# MacSync — Architettura v0.6 (prototipo)
 
 ## Flusso
 Cartella Sorgente macOS → FSEvents → inventario e coda SQLite → worker seriale → cartella Destinazione (locale oppure SMB già montata dal Finder). Nessun componente sul server Windows 2016; macOS gestisce il login SMB esistente.
@@ -26,11 +26,18 @@ SyncActivityLog crea una tabella SQLite sync_activity con timestamp, livello, ro
 ## Anteprima di baseline
 MountedBootstrapPreview esegue una scansione completa delle due cartelle selezionate solo su richiesta dell'utente e senza scrivere. BootstrapPlanner classifica i file già presenti: match presunti (size+mtime), mismatch, server-only, conflitti case insensitive. Non autorizza automaticamente il salto di trasferimenti né le cancellazioni.
 
+## Protezioni v0.6
+- Prima di ogni file copy, TransferPreflight.availableBytes legge statfs sul volume destinazione. Richiede capacità per staging + backup della vecchia versione + 16 MiB; valori non dichiarati vengono trattati come capacità sconosciuta, non come certezza di spazio.
+- Dopo FileManager.copyItem verso .macsync-staging, un nuovo lstat controlla file regolare e dimensione attesa. Solo allora si procede con la verifica del sorgente e la pubblicazione. Errori rinviati lasciano job e file temporaneo; la pubblicazione su SMB deve essere ancora testata.
+- StagingMaintenance.inspect conta e misura UUID.partial vecchi 7 giorni solo dentro .macsync-staging, senza ricorsione. StagingMaintenance.cleanup elimina esclusivamente elementi esplicitamente approvati dopo nuova verifica dell'ID del volume, inode, dimensione e mtime. UI blocca pulizia con copie attive e mostra conferma; niente pulizia dei backup.
+- SyncActivityLog.recent supporta filtro esito e ricerca su file relativo/messaggi, export filtrato e prune del solo sync_activity (fino a 20.000 record o 90 giorni). Timer continua a lavorare ogni 5 minuti senza interrogazione ricorsiva SMB.
+- Limiti non risolti: mancanza di resume byte-per-byte, hash, spazio backup illimitato, atomicità effettiva SMB, test rete/permessi reali, montaggio automatico, bootstrap e cancellazioni speculari.
+
 ## Rischi non ancora risolti
 - Automatic login SMB e rimontaggio Finder dopo cambio VPN/sospensione/riavvio.
 - Foundation.replaceItemAt e atomicità su Windows SMB: test con vere grandi foto richiesti.
 - Inventario iniziale dei file già caricati sul server, evitando ricopia molto lenta.
-- Staging temporanei e backup conservati; manca pulizia sicura e spazio minimo.
+- Pulizia temporanei vecchi disponibile su approvazione; verifica backup/versionamento e quota spazio server ancora necessari.
 - FSEvents e file in scrittura/rename/permessi: necessita collaudo prolungato.
 - Eventuali cancellazioni speculari in futuro richiedono policy fail-closed rigorosa e snapshot/verifiche dei percorsi.
 - Test GitHub Actions macOS 15 non provano la VPN o i volumi reali.
