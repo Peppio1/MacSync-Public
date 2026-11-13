@@ -25,8 +25,8 @@ public struct ReconciliationResult: Sendable {
 /// Errors abort the whole scan, so an unavailable root never becomes a mass deletion.
 public enum LocalScanner {
     public static func scan(root: URL, subtree: URL? = nil) throws -> [TrackedItem] {
-        let root = root.standardizedFileURL
-        let target = (subtree ?? root).standardizedFileURL
+        let root = root.standardizedFileURL.resolvingSymlinksInPath()
+        let target = (subtree ?? root).standardizedFileURL.resolvingSymlinksInPath()
         guard root.isFileURL, target.isFileURL,
               target.path == root.path || target.path.hasPrefix(root.path + "/") else {
             throw JournalError.database("Scan path is outside the source root")
@@ -60,10 +60,20 @@ public enum LocalScanner {
                 throw JournalError.database("Unsupported filesystem object: " + file.path)
             }
             let prefix = root.path + "/"
-            guard file.path.hasPrefix(prefix) else {
+            // macOS can surface the same path via /var and /private/var.
+            // Resolve parent aliases, but do not dereference a symlink leaf.
+            let effectivePath: String
+            if file.path.hasPrefix(prefix) {
+                effectivePath = file.path
+            } else {
+                effectivePath = file.deletingLastPathComponent()
+                    .resolvingSymlinksInPath()
+                    .appendingPathComponent(file.lastPathComponent).path
+            }
+            guard effectivePath.hasPrefix(prefix) else {
                 throw JournalError.database("Unexpected path outside root")
             }
-            let relative = String(file.path.dropFirst(prefix.count))
+            let relative = String(effectivePath.dropFirst(prefix.count))
             found.append(TrackedItem(
                 relativePath: relative,
                 kind: kind,
@@ -212,8 +222,8 @@ public final class LocalInventory {
         eventID: UInt64? = nil
     ) throws -> ReconciliationResult {
         guard !rootID.isEmpty else { throw JournalError.database("Missing root identifier") }
-        let root = root.standardizedFileURL
-        let target = (subtree ?? root).standardizedFileURL
+        let root = root.standardizedFileURL.resolvingSymlinksInPath()
+        let target = (subtree ?? root).standardizedFileURL.resolvingSymlinksInPath()
         let rows = try LocalScanner.scan(root: root, subtree: subtree)
         let fullScan = target.path == root.path
         let scope = fullScan ? "" : String(target.path.dropFirst(root.path.count + 1))
