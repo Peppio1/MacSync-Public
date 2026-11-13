@@ -169,7 +169,7 @@ public final class LocalInventory {
         case SQLITE_DONE: return nil
         case SQLITE_ROW:
             guard let ptr = sqlite3_column_text(statement, 0) else { return nil }
-            return UInt64(String(cString: ptr))
+            return UInt64(String(cString: UnsafeRawPointer(ptr).assumingMemoryBound(to: CChar.self)))
         default: throw failure()
         }
     }
@@ -182,7 +182,7 @@ public final class LocalInventory {
         case SQLITE_DONE: return nil
         case SQLITE_ROW:
             guard let ptr = sqlite3_column_text(statement, 0) else { return nil }
-            return String(cString: ptr)
+            return String(cString: UnsafeRawPointer(ptr).assumingMemoryBound(to: CChar.self))
         default: throw failure()
         }
     }
@@ -365,7 +365,7 @@ public final class LocalInventory {
 
     private func column(_ statement: OpaquePointer, _ index: Int32) -> String {
         guard let ptr = sqlite3_column_text(statement, index) else { return "" }
-        return String(cString: ptr)
+        return String(cString: UnsafeRawPointer(ptr).assumingMemoryBound(to: CChar.self))
     }
 
     private func failure() -> JournalError {
