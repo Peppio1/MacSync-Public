@@ -386,6 +386,8 @@ private struct MacSyncConfigurationView: View {
     @ObservedObject var copy: MountedCopyController
     @State private var showLog = false
     @State private var showSummary = false
+    @StateObject private var loginAtStartup = LaunchAtLoginController()
+    @StateObject private var destinations = DestinationStatusController()
 
     private func picker(_ slot: Int, destination: Bool) -> some View {
         FolderDropZone(
@@ -396,12 +398,14 @@ private struct MacSyncConfigurationView: View {
                 copy.stop()
                 copy.invalidateSeedReport()
                 model.chooseFolder(slot: slot, destination: destination)
+                destinations.refresh()
             },
             onFolderDropped: { url in
                 guard !copy.seedBusy else { return }
                 copy.stop()
                 copy.invalidateSeedReport()
                 model.setFolder(url: url, slot: slot, destination: destination)
+                destinations.refresh()
             }
         )
         .disabled(copy.seedBusy)
@@ -444,6 +448,55 @@ private struct MacSyncConfigurationView: View {
 
                 Text("Le destinazioni possono essere locali o condivisioni SMB già montate. MacSync utilizza le credenziali conservate da macOS.")
                     .font(.caption).foregroundStyle(.secondary)
+
+                Divider()
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Impostazioni di avvio").font(.headline)
+                    Toggle(
+                        "Avvia automaticamente MacSync al login macOS",
+                        isOn: Binding(
+                            get: { loginAtStartup.enabled },
+                            set: { loginAtStartup.setEnabled($0) }
+                        )
+                    )
+                    .disabled(!loginAtStartup.isAvailable)
+                    Text(loginAtStartup.statusMessage)
+                        .font(.caption)
+                        .foregroundStyle(loginAtStartup.requiresApproval ? .orange : .secondary)
+                    if loginAtStartup.requiresApproval {
+                        Button("Apri Elementi login in Impostazioni di Sistema") {
+                            loginAtStartup.openSystemSettings()
+                        }
+                    }
+                    Text("L'avvio al login apre MacSync, ma non autorizza automaticamente copie o cancellazioni. Per questa versione le copie si attivano separatamente con conferma.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Divider()
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Disponibilità delle destinazioni").font(.headline)
+                        Spacer()
+                        Button("Verifica ora") { destinations.refresh() }
+                            .disabled(destinations.checking)
+                    }
+                    HStack {
+                        Image(systemName: destinations.first.isReady ? "checkmark.circle.fill" : "exclamationmark.circle")
+                            .foregroundStyle(destinations.first.isReady ? .green : .orange)
+                        Text("Cartella_1: " + destinations.first.description).font(.caption)
+                    }
+                    HStack {
+                        Image(systemName: destinations.second.isReady ? "checkmark.circle.fill" : "exclamationmark.circle")
+                            .foregroundStyle(destinations.second.isReady ? .green : .orange)
+                        Text("Cartella_2: " + destinations.second.description).font(.caption)
+                    }
+                    Text("MacSync controlla le cartelle ogni 30 secondi senza montare condivisioni né gestire la VPN. Le copie in esecuzione vengono ritentate ai cicli successivi se macOS rimonta la stessa destinazione.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
                 HStack {
                     Label("Operazioni in coda: \(model.pendingCount.formatted())",
@@ -644,6 +697,14 @@ private struct MacSyncConfigurationView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(minWidth: 700, minHeight: 580)
+        .onAppear {
+            loginAtStartup.refresh()
+            destinations.refresh()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            loginAtStartup.refresh()
+            destinations.refresh()
+        }
         .sheet(isPresented: $showSummary) {
             SyncSummarySheet(copy: copy)
         }
