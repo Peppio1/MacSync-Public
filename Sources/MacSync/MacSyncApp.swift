@@ -276,10 +276,116 @@ private struct FolderDropZone: View {
 }
 
 
+private struct SyncSummaryMetric: View {
+    let title: String
+    let count: Int
+    let symbol: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label(title, systemImage: symbol)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(count.formatted())
+                .font(.title2.bold())
+                .monospacedDigit()
+        }
+        .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
+        .padding(12)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+/// A dedicated readable view; no source/target paths are displayed here.
+private struct SyncSummarySheet: View {
+    @ObservedObject var copy: MountedCopyController
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedScope = "session"
+
+    private var data: SyncDashboardStats {
+        selectedScope == "session" ? copy.sessionStats : copy.lastCycleStats
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Label("Riepilogo sincronizzazione", systemImage: "chart.bar.xaxis")
+                    .font(.title2.bold())
+                Spacer()
+                Button("Chiudi") { dismiss() }
+            }
+            Picker("Periodo", selection: $selectedScope) {
+                Text("Sessione corrente").tag("session")
+                Text("Ultimo ciclo").tag("last")
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 340)
+
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
+                SyncSummaryMetric(title: "Nuovi file", count: data.newFiles, symbol: "doc.badge.plus")
+                SyncSummaryMetric(title: "File aggiornati", count: data.updatedFiles, symbol: "arrow.triangle.2.circlepath")
+                SyncSummaryMetric(title: "Eliminati definitivamente", count: data.permanentlyDeleted, symbol: "trash")
+                SyncSummaryMetric(title: "Spostati nel recupero", count: data.movedToRecovery, symbol: "archivebox")
+                SyncSummaryMetric(title: "Errori", count: data.failed, symbol: "exclamationmark.triangle")
+                SyncSummaryMetric(title: "Rimandati", count: data.deferred, symbol: "clock")
+            }
+            Divider()
+            HStack {
+                Text("Dati trasferiti")
+                Spacer()
+                Text(ByteCountFormatter.string(fromByteCount: data.bytesTransferred, countStyle: .file))
+                    .monospacedDigit()
+            }
+            HStack {
+                Text("Cartelle create / rimosse")
+                Spacer()
+                Text("\(data.createdDirectories) / \(data.removedDirectories)")
+                    .monospacedDigit()
+            }
+            HStack {
+                Text("Recuperi scaduti eliminati")
+                Spacer()
+                Text(data.expiredRecovery.formatted()).monospacedDigit()
+            }
+            HStack {
+                Text("Cicli completati nella sessione")
+                Spacer()
+                Text(copy.completedCycles.formatted()).monospacedDigit()
+            }
+            HStack {
+                Text("Ultimo controllo")
+                Spacer()
+                if let when = copy.lastCycleAt {
+                    Text(when.formatted(date: .abbreviated, time: .standard))
+                } else {
+                    Text("Non ancora eseguito").foregroundStyle(.secondary)
+                }
+            }
+            if data.deletionsBlocked {
+                Label("Una protezione ha bloccato le cancellazioni. Consulta il registro.",
+                      systemImage: "hand.raised.fill")
+                    .foregroundStyle(.orange)
+                    .font(.callout)
+            }
+            Spacer(minLength: 0)
+            Text("I contatori sono relativi alla sessione di prova corrente; il registro SQLite conserva lo storico delle attività. I file in coda non sono conteggiati come completati.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(22)
+        .frame(width: 690, height: 620)
+    }
+}
+
 private struct MacSyncConfigurationView: View {
     @ObservedObject var model: MacSyncViewModel
     @ObservedObject var copy: MountedCopyController
     @State private var showLog = false
+    @State private var showSummary = false
 
     private func picker(_ slot: Int, destination: Bool) -> some View {
         FolderDropZone(
@@ -350,6 +456,29 @@ private struct MacSyncConfigurationView: View {
                 Text(model.message)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                Divider()
+                VStack(alignment: .leading, spacing: 9) {
+                    HStack {
+                        Text("Riepilogo sincronizzazione").font(.headline)
+                        Spacer()
+                        Button("Apri riepilogo…") { showSummary = true }
+                    }
+                    HStack(spacing: 8) {
+                        SyncSummaryMetric(title: "Nuovi", count: copy.sessionStats.newFiles,
+                                          symbol: "doc.badge.plus")
+                        SyncSummaryMetric(title: "Aggiornati", count: copy.sessionStats.updatedFiles,
+                                          symbol: "arrow.triangle.2.circlepath")
+                        SyncSummaryMetric(title: "Eliminati", count: copy.sessionStats.permanentlyDeleted,
+                                          symbol: "trash")
+                        SyncSummaryMetric(title: "Recuperati", count: copy.sessionStats.movedToRecovery,
+                                          symbol: "archivebox")
+                        SyncSummaryMetric(title: "Errori", count: copy.sessionStats.failed,
+                                          symbol: "exclamationmark.triangle")
+                    }
+                    Text("Totali della sessione; apri il riepilogo per ultimi cicli, file rimandati e dimensioni trasferite.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
 
                 Divider()
                 VStack(alignment: .leading, spacing: 10) {
@@ -515,6 +644,9 @@ private struct MacSyncConfigurationView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(minWidth: 700, minHeight: 580)
+        .sheet(isPresented: $showSummary) {
+            SyncSummarySheet(copy: copy)
+        }
         .sheet(isPresented: $showLog) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Registro sincronizzazioni").font(.title2.bold())
