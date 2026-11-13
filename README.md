@@ -1,25 +1,42 @@
 # MacSync
 
-MacSync is a **work-in-progress** native macOS app for one-way mirroring of local folders to an existing SMB share on Windows Server 2016 through a VPN. No software may be installed on the server.
+Applicazione macOS per la futura **sincronizzazione unidirezionale iMac → Windows Server 2016**, tramite condivisione SMB già disponibile su VPN.
 
-**Current state: early non-destructive prototype. No remote copies or deletions are enabled yet. Do not use on production photo archives.**
+> **Stato: prototipo v0.2 con monitoraggio LOCALE. Non è una versione di produzione. Nessun trasferimento SMB o cancellazione sul server è attivo.**
 
-## Requirements
-- macOS Sequoia, configurable local source folders Cartella_1 and Cartella_2.
-- SMB destination contains corresponding subfolders under Condivisione_SMB.
-- Unidirectional Mac-to-server copying, updates, renames and **deletions**.
-- Approximately 5-minute unattended sync, without a full destination SMB scan every cycle.
-- Durable SQLite queue/inventory, FSEvents monitoring, recovery after sleep/VPN outage.
-- No paid commercial-use dependencies, no server-side agent.
-- Preflight and mass-deletion protection.
+## Requisiti
+- Solo software sull'iMac, nessuna installazione sul server.
+- Gratuito anche in ambito commerciale.
+- Due cartelle sorgenti configurabili: Cartella_1 e Cartella_2.
+- Destinazione: sottocartelle omonime di Condivisione_SMB su Windows Server.
+- Replica di aggiunte, modifiche, rinomine e **cancellazioni**, dopo i test del motore remoto.
+- Obiettivo sincronizzazione ogni circa 5 minuti senza scansione SMB completa a ogni ciclo.
+- SQLite persistente e FSEvents per il monitoraggio.
 
-## Design
-Swift/SwiftUI MenuBarExtra, macOS FSEvents, SQLite, and eventually rclone SMB. Credentials must live in the local macOS Keychain and must never be committed.
+## Funzionalità realizzate e testate su macOS 15 GitHub Actions
+- App SwiftUI nella barra dei menu con scelta delle due cartelle locali.
+- Monitoraggio macOS FSEvents per creazioni e modifiche di file.
+- Inventario SQLite locale (~/Library/Application Support/MacSync/inventory.sqlite).
+- Riconciliazione mirata ai file e sottorami modificati, con coda SQLite transazionale.
+- Rilevamento dei file mancanti e registrazione della cancellazione *solo nella coda locale*.
+- Scansione completa **solo locale** all'avvio per recuperare modifiche avvenute a programma chiuso.
+- Controllo locale ogni 5 minuti; ricontrollo locale completo dopo eventi persi, errori o almeno 24 ore.
+- Blocchi per cartelle non disponibili, percorsi sovrapposti e modifiche inattese alla root.
+- Test automatici SQLite, rinomine, cancellazioni, percorsi /var e /private/var, FSEvents reale.
 
-The current initial package contains a menu-bar prototype, SQLite event queue, initial safety policy, unit tests and GitHub Actions build. **FSEvents monitoring, selective SMB sync, deletion propagation, Keychain integration and autostart are planned, not yet implemented.**
+## Funzionalità ancora da sviluppare
+- rclone / SMB, copia selettiva, cancellazioni e rinomine remote.
+- Keychain, esecuzione automatica al login, notifiche e log avanzati.
+- Bootstrap SMB non distruttivo e protezioni definitive per la cancellazione in remoto.
+- Collaudo sulla VPN e sul server di destinazione effettivo, verifica della performance.
+- Notarizzazione Apple e distribuzione definitiva.
 
-Run tests on a Mac with Swift 5.9+: swift test; build: swift build -c release. GitHub Actions also tests/builds on macOS.
+## Compilazione
+GitHub Actions esegue swift test e swift build -c release su macOS 15. Il pacchetto sperimentale .app viene firmato ad hoc, non notarizzato, e salvato come artifact ZIP nella pagina Actions.
 
-See AGENTS.md and docs/ARCHITECTURE.md.
+## Sicurezza e privacy
+Questo progetto sarà una **copia speculare, non un backup versionato**. Prima di attivare eliminazioni serve una baseline verificata e protezioni contro cancellazioni accidentali e di massa. Conservare inoltre backup indipendenti sul server.
 
-Do not commit real photographs, client data, server names/IPs, VPN data, passwords or live databases.
+Non caricare sul repository foto, database reali, password SMB, IP privati, configurazioni VPN o log sensibili.
+
+Per continuare con Codex leggere [AGENTS.md](AGENTS.md) e [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Le attività aperte sono negli Issues.
