@@ -173,6 +173,24 @@ final class SelectiveSMBCopyTests: XCTestCase {
         XCTAssertFalse(fake.commands[0].contains("sync"))
     }
 
+    func testBlockedEarlyUploadDoesNotStarveLaterReadyFile() throws {
+        let (base, root, _, journal) = try fixture()
+        defer { try? FileManager.default.removeItem(at: base) }
+        try journal.enqueue(rootID: "photos", relativePath: "unavailable.psd", kind: .upsert)
+        try oldFile(root.appendingPathComponent("ready.jpg"))
+        try journal.enqueue(rootID: "photos", relativePath: "ready.jpg", kind: .upsert)
+        let fake = FakeRclone()
+        let worker = try SelectiveSMBCopyWorker(
+            journal: journal, runner: fake, mappings: [mapping(root)]
+        )
+
+        XCTAssertEqual(try worker.runOnce(enabled: true, maxJobs: 1).deferred, 1)
+        XCTAssertEqual(try worker.runOnce(enabled: true, maxJobs: 1).succeeded, 1)
+        XCTAssertEqual(fake.commands.count, 1)
+        XCTAssertEqual(fake.commands[0][0], "copyto")
+        XCTAssertEqual(try journal.pending().count, 1)
+    }
+
     func testMappingRejectsTraversalAndInvalidRemote() throws {
         let (base, root, _, _) = try fixture()
         defer { try? FileManager.default.removeItem(at: base) }
