@@ -277,6 +277,9 @@ public final class MirrorDeletionWorker {
             }
             return $0.relativePath.count > $1.relativePath.count
         }
+        // One complete LOCAL check per affected source, never one scan per
+        // job and NEVER a recursive scan of the SMB destination.
+        var availableRoots: Set<String> = []
         for job in sorted.prefix(max(1, min(100, maxFiles))) {
             guard let mapping = mappings[job.rootID],
                   let baseline = baselines[job.rootID] else {
@@ -285,9 +288,10 @@ public final class MirrorDeletionWorker {
             }
             do {
                 try self.verifyRoots(mapping, baseline)
-                // A full LOCAL-only scan is required when DELETE events exist;
-                // no destination-wide recursive scan is performed.
-                _ = try LocalScanner.scan(root: mapping.source)
+                if !availableRoots.contains(job.rootID) {
+                    _ = try LocalScanner.scan(root: mapping.source)
+                    availableRoots.insert(job.rootID)
+                }
                 guard try journal.deletionIsCurrent(
                     id: job.id, rootID: job.rootID, relativePath: job.relativePath
                 ) else { throw MirrorDeletionFailure.pendingTransfer }
@@ -295,10 +299,10 @@ public final class MirrorDeletionWorker {
                 let source = try validatedPath(job.relativePath, under: mapping.source)
                 let destination = try validatedPath(job.relativePath, under: mapping.target)
                 // Source leaf must still be absent, including dangling symlinks.
-                guard Self.lstatIfExists(source) == nil else {
+                guard try Self.statIfPresent(source) == nil else {
                     throw MirrorDeletionFailure.sourceChanged
                 }
-                guard let target = Self.lstatIfExists(destination) else {
+                guard let target = try Self.statIfPresent(destination) else {
                     if try journal.acknowledgeDeletion(
                         id: job.id, rootID: job.rootID, relativePath: job.relativePath
                     ) { result.missing += 1 }
@@ -366,7 +370,7 @@ public final class MirrorDeletionWorker {
             do {
                 try verifyRoots(mapping, baseline)
                 let safe = try validatedRecovery(item.managedRelativePath, mapping: mapping)
-                guard let current = Self.lstatIfExists(safe) else {
+                guard let current = try Self.statIfPresent(safe) else {
                     try manifest.forget(id: item.id)
                     continue
                 }
@@ -396,12 +400,12 @@ public final class MirrorDeletionWorker {
         // Hidden folder is inside target, always on the SAME mounted volume.
         let managed = ".macsync-recovery/" + uuid + "/" + job.relativePath
         let recovered = try validatedRecovery(managed, mapping: mapping, createParents: true)
-        guard Self.lstatIfExists(recovered) == nil else {
+        guard try Self.statIfPresent(recovered) == nil else {
             throw MirrorDeletionFailure.destinationChanged
         }
         try mapping.verify()
         try FileManager.default.moveItem(at: destination, to: recovered)
-        guard let after = Self.lstatIfExists(recovered), Self.isRegularFile(after) else {
+        guard let after = try Self.statIfPresent(recovered), Self.isRegularFile(after) else {
             throw MirrorDeletionFailure.destinationChanged
         }
         try manifest.record(
@@ -447,7 +451,7 @@ public final class MirrorDeletionWorker {
         var current = root
         for segment in segments.dropLast() {
             current.appendPathComponent(String(segment))
-            if let state = Self.lstatIfExists(current) {
+            if let state = try Self.statIfPresent(current) {
                 guard Self.isDirectory(state) else { throw MirrorDeletionFailure.unsafePath }
             } else if createParents {
                 try FileManager.default.createDirectory(at: current, withIntermediateDirectories: false)
@@ -458,13 +462,17 @@ public final class MirrorDeletionWorker {
         return url
     }
 
-    private static func lstatIfExists(_ url: URL) -> stat? {
+    private static func statIfPresent(_ url: URL) throws -> stat? {
         var info = stat()
-        return url.path.withCString({ lstat($0, &info) }) == 0 ? info : nil
+        let status = url.path.withCString { lstat($0, &info) }
+        if status == 0 { return info }
+        // Do not treat EACCES, ENOTCONN, EIO or timeout as a deleted file.
+        if errno == ENOENT { return nil }
+        throw MirrorDeletionFailure.destinationChanged
     }
 
     private static func statFile(_ url: URL) throws -> stat {
-        guard let info = lstatIfExists(url) else { throw MirrorDeletionFailure.sourceChanged }
+        guard let info = try statIfPresent(url) else { throw MirrorDeletionFailure.sourceChanged }
         return info
     }
 
