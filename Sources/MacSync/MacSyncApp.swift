@@ -267,13 +267,13 @@ private struct FolderDropZone: View {
     }
 }
 
-@main
-struct MacSyncApp: App {
-    @StateObject private var model = MacSyncViewModel()
-    @StateObject private var copy = MountedCopyController()
+
+private struct MacSyncConfigurationView: View {
+    @ObservedObject var model: MacSyncViewModel
+    @ObservedObject var copy: MountedCopyController
     @State private var showLog = false
 
-    private func selector(slot: Int, destination: Bool) -> some View {
+    private func picker(_ slot: Int, destination: Bool) -> some View {
         FolderDropZone(
             title: destination ? "Destinazione" : "Sorgente",
             path: model.folderPath(slot: slot, destination: destination),
@@ -288,119 +288,181 @@ struct MacSyncApp: App {
         )
     }
 
-    var body: some Scene {
-        MenuBarExtra("MacSync", systemImage: "arrow.triangle.2.circlepath") {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 13) {
-                    Text("MacSync").font(.title3.bold())
+    private func pair(_ slot: Int, title: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title).font(.headline)
+            HStack(spacing: 12) {
+                picker(slot, destination: false)
+                Image(systemName: "arrow.right")
+                    .foregroundStyle(.secondary)
+                picker(slot, destination: true)
+            }
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.title2)
+                    Text("MacSync").font(.title2.bold())
+                    Spacer()
                     Label(
-                        model.monitoring ? "Monitoraggio delle sorgenti attivo" :
-                            "Monitoraggio non attivo",
+                        model.monitoring ? "Monitor attivo" : "Monitor fermo",
                         systemImage: model.monitoring ? "checkmark.circle.fill" : "pause.circle"
                     )
+                    .font(.caption)
                     .foregroundStyle(model.monitoring ? .green : .orange)
-                    Text(model.message)
-                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Text("Scegli le cartelle con Sfoglia oppure trascinale direttamente dal Finder.")
+                    .font(.callout).foregroundStyle(.secondary)
 
-                    Divider()
-                    Text("Coppia 1 — Cartella_1").font(.headline)
-                    selector(slot: 1, destination: false)
-                    Image(systemName: "arrow.down").frame(maxWidth: .infinity)
-                        .foregroundStyle(.secondary)
-                    selector(slot: 1, destination: true)
+                pair(1, title: "1. Cartella_1")
+                Divider()
+                pair(2, title: "2. Cartella_2")
+                Divider()
 
-                    Divider()
-                    Text("Coppia 2 — Cartella_2").font(.headline)
-                    selector(slot: 2, destination: false)
-                    Image(systemName: "arrow.down").frame(maxWidth: .infinity)
-                        .foregroundStyle(.secondary)
-                    selector(slot: 2, destination: true)
+                Text("Le destinazioni possono essere locali o condivisioni SMB già montate. MacSync utilizza le credenziali conservate da macOS.")
+                    .font(.caption).foregroundStyle(.secondary)
 
-                    Divider()
-                    Text("Puoi usare una cartella locale o una condivisione SMB già montata nel Finder. Nessuna password da configurare.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack {
-                        Text("Operazioni in coda")
-                        Spacer()
-                        Text(model.pendingCount.formatted()).monospacedDigit()
-                    }.font(.caption)
+                HStack {
+                    Label("Operazioni in coda: \(model.pendingCount.formatted())",
+                          systemImage: "list.bullet.rectangle")
+                    Spacer()
+                    Button("Rileggi Sorgenti") { model.startMonitoring() }
+                }
+                .font(.callout)
 
-                    Button("Anteprima iniziale (sola lettura)") {
+                Text(model.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Divider()
+                HStack(alignment: .center, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text("Sincronizzazione di prova")
+                            .font(.headline)
+                        Text(copy.status)
+                            .font(.caption)
+                            .foregroundStyle(copy.active ? .green : .secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    if copy.active {
+                        Button("Ferma copie") { copy.stop() }
+                    } else {
+                        Button("Attiva copie di prova") {
+                            copy.start(sources: model.configuredPairs())
+                        }
+                    }
+                }
+
+                HStack {
+                    Button("Anteprima iniziale — sola lettura") {
                         copy.preview(sources: model.configuredPairs())
                     }
                     .disabled(copy.active)
-                    Text(copy.previewStatus)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Text(copy.status)
-                        .font(.caption)
-                        .foregroundStyle(copy.active ? .green : .secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    HStack {
-                        if copy.active {
-                            Button("Ferma copie") { copy.stop() }
-                        } else {
-                            Button("Attiva copie di prova") {
-                                copy.start(sources: model.configuredPairs())
-                            }
-                        }
-                        Button("Registro sincronizzazioni") {
-                            copy.refresh()
-                            showLog = true
-                        }
+                    Button("Registro sincronizzazioni…") {
+                        copy.refresh()
+                        showLog = true
                     }
-                    Text("Modalità test: nessuna cancellazione speculare; possibili sovrascritture solo nella destinazione scelta.")
-                        .font(.caption2).foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Divider()
-                    HStack {
-                        Button("Aggiorna monitor") { model.startMonitoring() }
-                        Button("Arresta") {
-                            copy.stop()
-                            model.stopMonitoring()
-                        }
-                        Spacer()
-                        Button("Esci") {
-                            copy.stop()
-                            NSApplication.shared.terminate(nil)
-                        }
+                    Spacer()
+                }
+                Text(copy.previewStatus)
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Questa versione di test non propaga le cancellazioni. Le copie possono sovrascrivere file nella destinazione selezionata: utilizzare soltanto dati sintetici.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                Divider()
+                HStack {
+                    Button("Ferma tutto") {
+                        copy.stop()
+                        model.stopMonitoring()
+                    }
+                    Spacer()
+                    Button("Esci da MacSync") {
+                        copy.stop()
+                        NSApplication.shared.terminate(nil)
                     }
                 }
-                .padding(14)
             }
-            .frame(width: 460, height: 750)
-            .sheet(isPresented: $showLog) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Registro sincronizzazioni").font(.title3.bold())
-                    Text("Eventi locali SQLite. I percorsi sono relativi, senza password e indirizzi IP.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    List(copy.recentEntries, id: \.id) { entry in
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("\(entry.action.uppercased()) · \(entry.level) · \(entry.rootID)")
-                                .font(.caption.bold())
-                            Text(entry.relativePath.isEmpty ? entry.message :
-                                entry.relativePath + " — " + entry.message)
-                                .font(.caption)
-                                .lineLimit(2)
-                            Text("\(entry.timestamp.formatted()) · \(entry.bytes) byte · \(String(format: "%.2f", entry.durationSeconds)) s")
-                                .font(.caption2).foregroundStyle(.secondary)
-                        }
-                    }
-                    HStack {
-                        Button("Aggiorna") { copy.refresh() }
-                        Button("Esporta registro…") { copy.exportLog() }
-                        Spacer()
-                        Button("Chiudi") { showLog = false }
+            .padding(22)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(minWidth: 700, minHeight: 580)
+        .sheet(isPresented: $showLog) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Registro sincronizzazioni").font(.title2.bold())
+                Text("Storico SQLite: ogni copia, errore, durata e byte trasferiti.")
+                    .font(.caption).foregroundStyle(.secondary)
+                List(copy.recentEntries, id: \.id) { entry in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(entry.action.uppercased()) · \(entry.level) · \(entry.rootID)")
+                            .font(.caption.bold())
+                        Text(entry.relativePath.isEmpty ? entry.message :
+                            entry.relativePath + " — " + entry.message)
+                            .font(.caption)
+                            .lineLimit(3)
+                        Text("\(entry.timestamp.formatted()) · \(entry.bytes) byte · \(String(format: "%.2f", entry.durationSeconds)) s")
+                            .font(.caption2).foregroundStyle(.secondary)
                     }
                 }
-                .padding(16)
-                .frame(width: 650, height: 540)
+                HStack {
+                    Button("Aggiorna") { copy.refresh() }
+                    Button("Esporta TSV…") { copy.exportLog() }
+                    Spacer()
+                    Button("Chiudi") { showLog = false }
+                }
             }
+            .padding(16)
+            .frame(width: 700, height: 560)
+        }
+    }
+}
+
+private struct MacSyncStatusMenu: View {
+    @Environment(\.openWindow) private var openWindow
+    @ObservedObject var model: MacSyncViewModel
+    @ObservedObject var copy: MountedCopyController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("MacSync").font(.headline)
+            Text(model.monitoring ? "Sorgenti monitorate" : "Monitor non attivo")
+                .font(.caption).foregroundStyle(.secondary)
+            Text(copy.active ? "Copie di prova in esecuzione" : "Copie non attive")
+                .font(.caption).foregroundStyle(.secondary)
+            Button("Apri configurazione…") {
+                openWindow(id: "configuration")
+                NSApplication.shared.activate(ignoringOtherApps: true)
+            }
+            Divider()
+            Button("Esci") {
+                copy.stop()
+                NSApplication.shared.terminate(nil)
+            }
+        }
+        .padding(12)
+        .frame(width: 255)
+    }
+}
+
+@main
+struct MacSyncApp: App {
+    @StateObject private var model = MacSyncViewModel()
+    @StateObject private var copy = MountedCopyController()
+
+    var body: some Scene {
+        Window("MacSync — Configurazione", id: "configuration") {
+            MacSyncConfigurationView(model: model, copy: copy)
+        }
+        .defaultSize(width: 840, height: 740)
+
+        MenuBarExtra("MacSync", systemImage: "arrow.triangle.2.circlepath") {
+            MacSyncStatusMenu(model: model, copy: copy)
         }
         .menuBarExtraStyle(.window)
     }
