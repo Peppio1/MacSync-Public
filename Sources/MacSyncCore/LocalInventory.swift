@@ -197,6 +197,66 @@ public final class LocalInventory {
         }
     }
 
+
+    /// Reconfigure a source deliberately without turning its old inventory
+    /// into DELETE jobs. This is a LOCAL operation; it never accesses targets.
+    /// Call only after the user confirms a change in the source folder.
+    public func resetRootForNewSource(rootID: String, newRoot: URL) throws {
+        let newPath = newRoot.standardizedFileURL.resolvingSymlinksInPath().path
+        guard !rootID.isEmpty, FileManager.default.fileExists(atPath: newPath) else {
+            throw JournalError.database("Source directory unavailable")
+        }
+        let attributes = try URL(fileURLWithPath: newPath)
+            .resourceValues(forKeys: [.isDirectoryKey])
+        guard attributes.isDirectory == true else {
+            throw JournalError.database("Source must be a directory")
+        }
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            for table in ["change_queue", "file_inventory", "watched_roots"] {
+                let statement = try prepare("DELETE FROM " + table + " WHERE root_id = ?;")
+                defer { sqlite3_finalize(statement) }
+                try bind(rootID, at: 1, statement: statement)
+                guard sqlite3_step(statement) == SQLITE_DONE else { throw failure() }
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    /// A new destination needs a fresh copy of every known local file.
+    /// Never generate DELETE jobs when only the target was reconfigured.
+    /// This can be lengthy on a very large inventory and should run off-main.
+    public func requeueAllForNewDestination(rootID: String) throws {
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            let delete = try prepare("""
+                DELETE FROM change_queue WHERE root_id=? AND completed=0;
+                """)
+            defer { sqlite3_finalize(delete) }
+            try bind(rootID, at: 1, statement: delete)
+            guard sqlite3_step(delete) == SQLITE_DONE else { throw failure() }
+
+            let insert = try prepare("""
+                INSERT INTO change_queue(root_id,relative_path,kind,recorded_at,completed)
+                SELECT root_id,relative_path,'upsert',?,0 FROM file_inventory
+                WHERE root_id=? AND kind IN ('file','directory');
+                """)
+            defer { sqlite3_finalize(insert) }
+            guard sqlite3_bind_double(insert, 1, Date().timeIntervalSince1970) == SQLITE_OK else {
+                throw failure()
+            }
+            try bind(rootID, at: 2, statement: insert)
+            guard sqlite3_step(insert) == SQLITE_DONE else { throw failure() }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
     public func pendingCount() throws -> Int {
         let statement = try prepare("SELECT COUNT(*) FROM change_queue WHERE completed=0;")
         defer { sqlite3_finalize(statement) }
