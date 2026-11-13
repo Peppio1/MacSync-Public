@@ -3,7 +3,7 @@
 ## Flusso
 Cartella Sorgente macOS → FSEvents → inventario e coda SQLite → worker seriale → cartella Destinazione (locale oppure SMB già montata dal Finder). Nessun componente sul server Windows 2016; macOS gestisce il login SMB esistente.
 
-L'app permette due coppie separate di cartelle: Cartella_1 e Cartella_2. Sorgente e Destinazione possono essere scelte con NSOpenPanel o trascinamento Finder (UTType.fileURL). Le coppie non devono sovrapporsi, anche tra coppie.
+L'app permette due coppie separate di cartelle: Cartella_1 e Cartella_2. Una finestra di configurazione persistente (apribile dall'icona menu bar) offre NSOpenPanel e trascinamento Finder (UTType.fileURL), senza chiudersi quando si passa al Finder. Le coppie non devono sovrapporsi, anche tra coppie.
 
 ## Monitor e database
 - Alla partenza: scansione locale della sorgente, recupero modifiche durante lo spegnimento, FSEvents dal cursore impostato prima dell'inventario iniziale.
