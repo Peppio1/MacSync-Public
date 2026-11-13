@@ -124,15 +124,16 @@ public final class ChangeJournal {
 
     /// Fetch only pending upserts. Pending deletes must never starve uploads;
     /// deletes remain queued for a future, separately gated mirror phase.
-    public func pendingUploads(limit: Int = 100) throws -> [QueuedChange] {
+    public func pendingUploads(limit: Int = 100, afterID: Int64 = 0) throws -> [QueuedChange] {
         let statement = try prepare("""
             SELECT id, root_id, relative_path, kind, recorded_at
               FROM change_queue
-             WHERE completed = 0 AND kind = 'upsert'
+             WHERE completed = 0 AND kind = 'upsert' AND id > ?
              ORDER BY id LIMIT ?;
             """)
         defer { sqlite3_finalize(statement) }
-        guard sqlite3_bind_int(statement, 1, Int32(max(1, min(limit, 1000)))) == SQLITE_OK else {
+        guard sqlite3_bind_int64(statement, 1, max(0, afterID)) == SQLITE_OK,
+              sqlite3_bind_int(statement, 2, Int32(max(1, min(limit, 1000)))) == SQLITE_OK else {
             throw databaseFailure()
         }
         var result: [QueuedChange] = []
