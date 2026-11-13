@@ -81,13 +81,23 @@ public final class SyncActivityLog {
         guard sqlite3_step(statement) == SQLITE_DONE else { throw failure() }
     }
 
-    public func recent(limit: Int = 200) throws -> [SyncLogEntry] {
+    public func recent(limit: Int = 200, level: SyncLogLevel? = nil, search: String = "") throws -> [SyncLogEntry] {
         let query = try prepare("""
             SELECT id,event_time,level,root_id,action,relative_path,bytes,duration_seconds,message
-            FROM sync_activity ORDER BY id DESC LIMIT ?;
+            FROM sync_activity
+            WHERE (? = '' OR level = ?)
+              AND (? = '' OR instr(lower(relative_path), lower(?)) > 0
+                          OR instr(lower(message), lower(?)) > 0)
+            ORDER BY id DESC LIMIT ?;
             """)
         defer { sqlite3_finalize(query) }
-        guard sqlite3_bind_int(query, 1, Int32(max(1, min(limit, 5000)))) == SQLITE_OK else { throw failure() }
+        let selected = level?.rawValue ?? ""
+        try bind(selected, 1, query)
+        try bind(selected, 2, query)
+        try bind(search, 3, query)
+        try bind(search, 4, query)
+        try bind(search, 5, query)
+        guard sqlite3_bind_int(query, 6, Int32(max(1, min(limit, 5000)))) == SQLITE_OK else { throw failure() }
         var entries: [SyncLogEntry] = []
         while true {
             let result = sqlite3_step(query)
@@ -108,10 +118,10 @@ public final class SyncActivityLog {
         return entries
     }
 
-    public func exportText(limit: Int = 5000) throws -> String {
+    public func exportText(limit: Int = 5000, level: SyncLogLevel? = nil, search: String = "") throws -> String {
         let iso = ISO8601DateFormatter()
         var rows = ["timestamp\tlevel\troot\taction\trelative_path\tbytes\tseconds\tmessage"]
-        for entry in try recent(limit: limit).reversed() {
+        for entry in try recent(limit: limit, level: level, search: search).reversed() {
             let values: [String] = [
                 iso.string(from: entry.timestamp), entry.level, entry.rootID,
                 entry.action, entry.relativePath, String(entry.bytes),
@@ -121,6 +131,30 @@ public final class SyncActivityLog {
                 .replacingOccurrences(of: "\n", with: " ") }.joined(separator: "\t"))
         }
         return rows.joined(separator: "\n") + "\n"
+    }
+
+    /// Keep logs bounded without touching any other SQLite table or photo.
+    /// The most recent records are kept, subject also to a maximum age.
+    /// Invoke on a background worker (never in the SwiftUI render loop).
+    @discardableResult
+    public func prune(retainNewest: Int = 20_000, maxAgeDays: Int = 90) throws -> Int {
+        guard (100...100_000).contains(retainNewest),
+              (7...3650).contains(maxAgeDays) else {
+            throw JournalError.database("Invalid activity-log retention policy")
+        }
+        let stmt = try prepare("""
+            DELETE FROM sync_activity
+             WHERE event_time < ?
+                OR id NOT IN (
+                    SELECT id FROM sync_activity ORDER BY id DESC LIMIT ?
+                );
+            """)
+        defer { sqlite3_finalize(stmt) }
+        let cutoff = Date().addingTimeInterval(-Double(maxAgeDays) * 86_400)
+        guard sqlite3_bind_double(stmt, 1, cutoff.timeIntervalSince1970) == SQLITE_OK,
+              sqlite3_bind_int(stmt, 2, Int32(retainNewest)) == SQLITE_OK,
+              sqlite3_step(stmt) == SQLITE_DONE else { throw failure() }
+        return Int(sqlite3_changes(db))
     }
 
     private func valid(_ s: String) -> Bool {
