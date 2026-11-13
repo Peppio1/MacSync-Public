@@ -10,6 +10,11 @@ final class MountedCopyController: ObservableObject {
     @Published var active = false
     @Published var previewStatus = "Anteprima iniziale non eseguita"
     @Published var recentEntries: [SyncLogEntry] = []
+    @Published var logLevel = "all"
+    @Published var logSearch = ""
+    @Published var maintenanceStatus = "Temporanei: verifica non eseguita"
+    @Published var maintaining = false
+    private var maintenanceCandidates: [(mapping: MountedFolderMapping, inspection: StagingInspection)] = []
 
     private let queue = DispatchQueue(label: "macsync.mounted.copy.serial", qos: .utility)
     private var timer: DispatchSourceTimer?
@@ -26,6 +31,10 @@ final class MountedCopyController: ObservableObject {
     func start(
         sources: [(id: String, path: String, destination: String, expected: VolumeFingerprint?)]
     ) {
+        guard !maintaining else {
+            status = "Manutenzione in corso, copie non avviate"
+            return
+        }
         stop()
 
         let warning = NSAlert()
@@ -87,6 +96,9 @@ final class MountedCopyController: ObservableObject {
                         durationSeconds: max(0, Date().timeIntervalSince(startedAt)),
                         message: "Ciclo completato: \(summary.copied) copie, \(summary.deferred) rimandate, \(summary.failed) errori"
                     )
+                    // Only the SQLite activity table is pruned, never file
+                    // inventory, queue, photographs, backups or staging.
+                    try? log.prune(retainNewest: 20_000, maxAgeDays: 90)
                     let result = "Ultimo ciclo: \(summary.copied) copie, "
                         + "\(summary.deferred) rimandate, \(summary.failed) errori, "
                         + "\(ByteCountFormatter.string(fromByteCount: summary.bytes, countStyle: .file)) trasferiti."
@@ -176,6 +188,145 @@ final class MountedCopyController: ObservableObject {
         }
     }
 
+    /// Opt-in maintenance: display only MacSync-owned UUID partial files older
+    /// than seven days. A separate explicit confirmation is required to clean.
+    func inspectStaging(sources: [(
+        id: String, path: String, destination: String, expected: VolumeFingerprint?
+    )]) {
+        guard !active && !maintaining else {
+            maintenanceStatus = "Ferma prima le copie o la manutenzione in corso"
+            return
+        }
+        do {
+            let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
+            guard !configured.isEmpty,
+                  configured.allSatisfy({ !$0.path.isEmpty && !$0.destination.isEmpty })
+            else { throw MountedCopyError.invalidMapping }
+            let mappings = try configured.map {
+                try MountedFolderMapping(
+                    rootID: $0.id,
+                    source: URL(fileURLWithPath: $0.path),
+                    target: URL(fileURLWithPath: $0.destination),
+                    expectedTargetVolume: $0.expected
+                )
+            }
+            maintaining = true
+            maintenanceCandidates = []
+            maintenanceStatus = "Verifica temporanei MacSync in corso…"
+            queue.async { [weak self] in
+                do {
+                    let candidates = try mappings.map {
+                        (mapping: $0, inspection: try StagingMaintenance.inspect(mapping: $0))
+                    }
+                    let count = candidates.reduce(0) { $0 + $1.inspection.count }
+                    let bytes = candidates.reduce(Int64(0)) {
+                        $0 > Int64.max - $1.inspection.totalBytes
+                            ? Int64.max : $0 + $1.inspection.totalBytes
+                    }
+                    DispatchQueue.main.async { [weak self] in
+                        self?.maintenanceCandidates = candidates
+                        self?.maintaining = false
+                        self?.maintenanceStatus = "Temporanei MacSync di oltre 7 giorni: "
+                            + "\(count) file, "
+                            + ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+                            + ". Nessun file è stato cancellato."
+                    }
+                } catch {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.maintaining = false
+                        self?.maintenanceStatus = "Verifica temporanei fallita: "
+                            + error.localizedDescription
+                    }
+                }
+            }
+        } catch {
+            maintenanceStatus = "Verifica temporanei non avviata: "
+                + error.localizedDescription
+        }
+    }
+
+    func cleanupStaging(sources: [(
+        id: String, path: String, destination: String, expected: VolumeFingerprint?
+    )]) {
+        guard !active && !maintaining else {
+            maintenanceStatus = "Ferma prima le copie"
+            return
+        }
+        let pending = maintenanceCandidates
+        let count = pending.reduce(0) { $0 + $1.inspection.count }
+        guard count > 0 else {
+            maintenanceStatus = "Nessun file temporaneo idoneo da rimuovere"
+            return
+        }
+        do {
+            let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
+            let freshMappings = try configured.map {
+                try MountedFolderMapping(
+                    rootID: $0.id, source: URL(fileURLWithPath: $0.path),
+                    target: URL(fileURLWithPath: $0.destination),
+                    expectedTargetVolume: $0.expected
+                )
+            }
+            guard freshMappings.count == pending.count,
+                  pending.allSatisfy({ saved in
+                      freshMappings.contains(where: {
+                          $0.rootID == saved.mapping.rootID &&
+                          $0.target == saved.mapping.target &&
+                          $0.source == saved.mapping.source &&
+                          $0.targetVolume == saved.mapping.targetVolume
+                      })
+                  })
+            else { throw MountedCopyError.invalidMapping }
+
+            let approval = NSAlert()
+            approval.alertStyle = .warning
+            approval.messageText = "Eliminare \(count) file temporanei MacSync?"
+            approval.informativeText = """
+            Solo file UUID.partial vecchi di almeno 7 giorni, nella cartella
+            .macsync-staging. Verranno ricontrollati prima della rimozione.
+            Non verranno toccate fotografie o copie di backup.
+            Le copie devono rimanere arrestate.
+            """
+            approval.addButton(withTitle: "Elimina temporanei verificati")
+            approval.addButton(withTitle: "Annulla")
+            guard approval.runModal() == .alertFirstButtonReturn else { return }
+
+            maintaining = true
+            maintenanceStatus = "Pulizia temporanei verificati in corso…"
+            queue.async { [weak self] in
+                do {
+                    var deleted = 0
+                    for item in pending {
+                        deleted += try StagingMaintenance.cleanup(
+                            mapping: item.mapping, inspected: item.inspection,
+                            approved: true
+                        )
+                    }
+                    let database = try Self.databaseURL()
+                    try? SyncActivityLog(path: database.path).record(
+                        level: .info, rootID: "app", action: "staging_cleanup",
+                        message: "Temporanei verificati eliminati: \(deleted)"
+                    )
+                    DispatchQueue.main.async { [weak self] in
+                        self?.maintaining = false
+                        self?.maintenanceCandidates = []
+                        self?.maintenanceStatus = "Pulizia completata: "
+                            + "\(deleted) temporanei eliminati. Foto e backup invariati."
+                        self?.refresh()
+                    }
+                } catch {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.maintaining = false
+                        self?.maintenanceStatus = "Pulizia temporanei interrotta: "
+                            + error.localizedDescription
+                    }
+                }
+            }
+        } catch {
+            maintenanceStatus = "Pulizia bloccata: " + error.localizedDescription
+        }
+    }
+
     func stop() {
         timer?.cancel()
         timer = nil
@@ -190,7 +341,10 @@ final class MountedCopyController: ObservableObject {
                 recentEntries = []
                 return
             }
-            recentEntries = try SyncActivityLog(path: database.path).recent(limit: 200)
+            recentEntries = try SyncActivityLog(path: database.path).recent(
+                limit: 300, level: SyncLogLevel(rawValue: logLevel),
+                search: logSearch
+            )
         } catch {
             status = "Impossibile leggere il registro: " + error.localizedDescription
         }
@@ -199,7 +353,10 @@ final class MountedCopyController: ObservableObject {
     func exportLog() {
         do {
             let text = try SyncActivityLog(path: Self.databaseURL().path)
-                .exportText(limit: 5000)
+                .exportText(
+                    limit: 5000, level: SyncLogLevel(rawValue: logLevel),
+                    search: logSearch
+                )
             let panel = NSSavePanel()
             panel.nameFieldStringValue = "MacSync_sync_log.tsv"
             panel.title = "Esporta registro sincronizzazioni"
