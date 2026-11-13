@@ -179,13 +179,13 @@ final class ExperimentalUploadController: ObservableObject {
             if !photoUploads.isEmpty {
                 roots.append((
                     URL(fileURLWithPath: photoUploads),
-                    profile.sandboxRemoteParent + "/Cartella_1"
+                    profile.remoteParent + "/Cartella_1"
                 ))
             }
             if !photoEditing.isEmpty {
                 roots.append((
                     URL(fileURLWithPath: photoEditing),
-                    profile.sandboxRemoteParent + "/Cartella_2"
+                    profile.remoteParent + "/Cartella_2"
                 ))
             }
             guard !roots.isEmpty else {
