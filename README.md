@@ -1,4 +1,4 @@
-# MacSync — prototipo v0.9.0
+# MacSync — prototipo v0.9.1
 
 Applicazione nativa macOS per la futura sincronizzazione **unidirezionale Sorgente → Destinazione**, con copie selettive ogni 5 minuti, SQLite e FSEvents.
 
@@ -106,6 +106,25 @@ Quando un file viene cancellato dalla Sorgente, MacSync ricontrolla che l'assenz
 - Durante l'assenza del volume atteso, MacSync non deve interpretare la destinazione come cartella locale sostitutiva né effettuare cancellazioni. Le copie già attivate ritentano ogni cinque minuti ma non vengono avviate automaticamente dopo un login.
 
 **Test:** i test CI macOS verificano la sonda locale con volume pronto, cartella assente/ritornata, fingerprint diverso e symlink. La compilazione dell'interfaccia e del controller ServiceManagement viene verificata da GitHub Actions, ma l'effettiva iscrizione ad Elementi login e l'accesso SMB dopo Wi-Fi/Ethernet devono essere collaudati sull'iMac.
+
+## MacSync v0.9.1 — ripresa automatica delle SOLE copie
+
+Questa fase distingue due opzioni indipendenti nella sezione **Impostazioni di avvio**:
+
+- **Avvia automaticamente MacSync al login macOS:** registra l'app tramite Apple SMAppService. Mostra lo stato reale di Elementi login. Non comporta automaticamente scritture.
+- **Avvia automaticamente le copie e gli aggiornamenti:** facoltativa e **OFF di default**, richiede un'apposita conferma una tantum. Se attiva, dopo il login MacSync può eseguire **SOLO copie e sovrascritture**, anche a finestra chiusa. La modalità non può mai eseguire eliminazioni speculari o pulizia del recupero. Richiede ancora test veri prima di qualsiasi dato di produzione.
+
+**Flusso operativo v0.9.1:** all'avvio viene indicizzato l'inventario delle Sorgenti locali; ogni 30 secondi un coordinatore verifica che l'inventario sia operativo e che tutte le destinazioni configurate corrispondano esattamente al volume scelto. Se una destinazione SMB manca, MacSync aspetta, senza scrivere e senza creare cartelle di ripiego. Se macOS rimonta lo stesso volume, il coordinatore può avviare una sessione di copie senza nuova finestra di conferma, perché l'utente ha già autorizzato esplicitamente questa funzione. Il worker controlla la coda SQLite ogni 5 minuti e ritenta i file non ancora copiati.
+
+**Identità forte del volume:** oltre a filesystem e mount point, la v0.9.1 salva anche la provenienza del montaggio rilevata da macOS (`statfs.f_mntfromname`, p.es. share SMB). Profili di destinazione delle versioni precedenti non hanno questo dato: per le copie automatiche sarà necessario **riselezionare la Destinazione dal Finder una volta**, così l'automazione non si avvia su una share non verificata. I dati del server non vengono inseriti nei log.
+
+**Ferma copie:** interrompe la modalità automatica per il resto dell'avvio corrente, anche se la checkbox è rimasta selezionata; per riattivarla subito è possibile deselezionare e riselezionare l'opzione dopo nuova conferma. Cambiare Sorgente o Destinazione disabilita le copie automatiche, evitando trasferimenti involontari su percorsi diversi.
+
+**Cancellazioni speculari:** anche se la preferenza mirror è abilitata, la sessione automatica forza una policy senza cancellazioni. Una sessione di cancellazioni continua a richiedere il comando manuale e la conferma specifica previsti nella v0.8. Se non vuoi che MacSync modifichi file senza supervisione, lascia disabilitata la seconda checkbox.
+
+**VPN e SMB:** il router di rete gestisce la VPN. MacSync non imposta VPN né credenziali SMB. Questa versione riconosce il ritorno del volume se **macOS lo ha già rimontato**; non invia nuove richieste di mount. L'eventuale rimontaggio automatico della share all'accesso macOS andrà configurato con il Finder/Elementi login o sviluppato solo dopo collaudo sul Mac reale.
+
+**Collaudo automatico:** gli unit test simulano destinazioni offline/online, volumi errati, profili legacy non verificati, consenso alla copia mancante e mantenimento degli eventi DELETE; uno scenario end-to-end usa due cartelle locali temporanee, elimina e ricrea la destinazione, verifica il recupero della coda delle copie e dimostra che i file destinati alla cancellazione restano intatti. Non provano la connessione SMB, le credenziali memorizzate, il funzionamento effettivo SMAppService né 100 GB reali.
 
 ## Test, limiti e sicurezza
 
