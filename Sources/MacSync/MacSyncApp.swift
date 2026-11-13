@@ -286,14 +286,19 @@ private struct MacSyncConfigurationView: View {
             title: destination ? "Destinazione" : "Sorgente",
             path: model.folderPath(slot: slot, destination: destination),
             choose: {
+                guard !copy.seedBusy else { return }
                 copy.stop()
+                copy.invalidateSeedReport()
                 model.chooseFolder(slot: slot, destination: destination)
             },
             onFolderDropped: { url in
+                guard !copy.seedBusy else { return }
                 copy.stop()
+                copy.invalidateSeedReport()
                 model.setFolder(url: url, slot: slot, destination: destination)
             }
         )
+        .disabled(copy.seedBusy)
     }
 
     private func pair(_ slot: Int, title: String) -> some View {
@@ -381,15 +386,56 @@ private struct MacSyncConfigurationView: View {
                     .font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
+                Divider()
+                Text("Prima sincronizzazione intelligente — SHA-256")
+                    .font(.headline)
+                Text("I file già presenti vengono confrontati leggendo il contenuto su entrambi i lati. La verifica può consumare traffico VPN, ma non trasferisce nuove copie né cancella file.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 10) {
+                    if copy.seedBusy {
+                        Button("Annulla verifica") { copy.cancelSeedVerification() }
+                    } else {
+                        Button("Verifica file già presenti") {
+                            copy.verifySeededFiles(sources: model.configuredPairs())
+                        }
+                        .disabled(copy.active || copy.maintaining)
+                    }
+                    if copy.seedReady && !copy.seedBusy {
+                        Button("Conferma \(copy.seedVerifiedCount) file identici") {
+                            copy.approveSeededFiles()
+                        }
+                        .disabled(copy.active || copy.maintaining)
+                    }
+                    Spacer()
+                }
+
+                Text(copy.seedStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Text("Esaminati: \(copy.seedInspectedCount)")
+                    Text("Identici: \(copy.seedVerifiedCount)")
+                    Spacer()
+                    Text("Letti: " + ByteCountFormatter.string(
+                        fromByteCount: copy.seedReadBytes, countStyle: .file
+                    ))
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
                 HStack {
                     Button("Verifica file temporanei") {
                         copy.inspectStaging(sources: model.configuredPairs())
                     }
-                    .disabled(copy.active || copy.maintaining)
+                     .disabled(copy.active || copy.maintaining || copy.seedBusy)
                     Button("Pulisci temporanei…") {
                         copy.cleanupStaging(sources: model.configuredPairs())
                     }
-                    .disabled(copy.active || copy.maintaining)
+                     .disabled(copy.active || copy.maintaining || copy.seedBusy)
                     Spacer()
                 }
                 Text(copy.maintenanceStatus)
