@@ -330,7 +330,7 @@ public final class MirrorDeletionWorker {
                     id: job.id, rootID: job.rootID, relativePath: job.relativePath
                 ) else { throw MirrorDeletionFailure.pendingTransfer }
 
-                let source = try validatedPath(job.relativePath, under: mapping.source)
+                let source = try validatedPath(job.relativePath, under: mapping.source, allowMissingParents: true)
                 let destination = try validatedPath(job.relativePath, under: mapping.target)
                 // Source leaf must still be absent, including dangling symlinks.
                 guard try Self.statIfPresent(source) == nil else {
@@ -398,8 +398,7 @@ public final class MirrorDeletionWorker {
     /// This cleanup cannot remove ordinary destination photos or backups.
     @discardableResult
     public func pruneExpiredRecovery(now: Date = Date()) throws -> Int {
-        guard policy.enabled, policy.recoveryEnabled, policy.retentionDays != nil,
-              !cancellation.isCancelled else { return 0 }
+        guard policy.enabled, !cancellation.isCancelled else { return 0 }
         var removed = 0
         for item in try manifest.expired(before: now) {
             if cancellation.isCancelled { break }
@@ -479,7 +478,7 @@ public final class MirrorDeletionWorker {
 
     private func validatedPath(
         _ relative: String, under root: URL, createParents: Bool = false,
-        recovery: Bool = false
+        recovery: Bool = false, allowMissingParents: Bool = false
     ) throws -> URL {
         let segments = relative.split(separator: "/", omittingEmptySubsequences: false)
         guard !segments.isEmpty,
@@ -498,6 +497,11 @@ public final class MirrorDeletionWorker {
                 guard Self.isDirectory(state) else { throw MirrorDeletionFailure.unsafePath }
             } else if createParents {
                 try FileManager.default.createDirectory(at: current, withIntermediateDirectories: false)
+            } else if allowMissingParents {
+                // A whole source folder may have been deleted. Its missing
+                // descendants are valid DELETE events, provided all extant
+                // ancestors are real directories (never symlinks).
+                continue
             } else {
                 throw MirrorDeletionFailure.unsafePath
             }
