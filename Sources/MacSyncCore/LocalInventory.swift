@@ -47,7 +47,7 @@ public enum LocalScanner {
         ]
         var found: [TrackedItem] = []
 
-        func record(_ file: URL) throws -> Bool {
+        func record(_ file: URL) throws -> String {
             let metadata = try file.resourceValues(forKeys: keys)
             let kind: String
             if metadata.isSymbolicLink == true {
@@ -80,12 +80,12 @@ public enum LocalScanner {
                 size: Int64(metadata.fileSize ?? 0),
                 modifiedAt: metadata.contentModificationDate?.timeIntervalSince1970 ?? 0
             ))
-            return kind == "directory"
+            return kind
         }
 
         if target != root {
-            let isDirectory = try record(target)
-            if !isDirectory { return found }
+            let kind = try record(target)
+            if kind != "directory" { return found }
         }
 
         var enumerationError: Error?
@@ -102,8 +102,12 @@ public enum LocalScanner {
         for case let file as URL in enumerator {
             if enumerationError != nil { break }
             do {
-                let directory = try record(file)
-                if !directory { enumerator.skipDescendants() }
+                let kind = try record(file)
+                // DirectoryEnumerator already treats ordinary files as
+                // leaves. Calling skipDescendants() after a REGULAR FILE can
+                // inadvertently suppress the next nested directory on macOS.
+                // Only skip symlink descendants, which must never be followed.
+                if kind == "symlink" { enumerator.skipDescendants() }
             } catch {
                 enumerationError = error
                 break
