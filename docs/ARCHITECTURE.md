@@ -29,5 +29,9 @@ Mac source directories -> FSEvents -> durable SQLite journal -> single serialize
 5. Representative archive performance tests and safe non-destructive bootstrap.
 6. Only after successful tests permit any production mirror deletion.
 
+## Stato implementato al 13 novembre 2026
+
+Il monitor FSEvents macOS aggiorna l'inventario SQLite locale: prima scansione completa locale, successive scansioni mirate per file o sottoalbero, audit locale al riavvio e ogni 24 ore, retry locale dopo errore. Nessuna connessione SMB o modifica di file sul server è attualmente attiva. Test automatici e smoke-test FSEvents superati sul runner macOS 15.
+
 ## Current implementation
 This repo begins with SQLite queue + safety checks + menu bar placeholder and CI. It does **not** perform real SMB transfers yet.
