@@ -245,14 +245,18 @@ public final class MountedFolderCopyWorker {
             }
             try mapping.verify()
             if fm.fileExists(atPath: dst.path) {
-                // Back up the previous target *without deleting it* if the
-                // target is about to be replaced. This preview never purges
-                // backup files. Avoid blindly following destination symlinks.
+                // Explicitly preserve the prior target BEFORE any overwrite.
+                // Foundation.replaceItemAt's backupItemName is not dependable
+                // across every filesystem; copy to a unique backup path first.
+                // This preview never purges backups or staging objects.
                 let existing = try readSnapshot(dst)
                 guard existing.kind == .file else { throw MountedCopyError.destinationConflict }
-                let backupName = ".macsync-backup-" + UUID().uuidString
+                let backupURL = dst.deletingLastPathComponent()
+                    .appendingPathComponent(".macsync-backup-" + UUID().uuidString)
+                try fm.copyItem(at: dst, to: backupURL)
+                // The old content remains in the backup even if publishing fails.
                 _ = try fm.replaceItemAt(dst, withItemAt: staging,
-                                         backupItemName: backupName, options: [])
+                                         backupItemName: nil, options: [])
             } else {
                 try fm.moveItem(at: staging, to: dst)
             }
