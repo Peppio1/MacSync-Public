@@ -56,8 +56,15 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 - Il recovery è dentro la cartella destinazione ed è nascosto. Non fare purge indiscriminati o scansioni ricorsive SMB ogni 5 minuti. Dati dei clienti NON devono essere usati nei test; test di produzione solo dopo collaudo su iMac e Windows Server 2016.
 - Le rinomine oggi vengono rappresentate da copy nuovo percorso + delete vecchio, non ancora da rename SMB server-side. Le cancellazioni intenzionali oltre soglia restano bloccate finché non implementato un override manuale protetto. La soglia considera anche le cancellazioni già effettuate nei cicli precedenti della stessa sessione.
 
+## Stabilizzazione v0.8.1 (scanner, dashboard, test sicurezza)
+- Corretto LocalScanner: skipDescendants non deve essere invocato su file ordinari; soltanto i symlink sono esclusi dalla ricorsione. Il vecchio comportamento ometteva talvolta file in directory successive a file nel livello principale. La correzione è coperta da regression test.
+- Rafforzati i test MirrorDeletion: directory con figli cancellati, cartella server con elementi sconosciuti, stop con DELETE pendente, ripartenza senza riprodurre cancellazioni antecedenti all'arming.
+- Aggiunto SyncDashboardStats, alimentato dai risultati effettivi del motore: nuovi file, file aggiornati, eliminazioni definitive, file recuperabili, errori e rimandati, directory e byte trasferiti. Mostrare ultimo ciclo e totale sessione in finestra dedicata, con sintesi nel pannello principale.
+- I contatori in memoria si azzerano all'attivazione di una nuova sessione; il registro SQLite mantiene lo storico persistente delle attività. Non contare scansioni hash o job rimandati come copie completate.
+- La pipeline GitHub Actions macOS 15 è stata verificata sui nuovi test. Rimangono obbligatori collaudi di Finder UI, SMB/VPN e autorizzazioni macOS; non attivare cancellazioni sui dati reali.
+
 ## Prossime fasi
-1. Confermare CI completo versione 0.7, testare drop e sostituzione file Mac localmente.
+1. Confermare CI completo versione 0.8.1, testare in Finder drag & drop e sostituzione su Mac locale.
 2. Rendere trasparente e sicura la sostituzione di file grossi, metadati, e cleanup degli staging/backups; test di interruzione e retry.
 3. Bootstrap guidato dei 100 GB già presenti (differenze per dimensione/data solo presunte; verifica robusta prima di marcare come sincronizzati).
 4. Auto-login e riconnessione mount Finder dopo VPN, sospensione e riavvio; notifiche e politiche log rotation.
@@ -65,4 +72,4 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 6. Collaudo reale su macOS Sequoia + Windows Server 2016/VPN (test iniziali locali e su sottocartelle sintetiche).
 
 ## Definition of done
-Sincronizzazione automatica per molte settimane con ripresa da errori VPN, nessuna perdita di dati, nessun software aggiuntivo sul server, performance misurate e manuale essenziale. V0.8 è solo prototipo, non produzione.
+Sincronizzazione automatica per molte settimane con ripresa da errori VPN, nessuna perdita di dati, nessun software aggiuntivo sul server, performance misurate e manuale essenziale. V0.8.1 è solo prototipo, non produzione.
