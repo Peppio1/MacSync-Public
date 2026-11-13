@@ -14,6 +14,15 @@ final class MountedCopyController: ObservableObject {
     @Published var logSearch = ""
     @Published var maintenanceStatus = "Temporanei: verifica non eseguita"
     @Published var maintaining = false
+    @Published var seedStatus = "Allineamento iniziale SHA-256 non eseguito"
+    @Published var seedBusy = false
+    @Published var seedReady = false
+    @Published var seedVerifiedCount = 0
+    @Published var seedInspectedCount = 0
+    @Published var seedReadBytes: Int64 = 0
+    private var seedReport: SeedVerificationReport?
+    private var seedVerifier: SeededArchiveVerifier?
+    private var seedCancel: SeedVerificationCancellation?
     private var maintenanceCandidates: [(mapping: MountedFolderMapping, inspection: StagingInspection)] = []
 
     private let queue = DispatchQueue(label: "macsync.mounted.copy.serial", qos: .utility)
@@ -31,10 +40,11 @@ final class MountedCopyController: ObservableObject {
     func start(
         sources: [(id: String, path: String, destination: String, expected: VolumeFingerprint?)]
     ) {
-        guard !maintaining else {
-            status = "Manutenzione in corso, copie non avviate"
+        guard !maintaining && !seedBusy else {
+            status = "Una verifica/manutenzione è in corso. Le copie restano ferme."
             return
         }
+        invalidateSeedReport()
         stop()
 
         let warning = NSAlert()
@@ -125,6 +135,185 @@ final class MountedCopyController: ObservableObject {
         } catch {
             active = false
             status = "Impossibile avviare: " + error.localizedDescription
+        }
+    }
+
+    /// No transfers and no deletions. SHA-256 is streamed from both source
+    /// and target, including through SMB. A size/time match alone NEVER
+    /// clears the queue. Verifier and journal stay on a serial worker queue.
+    func verifySeededFiles(sources: [(
+        id: String, path: String, destination: String, expected: VolumeFingerprint?
+    )]) {
+        guard !active && !maintaining && !seedBusy else {
+            seedStatus = "Ferma le copie e la manutenzione prima dell'allineamento"
+            return
+        }
+        let warning = NSAlert()
+        warning.alertStyle = .informational
+        warning.messageText = "Verificare i file già copiati con SHA-256?"
+        warning.informativeText = """
+        MacSync confronterà il contenuto dei file già presenti in Sorgente e
+        Destinazione e leggerà integralmente entrambi i file. Per 100 GB
+        potrebbe leggere circa 200 GB complessivi, di cui fino a 100 GB
+        attraverso la VPN. NON trasferirà o cancellerà alcun file.
+        Soltanto una conferma successiva potrà allineare la coda SQLite.
+        """
+        warning.addButton(withTitle: "Avvia verifica in sola lettura")
+        warning.addButton(withTitle: "Annulla")
+        guard warning.runModal() == .alertFirstButtonReturn else { return }
+
+        do {
+            let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
+            guard !configured.isEmpty,
+                  configured.allSatisfy({ !$0.path.isEmpty && !$0.destination.isEmpty }) else {
+                throw MountedCopyError.invalidMapping
+            }
+            let mappings = try configured.map {
+                try MountedFolderMapping(
+                    rootID: $0.id, source: URL(fileURLWithPath: $0.path),
+                    target: URL(fileURLWithPath: $0.destination),
+                    expectedTargetVolume: $0.expected
+                )
+            }
+            let database = try Self.databaseURL()
+            guard FileManager.default.fileExists(atPath: database.path) else {
+                throw JournalError.database("Avvia prima il monitoraggio locale")
+            }
+            let journal = try ChangeJournal(path: database.path)
+            let verifier = try SeededArchiveVerifier(journal: journal, mappings: mappings)
+            let cancellation = SeedVerificationCancellation()
+            seedReport = nil
+            seedVerifier = nil
+            seedCancel = cancellation
+            seedReady = false
+            seedBusy = true
+            seedVerifiedCount = 0
+            seedInspectedCount = 0
+            seedReadBytes = 0
+            seedStatus = "Analisi SHA-256 in corso (lettura locale e SMB)…"
+
+            queue.async { [weak self] in
+                do {
+                    let report = try verifier.verify(
+                        cancellation: cancellation,
+                        progress: { p in
+                            DispatchQueue.main.async { [weak self] in
+                                self?.seedInspectedCount = p.inspected
+                                self?.seedVerifiedCount = p.verified
+                                self?.seedReadBytes = p.bytesRead
+                                self?.seedStatus = "Verificati \(p.inspected) job, "
+                                    + "\(p.verified) file identici, "
+                                    + "\(p.missingOrDifferent) diversi, \(p.deferred) da rivedere"
+                            }
+                        }
+                    )
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { return }
+                        self.seedBusy = false
+                        if cancellation.isCancelled {
+                            self.seedStatus = "Verifica annullata: nessuna modifica alla coda"
+                            return
+                        }
+                        self.seedReport = report
+                        self.seedVerifier = verifier
+                        self.seedReady = !report.matches.isEmpty
+                        self.seedVerifiedCount = report.verifiedCount
+                        self.seedInspectedCount = report.inspected
+                        self.seedReadBytes = report.bytesRead
+                        self.seedStatus = "Verifica terminata: "
+                            + "\(report.verifiedCount) file identici via SHA-256; "
+                            + "\(report.missingOrDifferent) diversi o mancanti, "
+                            + "\(report.deferred) non verificabili. "
+                            + "Nessun file copiato o cancellato. Conferma separata necessaria."
+                    }
+                } catch {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.seedBusy = false
+                        self?.seedReady = false
+                        self?.seedReport = nil
+                        self?.seedVerifier = nil
+                        self?.seedStatus = cancellation.isCancelled
+                            ? "Verifica annullata; la coda è invariata"
+                            : "Verifica non riuscita: " + error.localizedDescription
+                    }
+                }
+            }
+        } catch {
+            seedStatus = "Verifica non avviata: " + error.localizedDescription
+        }
+    }
+
+    func cancelSeedVerification() {
+        seedCancel?.cancel()
+        seedStatus = "Annullamento richiesto…"
+    }
+
+    /// Only verified matches can be acknowledged. No copy/delete is issued.
+    func approveSeededFiles() {
+        guard !active && !seedBusy && !maintaining,
+              let report = seedReport, let verifier = seedVerifier,
+              !report.matches.isEmpty else { return }
+
+        let confirmation = NSAlert()
+        confirmation.alertStyle = .warning
+        confirmation.messageText = "Confermare \(report.matches.count) file già identici?"
+        confirmation.informativeText = """
+        I file verificati con SHA-256 verranno contrassegnati come completati
+        SOLTANTO nella coda locale SQLite, dopo un nuovo controllo dello stato
+        dei file. Nessun contenuto verrà modificato in Sorgente o Destinazione.
+        I file diversi o non verificabili rimarranno da sincronizzare.
+        """
+        confirmation.addButton(withTitle: "Conferma allineamento SQLite")
+        confirmation.addButton(withTitle: "Annulla")
+        guard confirmation.runModal() == .alertFirstButtonReturn else { return }
+        let cancellation = SeedVerificationCancellation()
+        seedCancel = cancellation
+        seedBusy = true
+        seedReady = false
+        seedStatus = "Conferma in corso (senza modificare file)…"
+        queue.async { [weak self] in
+            do {
+                let acknowledged = try verifier.approve(
+                    report: report, cancellation: cancellation
+                )
+                let db = try Self.databaseURL()
+                try? SyncActivityLog(path: db.path).record(
+                    level: .success, rootID: "app", action: "seed_confirmed",
+                    bytes: report.bytesRead,
+                    message: "File identici SHA-256 riconosciuti in SQLite: \(acknowledged)"
+                )
+                DispatchQueue.main.async { [weak self] in
+                    self?.seedBusy = false
+                    self?.seedReady = false
+                    self?.seedReport = nil
+                    self?.seedVerifier = nil
+                    self?.seedStatus = "Allineamento confermato: \(acknowledged) job "
+                        + "chiusi in SQLite; \(report.matches.count - acknowledged) "
+                        + "rimasti in coda perché cambiati o non più validi. "
+                        + "Nessun file modificato."
+                    self?.refresh()
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    self?.seedBusy = false
+                    self?.seedReady = false
+                    self?.seedReport = nil
+                    self?.seedVerifier = nil
+                    self?.seedStatus = cancellation.isCancelled
+                        ? "Conferma annullata: nessun job SHA-256 modificato"
+                        : "Conferma non riuscita: " + error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func invalidateSeedReport() {
+        seedCancel?.cancel()
+        seedReport = nil
+        seedVerifier = nil
+        seedReady = false
+        if !seedBusy {
+            seedStatus = "Cartelle cambiate: eseguire una nuova verifica SHA-256"
         }
     }
 
