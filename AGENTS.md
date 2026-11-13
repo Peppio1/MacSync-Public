@@ -46,6 +46,16 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 - GitHub Actions testa anche il falso positivo di size+mtime uguale ma hash diverso, il contenuto alterato dopo il preview, i job rimpiazzati da FSEvents e annullamento/atomicità.
 - Ancora necessari: prova reale SMB e validazione carico 100 GB; alternativa opzionale per primo seed con manifest hash calcolati mentre si copia via disco USB (non realizzata).
 
+## Stato v0.8.0 — cancellazione speculare opzionale
+- UI: interruttore cancellazioni speculari default OFF, opzione recupero default ON, giorni 1–30 oppure Mai (0), accesso Finder a `.macsync-recovery`.
+- Preferenze memorizzate non bastano ad autorizzare le eliminazioni: sessione sperimentale confermata esplicitamente ad ogni avvio; inizializzazione e scansione locale su queue di lavoro. La sessione considera solo DELETE generati DOPO la baseline armata (nessuna cancellazione retroattiva).
+- `MirrorDeletionWorker` controlla sorgente locale, volume destinazione SMB, inode/dev di entrambe le root, inventario e coda SQLite, soglie anti-mass-delete (>=250 o >=25 e >=10% baseline), ricomparsa file, symlink e directory non vuote. `unlink` e `rmdir` POSIX evitano rimozioni ricorsive.
+- Senza recupero: eliminazione definitiva del file in destinazione. Con recupero: spostamento nello stesso volume sotto `.macsync-recovery/<UUID>/<percorso originale>` e registrazione manifest SQLite.
+- Retention: 1–30 giorni => scadenza su record recupero, rimozione automatica solo durante sessione attiva e se identità/inode, dimensione, mtime, root e volume coincidono. Mai => scadenza NULL, niente purge; se sessione non attiva niente cleanup.
+- `MirrorDeletionCancellation` blocca operazioni successive allo stop; una singola unlink/move già avviata potrebbe completarsi.
+- Il recovery è dentro la cartella destinazione ed è nascosto. Non fare purge indiscriminati o scansioni ricorsive SMB ogni 5 minuti. Dati dei clienti NON devono essere usati nei test; test di produzione solo dopo collaudo su iMac e Windows Server 2016.
+- Le rinomine oggi vengono rappresentate da copy nuovo percorso + delete vecchio, non ancora da rename SMB server-side. Le cancellazioni intenzionali oltre soglia restano bloccate finché non implementato un override manuale protetto.
+
 ## Prossime fasi
 1. Confermare CI completo versione 0.7, testare drop e sostituzione file Mac localmente.
 2. Rendere trasparente e sicura la sostituzione di file grossi, metadati, e cleanup degli staging/backups; test di interruzione e retry.
@@ -55,4 +65,4 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 6. Collaudo reale su macOS Sequoia + Windows Server 2016/VPN (test iniziali locali e su sottocartelle sintetiche).
 
 ## Definition of done
-Sincronizzazione automatica per molte settimane con ripresa da errori VPN, nessuna perdita di dati, nessun software aggiuntivo sul server, performance misurate e manuale essenziale. V0.7 è solo prototipo, non produzione.
+Sincronizzazione automatica per molte settimane con ripresa da errori VPN, nessuna perdita di dati, nessun software aggiuntivo sul server, performance misurate e manuale essenziale. V0.8 è solo prototipo, non produzione.
