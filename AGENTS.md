@@ -54,7 +54,7 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 - Retention: 1–30 giorni => scadenza su record recupero, rimozione automatica solo durante sessione attiva e se identità/inode, dimensione, mtime, root e volume coincidono. Mai => scadenza NULL, niente purge; se sessione non attiva niente cleanup.
 - `MirrorDeletionCancellation` blocca operazioni successive allo stop; una singola unlink/move già avviata potrebbe completarsi.
 - Il recovery è dentro la cartella destinazione ed è nascosto. Non fare purge indiscriminati o scansioni ricorsive SMB ogni 5 minuti. Dati dei clienti NON devono essere usati nei test; test di produzione solo dopo collaudo su iMac e Windows Server 2016.
-- Le rinomine oggi vengono rappresentate da copy nuovo percorso + delete vecchio, non ancora da rename SMB server-side. Le cancellazioni intenzionali oltre soglia restano bloccate finché non implementato un override manuale protetto.
+- Le rinomine oggi vengono rappresentate da copy nuovo percorso + delete vecchio, non ancora da rename SMB server-side. Le cancellazioni intenzionali oltre soglia restano bloccate finché non implementato un override manuale protetto. La soglia considera anche le cancellazioni già effettuate nei cicli precedenti della stessa sessione.
 
 ## Prossime fasi
 1. Confermare CI completo versione 0.7, testare drop e sostituzione file Mac localmente.
