@@ -101,7 +101,7 @@ final class LocalInventoryTests: XCTestCase {
         let inventory = try LocalInventory(path: db.path)
         try inventory.reconcile(rootID: "photos", root: root)
         XCTAssertThrowsError(try inventory.reconcile(rootID: "photos", root: other))
-        XCTAssertEqual(try inventory.rootPath(rootID: "photos"), root.path)
+        XCTAssertEqual(try inventory.rootPath(rootID: "photos"), root.resolvingSymlinksInPath().path)
     }
 
     func testRefusesOutOfRootScanWithoutTouchingInventory() throws {
