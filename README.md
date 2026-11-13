@@ -1,4 +1,4 @@
-# MacSync — prototipo v0.8.1
+# MacSync — prototipo v0.9.0
 
 Applicazione nativa macOS per la futura sincronizzazione **unidirezionale Sorgente → Destinazione**, con copie selettive ogni 5 minuti, SQLite e FSEvents.
 
@@ -93,6 +93,19 @@ Quando un file viene cancellato dalla Sorgente, MacSync ricontrolla che l'assenz
 - La distinzione nuovo/aggiornato viene effettuata dal motore di copia. Le operazioni rimandate non contano come completate. I contatori di sessione ripartono a ogni nuova attivazione; lo storico durevole rimane nel registro SQLite e nell'esportazione TSV.
 
 **Stato:** test automatizzati macOS 15 riusciti, ma Finder drag-and-drop, VPN, SMB e cancellazioni su Windows Server 2016 devono ancora essere collaudati con file sintetici sull'iMac. Non utilizzare la cancellazione definitiva sui dati di produzione.
+
+## MacSync v0.9 — avvio automatico al login e monitor delle destinazioni
+
+- **Checkbox avvio al login:** nella finestra MacSync, sezione Impostazioni di avvio, selezionare Avvia automaticamente MacSync al login macOS. La registrazione è eseguita tramite il framework Apple ServiceManagement (SMAppService.mainApp); non vengono creati script di avvio, daemon, LaunchAgent o programmi esterni.
+- Lo stato mostrato dalla checkbox proviene da macOS, non da un valore UserDefaults. MacSync lo aggiorna quando la finestra compare e quando l'app torna attiva; rileva quindi modifiche effettuate nelle Impostazioni di Sistema. Se serve approvazione, compare il pulsante per aprire Elementi login.
+- L'avvio al login registra **l'applicazione**, non autorizza copie o eliminazioni. Al login riparte il monitoraggio delle Sorgenti già configurate; l'attivazione delle copie resta esplicita per sessione, e la cancellazione speculare non viene mai abilitata di nascosto.
+- La registrazione va effettuata aprendo il pacchetto MacSync.app, preferibilmente collocato in Applicazioni. L'eseguibile avviato direttamente con swift run non può essere registrato come app al login. Il pacchetto CI è firmato ad hoc e non notarizzato; l'autorizzazione effettiva al login richiede un test su Mac reale.
+- **Controllo destinazioni:** ogni 30 secondi, senza scrivere o leggere fotografie, MacSync verifica le cartelle selezionate e confronta il volume corrente con quello registrato al momento della scelta. Gli stati possibili sono non configurata, non verificata, non accessibile, volume differente e pronta. Il pulsante Verifica ora forza un nuovo controllo.
+- **VPN di test:** il collegamento VPN è gestito dal router di rete. MacSync non installa, avvia né configura alcun client VPN. Funziona con Wi-Fi o Ethernet quando il Mac può già raggiungere il server e macOS ha montato correttamente la condivisione SMB.
+- **Riconnessione:** se macOS rimonta la stessa condivisione al percorso configurato, il monitor la riconosce e i cicli di copia già attivati potranno ritentare le operazioni in coda. Se la condivisione SMB è stata smontata completamente, questa versione non può forzarne il rimontaggio, poiché non memorizza l'URL SMB né le credenziali: potrebbe essere necessario riaprirla dal Finder.
+- Durante l'assenza del volume atteso, MacSync non deve interpretare la destinazione come cartella locale sostitutiva né effettuare cancellazioni. Le copie già attivate ritentano ogni cinque minuti ma non vengono avviate automaticamente dopo un login.
+
+**Test:** i test CI macOS verificano la sonda locale con volume pronto, cartella assente/ritornata, fingerprint diverso e symlink. La compilazione dell'interfaccia e del controller ServiceManagement viene verificata da GitHub Actions, ma l'effettiva iscrizione ad Elementi login e l'accesso SMB dopo Wi-Fi/Ethernet devono essere collaudati sull'iMac.
 
 ## Test, limiti e sicurezza
 
