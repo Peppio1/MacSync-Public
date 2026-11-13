@@ -40,6 +40,14 @@ Names (not absolute paths): Cartella_1, Cartella_2; SMB parent Condivisione_SMB.
 - Next: test rclone against synthetic remote; safe initial bootstrap, staging for partial file writes, robust retry, macOS Keychain, login item; then separately gate deletion policy.
 - Do not declare Issue #2 production complete before real SMB test and atomic transfer safeguards.
 
+## Stato v0.4.0 — 13 novembre 2026
+- Implementati e testati in CI: monitor FSEvents, inventario SQLite, coda persistente, worker selettivo SMB con copia temporanea e successivo moveto, password macOS Keychain e profilo SMB generato in variabili d'ambiente anziché rclone.conf.
+- ANTEPRIMA INIZIALE: sola lettura sulle cartelle REALI del server usando rclone lsjson; classifica metadati presuntamente coincidenti, file da rivedere, file solo server, conflitti di maiuscole/minuscole. Non marca file come sincronizzati e NON cancella nulla.
+- SCRITTURA TEST: consentita SOLTANTO nelle sottocartelle MacSync_TEST_ONLY di una condivisione; mai nelle cartelle di produzione in questa versione. Richiede attivazione esplicita per sessione.
+- Non implementati: recupero/smaltimento sicuro di .macsync-staging orfani, import iniziale con riconciliazione senza ritrasferimento, propagazione cancellazioni e rinomine remote, avvio automatico, rclone incluso nel bundle.
+- Non dichiarare rilascio finale: prove end-to-end con Mac Sequoia e SMB Windows Server 2016 via VPN NON eseguite. GitHub Actions è test codice, non collaudo di rete.
+- PROSSIMO: test di integrazione con SMB reale e rinomina, pulizia sicura dello staging; bootstrap non distruttivo con conferma; solo poi politiche di cancellazione.
+
 ## Development phases
 1. SwiftPM base, SQLite, models, safety tests, macOS CI.
 2. FSEvents, durable event ID, recovery after shutdown and missed events.
