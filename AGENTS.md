@@ -71,6 +71,15 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 - Avvio al login NON è avvio automatico delle copie o eliminazioni: il monitor locale parte per sorgenti configurate, ma l'attivazione di copie e mirror resta per-sessione e richiede conferma separata. Nessun comportamento distruttivo durante il login.
 - Test CI macOS per probe di destinazioni disponibili, non disponibili, volume errato e symlink. La registrazione reale ServiceManagement e la continuità Wi-Fi/Ethernet/SMB vanno collaudate su Mac fisico.
 
+## Stato v0.9.1 — copia automatica non distruttiva, con volumi SMB verificati
+- Distinguere **Avvia MacSync al login** (SMAppService) da **Avvia copie e aggiornamenti automaticamente** (seconda checkbox, consenso separato e persistente, default OFF). Il flag automatico autorizza ONLY UPSERT, non elimina file né pulisce il recupero. MirrorDeletionWorker non viene mai creato da startAutomaticSafeCopies anche se mirrorEnabled è true.
+- MacSyncRuntime è un @MainActor ObservableObject posseduto da MacSyncApp (non dalla finestra): avvia periodicamente in background un check di AutomaticCopyReadiness, con modello/controllore persistenti anche quando la finestra è chiusa. Il timer tenta ogni 30 secondi, solo se FSEvents monitorRunning=true, senza sessione già attiva, con mapping completo e volume atteso. Il motore che viene attivato ogni 5 minuti è quello già testato di copie selettive; non esegue scan SMB integrale.
+- I controlli read-only di statfs/lstat sulla share si svolgono fuori dal main thread. Il risultato viene usato solo se la configurazione non è cambiata, il monitor è sempre pronto, il consenso è ancora attivo e l'utente non ha premuto Stop.
+- Ogni VolumeFingerprint ora include mountSource (statfs.f_mntfromname) oltre a filesystem/mountPath. I vecchi profili senza mountSource sono volutamente esclusi dalle copie automatiche: va riselezionata la Destinazione; non migrare silenziosamente un volume potenzialmente differente.
+- Se destinazione assente, worker rimanda il job e mai crea cartelle sostitutive; quando macOS rimonta il volume corrispondente, l'app ritenta. Nessun client VPN: il router di rete gestisce la VPN sulla connessione LAN Wi-Fi/Ethernet.
+- Stop manuale delle copie sospende auto-copy fino al successivo login o riavvio app (oppure nuova approvazione della checkbox). Cambio Sorgente/Destinazione disarma auto-copy. L'avvio al login da solo non abilita l'attività automatica.
+- Test macOS CI coprono decisioni automatiche offline/online, profili legacy, false identità, upload pendenti dopo disconnessione e uno scenario di riattivazione senza mai consumare DELETE. Restano necessari test con SMB reale, permessi e SMAppService su iMac.
+
 ## Prossime fasi
 1. Confermare CI completo versione 0.8.1, testare in Finder drag & drop e sostituzione su Mac locale.
 2. Rendere trasparente e sicura la sostituzione di file grossi, metadati, e cleanup degli staging/backups; test di interruzione e retry.
@@ -80,4 +89,4 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 6. Collaudo reale su macOS Sequoia + Windows Server 2016/VPN (test iniziali locali e su sottocartelle sintetiche).
 
 ## Definition of done
-Sincronizzazione automatica per molte settimane con ripresa da errori VPN, nessuna perdita di dati, nessun software aggiuntivo sul server, performance misurate e manuale essenziale. V0.9 è solo prototipo, non produzione.
+Sincronizzazione automatica per molte settimane con ripresa da errori VPN, nessuna perdita di dati, nessun software aggiuntivo sul server, performance misurate e manuale essenziale. V0.9.1 è solo prototipo, non produzione.
