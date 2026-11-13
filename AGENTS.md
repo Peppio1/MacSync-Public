@@ -13,7 +13,7 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 
 ## Regole di sicurezza obbligatorie
 1. MAI replicare una cancellazione per fonte assente, volume SMB smontato, errori, timeout o percorso errato.
-2. In v0.5 **NESSUNA cancellazione speculare remota**, persino se evento delete è in SQLite. Solo copie di prova, esplicitamente abilitate per la sessione.
+2. In v0.8 le cancellazioni speculari sono **OFF per impostazione predefinita**. Possono essere provate soltanto dopo un consenso esplicito a ogni sessione, con baseline valida, blocco mass-delete e nessun evento precedente all'abilitazione. Non usare su file di produzione senza collaudo SMB.
 3. Validare che nessuna sorgente/destinazione si sovrapponga, anche tra coppie, e che il volume destinazione risponda alla fingerprint di selezione (filesystem + mount point).
 4. Trasferimenti per file singolo, via staging nella destinazione stessa. Verificare sorgente stabile prima della pubblicazione. Sovrascritture in fase test devono avere backup non cancellato.
 5. Non loggare password, IP/host di server, percorsi assoluti, variabili d'ambiente con credenziali. Registro SQLite contiene percorso relativo del file e metadati: avvisare prima dell'esportazione.
@@ -21,7 +21,7 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 7. **Non dichiarare pronto per i 100 GB** finché bootstrap, cleanup staging, password Finder/VPN, macOS login, SMB rename e resilienza non sono collaudati.
 8. In assenza di certezze sull'API Foundation o sul comportamento di SMB, interrompere l'azione distruttiva e loggare l'errore senza peggiorare lo stato.
 
-## Architettura v0.5
+## Architettura corrente (base v0.5, estesa fino a v0.8)
 - Sources/MacSync/MacSyncApp.swift: finestra persistente SwiftUI per la configurazione drag&drop delle due coppie, icona menu bar per aprirla, monitor e log viewer.
 - Sources/MacSync/MountedCopyController.swift: worker di test in background, intervallo 5 minuti, registro, anteprima iniziale read-only.
 - Sources/MacSyncCore/LocalMonitorService.swift + FSEventsWatcher.swift: watcher nativo e recupero.
