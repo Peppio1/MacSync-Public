@@ -279,8 +279,8 @@ final class MountedCopyController: ObservableObject {
                 let db = try Self.databaseURL()
                 try? SyncActivityLog(path: db.path).record(
                     level: .success, rootID: "app", action: "seed_confirmed",
-                    bytes: report.bytesRead,
-                    message: "File identici SHA-256 riconosciuti in SQLite: \(acknowledged)"
+                    bytes: 0,
+                    message: "SHA-256: \(acknowledged) job riconosciuti senza copie; byte letti: \(report.bytesRead)"
                 )
                 DispatchQueue.main.async { [weak self] in
                     self?.seedBusy = false
