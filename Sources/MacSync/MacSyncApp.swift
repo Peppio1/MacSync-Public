@@ -384,6 +384,7 @@ private struct SyncSummarySheet: View {
 private struct MacSyncConfigurationView: View {
     @ObservedObject var model: MacSyncViewModel
     @ObservedObject var copy: MountedCopyController
+    @ObservedObject var runtime: MacSyncRuntime
     @State private var showLog = false
     @State private var showSummary = false
     @StateObject private var loginAtStartup = LaunchAtLoginController()
@@ -397,14 +398,22 @@ private struct MacSyncConfigurationView: View {
                 guard !copy.seedBusy else { return }
                 copy.stop()
                 copy.invalidateSeedReport()
+                let previous = model.folderPath(slot: slot, destination: destination)
                 model.chooseFolder(slot: slot, destination: destination)
+                if model.folderPath(slot: slot, destination: destination) != previous {
+                    runtime.onFolderConfigurationChanged()
+                }
                 destinations.refresh()
             },
             onFolderDropped: { url in
                 guard !copy.seedBusy else { return }
                 copy.stop()
                 copy.invalidateSeedReport()
+                let previous = model.folderPath(slot: slot, destination: destination)
                 model.setFolder(url: url, slot: slot, destination: destination)
+                if model.folderPath(slot: slot, destination: destination) != previous {
+                    runtime.onFolderConfigurationChanged()
+                }
                 destinations.refresh()
             }
         )
@@ -468,7 +477,24 @@ private struct MacSyncConfigurationView: View {
                             loginAtStartup.openSystemSettings()
                         }
                     }
-                    Text("L'avvio al login apre MacSync, ma non autorizza automaticamente copie o cancellazioni. Per questa versione le copie si attivano separatamente con conferma.")
+                    Text("L'avvio al login apre MacSync; le cancellazioni speculari non si attivano automaticamente.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Toggle(
+                        "Avvia automaticamente le copie e gli aggiornamenti",
+                        isOn: Binding(
+                            get: { copy.automaticCopiesEnabled },
+                            set: { runtime.onAutomaticPreferenceChanged($0) }
+                        )
+                    )
+                    .disabled(!loginAtStartup.isAvailable || copy.seedBusy || copy.maintaining)
+                    Text(runtime.automaticStatus)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Questa scelta richiede una conferma iniziale. Dopo il login, MacSync attende il monitoraggio locale e le destinazioni corrette; può copiare e aggiornare senza ulteriori conferme, ma non eliminare.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -598,7 +624,7 @@ private struct MacSyncConfigurationView: View {
                     }
                     Spacer()
                     if copy.active {
-                        Button("Ferma copie") { copy.stop() }
+                        Button("Ferma copie") { runtime.stopCopiesForCurrentLaunch() }
                     } else {
                         Button("Attiva copie di prova") {
                             copy.start(sources: model.configuredPairs())
@@ -683,7 +709,7 @@ private struct MacSyncConfigurationView: View {
                 Divider()
                 HStack {
                     Button("Ferma tutto") {
-                        copy.stop()
+                        runtime.stopCopiesForCurrentLaunch()
                         model.stopMonitoring()
                     }
                     Spacer()
@@ -756,6 +782,7 @@ private struct MacSyncStatusMenu: View {
     @Environment(\.openWindow) private var openWindow
     @ObservedObject var model: MacSyncViewModel
     @ObservedObject var copy: MountedCopyController
+    @ObservedObject var runtime: MacSyncRuntime
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -764,6 +791,9 @@ private struct MacSyncStatusMenu: View {
                 .font(.caption).foregroundStyle(.secondary)
             Text(copy.active ? "Copie di prova in esecuzione" : "Copie non attive")
                 .font(.caption).foregroundStyle(.secondary)
+            Text(runtime.automaticStatus)
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             Button("Apri configurazione…") {
                 openWindow(id: "configuration")
                 NSApplication.shared.activate(ignoringOtherApps: true)
@@ -781,17 +811,22 @@ private struct MacSyncStatusMenu: View {
 
 @main
 struct MacSyncApp: App {
-    @StateObject private var model = MacSyncViewModel()
-    @StateObject private var copy = MountedCopyController()
+    /// Created independently of the configuration window, so unattended
+    /// COPY/UPDATE monitoring works when the menu-bar app is hidden.
+    @StateObject private var runtime = MacSyncRuntime()
 
     var body: some Scene {
         Window("MacSync — Configurazione", id: "configuration") {
-            MacSyncConfigurationView(model: model, copy: copy)
+            MacSyncConfigurationView(
+                model: runtime.model, copy: runtime.copy, runtime: runtime
+            )
         }
         .defaultSize(width: 840, height: 740)
 
         MenuBarExtra("MacSync", systemImage: "arrow.triangle.2.circlepath") {
-            MacSyncStatusMenu(model: model, copy: copy)
+            MacSyncStatusMenu(
+                model: runtime.model, copy: runtime.copy, runtime: runtime
+            )
         }
         .menuBarExtraStyle(.window)
     }
