@@ -191,6 +191,8 @@ final class MountedFolderCopyTests: XCTestCase {
         let worker = try MountedFolderCopyWorker(journal: journal, log: log, mappings: [mapping])
         let outcome = try worker.runOnce(enabled: true)
         XCTAssertEqual(outcome.copied, 1)
+        XCTAssertEqual(outcome.created, 0)
+        XCTAssertEqual(outcome.updated, 1)
         XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "new version")
         let names = try FileManager.default.contentsOfDirectory(atPath: fixture.target.path)
         XCTAssertTrue(names.contains(where: { $0.hasPrefix(".macsync-backup-") }))
