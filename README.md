@@ -70,7 +70,7 @@ La finestra di configurazione contiene **Cancellazioni speculari** con le seguen
 - **Abilita cancellazione speculare**: interruttore separato, **disattivato per impostazione predefinita**. Se spento, eliminare un file dall'iMac NON elimina quello presente in Destinazione.
 - **Sposta i file eliminati nella cartella di recupero**: disponibile soltanto quando la cancellazione speculare è abilitata; l'impostazione predefinita è attiva perché più prudente.
 - **Conservazione**: selezione da **1 a 30 giorni** oppure **Mai — conserva sempre**. La scelta 'Mai' non programma alcuna rimozione automatica. Se si disabilita il recupero, le cancellazioni sono **definitive** e MacSync non può ripristinarle.
-- **Apri cartella di recupero nel Finder**: visualizza i file spostati sotto `.macsync-recovery` nella Destinazione. Il recupero manuale consiste nel copiare il file nella posizione desiderata; non è ancora disponibile un ripristino guidato nell'app.
+- **Apri cartella di recupero nel Finder**: visualizza i file spostati sotto `.macsync-recovery` nella Destinazione. Per ripristinare un file, copialo preferibilmente nella corretta cartella **Sorgente sull'iMac**: MacSync potrà così replicarlo nuovamente. Non è ancora disponibile un ripristino guidato nell'app.
 
 **Sicurezza fondamentale:** salvare le preferenze NON attiva eliminazioni da solo. In questa versione prototipo è necessario premere **Attiva copie di prova** e confermare per ogni sessione. MacSync prepara una baseline locale, controlla la presenza e l'identità delle cartelle Sorgente/Destinazione e, solo dopo, considera gli eventi di eliminazione generati durante quella sessione. Eventi DELETE registrati *prima* dell'attivazione non vengono eseguiti retroattivamente.
 
