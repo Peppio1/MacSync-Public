@@ -52,6 +52,7 @@ public final class ChangeJournal {
                 );
                 """)
             try execute("CREATE INDEX IF NOT EXISTS idx_queue_pending ON change_queue(completed, id);")
+            try execute("CREATE INDEX IF NOT EXISTS idx_queue_uploads ON change_queue(completed, kind, id);")
         } catch {
             sqlite3_close(connection)
             connection = nil
@@ -114,6 +115,36 @@ public final class ChangeJournal {
                 rootID: columnText(statement, at: 1),
                 relativePath: columnText(statement, at: 2),
                 kind: kind,
+                recordedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 4))
+            ))
+        }
+        return result
+    }
+
+
+    /// Fetch only pending upserts. Pending deletes must never starve uploads;
+    /// deletes remain queued for a future, separately gated mirror phase.
+    public func pendingUploads(limit: Int = 100) throws -> [QueuedChange] {
+        let statement = try prepare("""
+            SELECT id, root_id, relative_path, kind, recorded_at
+              FROM change_queue
+             WHERE completed = 0 AND kind = 'upsert'
+             ORDER BY id LIMIT ?;
+            """)
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_bind_int(statement, 1, Int32(max(1, min(limit, 1000)))) == SQLITE_OK else {
+            throw databaseFailure()
+        }
+        var result: [QueuedChange] = []
+        while true {
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { break }
+            guard status == SQLITE_ROW else { throw databaseFailure() }
+            result.append(QueuedChange(
+                id: sqlite3_column_int64(statement, 0),
+                rootID: columnText(statement, at: 1),
+                relativePath: columnText(statement, at: 2),
+                kind: .upsert,
                 recordedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 4))
             ))
         }
