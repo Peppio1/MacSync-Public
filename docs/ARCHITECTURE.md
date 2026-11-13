@@ -1,4 +1,4 @@
-# MacSync — Architettura v0.8.1 (prototipo)
+# MacSync — Architettura v0.9.0 (prototipo)
 
 ## Flusso
 Cartella Sorgente macOS → FSEvents → inventario e coda SQLite → worker seriale → cartella Destinazione (locale oppure SMB già montata dal Finder). Nessun componente sul server Windows 2016; macOS gestisce il login SMB esistente.
@@ -56,6 +56,14 @@ Transazioni SQLite e filesystem non formano una transazione distribuita: un cras
 - SyncDashboardStats costruisce statistiche di ciclo da MountedCopySummary e MirrorDeletionSummary, più gli elementi scaduti. La vista SwiftUI presenta una striscia di KPI e un dettaglio con selector ultimo ciclo/sessione. I dati sono relativi agli esiti effettivi e non inferiti dai pending job.
 - I conteggi sessione sono in memoria e ripartono all'attivazione; il log SQLite resta la fonte durevole per la diagnostica e l'export. Test dedicati verificano mapping e aggregazione dei contatori.
 - Nuovi test MirrorDeletion verificano stop con DELETE pendente, restart senza replay e preservazione di directory server non vuote.
+
+## v0.9 — avvio macOS opzionale e controllo SMB fail-closed
+- Nuovo LaunchAtLoginController in target MacSync: usa ServiceManagement.SMAppService.mainApp.status/register/unregister; checkbox in sezione Impostazioni di avvio. MacSync non conserva un falso flag locale: lo stato arriva dal sistema e viene riletto quando l'applicazione torna attiva. Lo stato requiresApproval presenta collegamento a Elementi login; in caso di errore l'interfaccia mostra lo stato effettivo.
+- ServiceManagement.register avvia l'APP al login, non i worker di copia o eliminazione. LocalMonitorService continua a riaprire l'inventario delle sorgenti configurate; una sessione di copie o di mirror NON viene ripristinata silenziosamente dopo il reboot.
+- Il router di rete gestisce la VPN; accesso via rete locale Wi-Fi o Ethernet. MacSync non apre tunnel VPN, non installa credenziali né esegue comandi di rete. L'SMB deve essere già montato da Finder/macOS come nelle versioni precedenti.
+- DestinationProbe in MacSyncCore verifica solo tipo directory via lstat e VolumeFingerprint.read, confrontato con il fingerprint salvato. Ritorna notConfigured/unverified/unavailable/differentVolume/ready. Non esegue mount, browse ricorsivo, trasferimenti o eliminazioni. DestinationStatusController in target app esegue probe su queue di background ogni 30 secondi e quando la finestra si riattiva, con lo stato mostrato nella schermata principale.
+- Se macOS rimonta automaticamente la condivisione, i probe tornano READY e la coda delle copie già attivata viene ritentata dopo il controllo di MountedFolderMapping.verify. Se macOS smonta completamente la share, MacSync non è ancora in grado di rimontarla senza URL/servizio disponibili; non riutilizzare mai directory di ripiego.
+- Test automatici del probe per destinazione mancante, rimontata localmente, symlink e fingerprint incompatibile. Mancano prove end-to-end SMAppService su app installata e resilienza SMB/VPN reale.
 
 ## Rischi non ancora risolti
 - Automatic login SMB e rimontaggio Finder dopo cambio VPN/sospensione/riavvio.
