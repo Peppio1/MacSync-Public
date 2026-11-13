@@ -86,6 +86,7 @@ private struct MirrorRootIdentity {
 private struct RecoveredRecord {
     let id: String
     let rootID: String
+    let targetRoot: String
     let managedRelativePath: String
     let size: Int64
     let inode: UInt64
@@ -112,6 +113,7 @@ public final class RecoveryManifest {
                 CREATE TABLE IF NOT EXISTS mirror_recovery(
                     id TEXT PRIMARY KEY,
                     root_id TEXT NOT NULL,
+                    target_root TEXT NOT NULL,
                     managed_path TEXT NOT NULL,
                     stored_at REAL NOT NULL,
                     expires_at REAL,
@@ -120,6 +122,18 @@ public final class RecoveryManifest {
                     modified_at REAL NOT NULL
                 );
                 """)
+            // Existing early prototypes may have recovery records without a
+            // destination identity. Migrate conservatively with an empty value:
+            // such records will never be auto-purged on an unknown target.
+            let migration = try prepare("PRAGMA table_info(mirror_recovery);")
+            var hasTargetRoot = false
+            while sqlite3_step(migration) == SQLITE_ROW {
+                if column(migration, 1) == "target_root" { hasTargetRoot = true }
+            }
+            sqlite3_finalize(migration)
+            if !hasTargetRoot {
+                try execute("ALTER TABLE mirror_recovery ADD COLUMN target_root TEXT NOT NULL DEFAULT '';")
+            }
             try execute("CREATE INDEX IF NOT EXISTS idx_mirror_recovery_expiry ON mirror_recovery(expires_at);")
         } catch {
             sqlite3_close(db)
@@ -131,42 +145,43 @@ public final class RecoveryManifest {
     deinit { if let db { sqlite3_close(db) } }
 
     public func record(
-        id: String, rootID: String, managedPath: String,
+        id: String, rootID: String, targetRoot: String, managedPath: String,
         size: Int64, inode: UInt64, mtime: Double,
         retentionDays: Int?
     ) throws {
-        guard !id.isEmpty, !rootID.isEmpty, !managedPath.isEmpty,
+        guard !id.isEmpty, !rootID.isEmpty, !targetRoot.isEmpty, !managedPath.isEmpty,
               !managedPath.hasPrefix("/"), size >= 0,
               retentionDays == nil || (1...30).contains(retentionDays!) else {
             throw JournalError.database("Invalid recovery record")
         }
         let statement = try prepare("""
             INSERT INTO mirror_recovery
-            (id,root_id,managed_path,stored_at,expires_at,file_size,inode,modified_at)
-            VALUES(?,?,?,?,?,?,?,?);
+            (id,root_id,target_root,managed_path,stored_at,expires_at,file_size,inode,modified_at)
+            VALUES(?,?,?,?,?,?,?,?,?);
             """)
         defer { sqlite3_finalize(statement) }
         try bind(id, 1, statement)
         try bind(rootID, 2, statement)
-        try bind(managedPath, 3, statement)
+        try bind(targetRoot, 3, statement)
+        try bind(managedPath, 4, statement)
         let at = Date().timeIntervalSince1970
-        guard sqlite3_bind_double(statement, 4, at) == SQLITE_OK else { throw failure() }
+        guard sqlite3_bind_double(statement, 5, at) == SQLITE_OK else { throw failure() }
         if let retentionDays {
-            guard sqlite3_bind_double(statement, 5, at + Double(retentionDays) * 86_400) == SQLITE_OK else {
+            guard sqlite3_bind_double(statement, 6, at + Double(retentionDays) * 86_400) == SQLITE_OK else {
                 throw failure()
             }
         } else {
-            guard sqlite3_bind_null(statement, 5) == SQLITE_OK else { throw failure() }
+            guard sqlite3_bind_null(statement, 6) == SQLITE_OK else { throw failure() }
         }
-        guard inode <= UInt64(Int64.max), sqlite3_bind_int64(statement, 6, size) == SQLITE_OK,
-              sqlite3_bind_int64(statement, 7, Int64(inode)) == SQLITE_OK,
-              sqlite3_bind_double(statement, 8, mtime) == SQLITE_OK,
+        guard inode <= UInt64(Int64.max), sqlite3_bind_int64(statement, 7, size) == SQLITE_OK,
+              sqlite3_bind_int64(statement, 8, Int64(inode)) == SQLITE_OK,
+              sqlite3_bind_double(statement, 9, mtime) == SQLITE_OK,
               sqlite3_step(statement) == SQLITE_DONE else { throw failure() }
     }
 
     fileprivate func expired(before: Date, limit: Int = 200) throws -> [RecoveredRecord] {
         let statement = try prepare("""
-            SELECT id,root_id,managed_path,file_size,inode,modified_at
+            SELECT id,root_id,target_root,managed_path,file_size,inode,modified_at
             FROM mirror_recovery
             WHERE expires_at IS NOT NULL AND expires_at <= ?
             ORDER BY expires_at, id LIMIT ?;
@@ -180,15 +195,16 @@ public final class RecoveryManifest {
             let status = sqlite3_step(statement)
             if status == SQLITE_DONE { break }
             guard status == SQLITE_ROW else { throw failure() }
-            let inodeValue = sqlite3_column_int64(statement, 4)
+            let inodeValue = sqlite3_column_int64(statement, 5)
             guard inodeValue >= 0 else { continue }
             items.append(RecoveredRecord(
                 id: column(statement, 0),
                 rootID: column(statement, 1),
-                managedRelativePath: column(statement, 2),
-                size: sqlite3_column_int64(statement, 3),
+                targetRoot: column(statement, 2),
+                managedRelativePath: column(statement, 3),
+                size: sqlite3_column_int64(statement, 4),
                 inode: UInt64(inodeValue),
-                mtime: sqlite3_column_double(statement, 5)
+                mtime: sqlite3_column_double(statement, 6)
             ))
         }
         return items
@@ -416,7 +432,8 @@ public final class MirrorDeletionWorker {
         var removed = 0
         for item in try manifest.expired(before: now) {
             if cancellation.isCancelled { break }
-            guard let mapping = mappings[item.rootID], let baseline = baselines[item.rootID] else { continue }
+            guard let mapping = mappings[item.rootID], let baseline = baselines[item.rootID],
+                  mapping.target.path == item.targetRoot else { continue }
             do {
                 try verifyRoots(mapping, baseline)
                 let safe = try validatedRecovery(item.managedRelativePath, mapping: mapping)
@@ -460,7 +477,8 @@ public final class MirrorDeletionWorker {
             throw MirrorDeletionFailure.destinationChanged
         }
         try manifest.record(
-            id: uuid, rootID: job.rootID, managedPath: managed,
+            id: uuid, rootID: job.rootID, targetRoot: mapping.target.path,
+            managedPath: managed,
             size: Int64(after.st_size), inode: UInt64(after.st_ino),
             mtime: Self.modificationTime(after),
             retentionDays: policy.retentionDays
