@@ -237,27 +237,28 @@ public final class SelectiveSMBCopyWorker {
         let isDirectory: Bool
         let size: Int64
         let mtime: TimeInterval
+        let inode: UInt64
     }
 
     private func attributes(of file: URL) throws -> Snapshot {
-        let values: URLResourceValues
-        do {
-            values = try file.resourceValues(forKeys: [
-                .isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey,
-                .fileSizeKey, .contentModificationDateKey
-            ])
-        } catch {
-            throw UploadError.sourceNotAvailable
-        }
-        guard values.isSymbolicLink != true else { throw UploadError.unsupportedSource }
-        guard values.isRegularFile == true || values.isDirectory == true else {
+        // URLResourceValues can cache metadata for a URL instance. Use lstat
+        // for a fresh source snapshot so active PSD files are NOT acknowledged.
+        var info = stat()
+        let rc = file.path.withCString { lstat($0, &info) }
+        guard rc == 0 else { throw UploadError.sourceNotAvailable }
+        let kind = info.st_mode & mode_t(S_IFMT)
+        guard kind == mode_t(S_IFREG) || kind == mode_t(S_IFDIR) else {
+            // In particular, never follow or upload a symbolic link.
             throw UploadError.unsupportedSource
         }
         return Snapshot(
-            isFile: values.isRegularFile == true,
-            isDirectory: values.isDirectory == true,
-            size: Int64(values.fileSize ?? 0),
-            mtime: values.contentModificationDate?.timeIntervalSince1970 ?? 0
+            isFile: kind == mode_t(S_IFREG),
+            isDirectory: kind == mode_t(S_IFDIR),
+            size: Int64(info.st_size),
+            mtime: Double(info.st_mtimespec.tv_sec)
+                + Double(info.st_mtimespec.tv_nsec) / 1_000_000_000,
+            inode: UInt64(info.st_ino)
         )
     }
+
 }
