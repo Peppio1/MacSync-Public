@@ -54,7 +54,7 @@ public struct VolumeFingerprint: Equatable, Codable, Sendable {
 
 /// Each selected target is used as-is. The prototype requires an explicit
 /// per-session opt-in, and it NEVER performs remote deletions.
-public struct MountedFolderMapping {
+public struct MountedFolderMapping: Sendable {
     public let rootID: String
     public let source: URL
     public let target: URL
