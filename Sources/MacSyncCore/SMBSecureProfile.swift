@@ -30,6 +30,13 @@ public struct SMBSecureProfile: Equatable {
         "macsync_smb:" + share
     }
 
+    /// Unconditionally confines early TEST builds to a dedicated subfolder
+    /// inside the configured SMB share. Normal archive folders are never
+    /// addressed by this prerelease controller.
+    public var sandboxRemoteParent: String {
+        remoteParent + "/MacSync_TEST_ONLY"
+    }
+
     public func environment(obscuredPassword: String) throws -> [String: String] {
         guard !obscuredPassword.isEmpty,
               !obscuredPassword.contains("\n"),
