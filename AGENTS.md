@@ -8,7 +8,7 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 - Sorgenti locali del Mac (monitor FSEvents); destinazioni locali o SMB già montate; sfruttare le credenziali memorizzate nel sistema operativo. Niente form IP/utente/password/dominio, niente rclone o Keychain proprietario per il trasferimento.
 - SQLite locale per inventario, coda persistente, attività e log esportabili. FSEvents per rilevare modifiche, con scansioni locali mirate e audit periodici.
 - Copie ogni circa 5 minuti quando abilitate; non enumerare ricorsivamente la destinazione a ogni ciclo.
-- Obiettivo finale: installo/configuro/dimentico, avvio automatico al login, recupero VPN e verifica monte SMB, mirror di cancellazioni e rinomine.
+- Obiettivo finale: installo/configuro/dimentico, avvio automatico al login opzionale, verifica del monte SMB e gestione della ripresa senza cancellazioni improprie. La VPN è GIÀ gestita dal router di rete e non è di competenza di MacSync.
 - Gli altri utenti hanno accesso in lettura alla copia server; permessi gestiti da Windows. L'iMac è fonte di verità.
 
 ## Regole di sicurezza obbligatorie
@@ -63,6 +63,14 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 - I contatori in memoria si azzerano all'attivazione di una nuova sessione; il registro SQLite mantiene lo storico persistente delle attività. Non contare scansioni hash o job rimandati come copie completate.
 - La pipeline GitHub Actions macOS 15 è stata verificata sui nuovi test. Rimangono obbligatori collaudi di Finder UI, SMB/VPN e autorizzazioni macOS; non attivare cancellazioni sui dati reali.
 
+## Stato v0.9.0 — avvio al login e disponibilità destinazione
+- L'utente richiede una checkbox esplicita: Avvia automaticamente MacSync al login macOS. Implementata tramite SMAppService.mainApp (ServiceManagement), senza script, servizi o helper. Lo stato reale viene letto dall'OS, non da UserDefaults; errori di registrazione non mostrano checkbox falsamente attiva. Richiede MacSync.app, collaudo manuale di Elementi login, permessi e riavvio su iMac.
+- La VPN è configurata/gestita nel router di rete, non sul Mac. Collegandosi via Wi-Fi o Ethernet alla rete locale, il traffico VPN è già disponibile. Non introdurre client VPN, certificati VPN, autenticazione VPN, credenziali SMB aggiuntive o gestori esterni di rete.
+- DestinationProbe e DestinationStatusController: controllo read-only dei percorsi destinazione ogni circa 30 secondi e su richiesta, confronto obbligatorio con fingerprint del volume salvato, blocco se non disponibile, diverso o non verificato. Nessuna enumerazione remota dei file e nessuna scrittura.
+- Se macOS rimonta automaticamente la condivisione SMB nello stesso percorso, il controllo torna READY e un worker di copia GIÀ attivo potrà ritentare al ciclo successivo (300s). MacSync non forza automaticamente il rimontaggio di un volume SMB smontato; senza URL SMB non sarebbe affidabile né sicuro.
+- Avvio al login NON è avvio automatico delle copie o eliminazioni: il monitor locale parte per sorgenti configurate, ma l'attivazione di copie e mirror resta per-sessione e richiede conferma separata. Nessun comportamento distruttivo durante il login.
+- Test CI macOS per probe di destinazioni disponibili, non disponibili, volume errato e symlink. La registrazione reale ServiceManagement e la continuità Wi-Fi/Ethernet/SMB vanno collaudate su Mac fisico.
+
 ## Prossime fasi
 1. Confermare CI completo versione 0.8.1, testare in Finder drag & drop e sostituzione su Mac locale.
 2. Rendere trasparente e sicura la sostituzione di file grossi, metadati, e cleanup degli staging/backups; test di interruzione e retry.
@@ -72,4 +80,4 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 6. Collaudo reale su macOS Sequoia + Windows Server 2016/VPN (test iniziali locali e su sottocartelle sintetiche).
 
 ## Definition of done
-Sincronizzazione automatica per molte settimane con ripresa da errori VPN, nessuna perdita di dati, nessun software aggiuntivo sul server, performance misurate e manuale essenziale. V0.8.1 è solo prototipo, non produzione.
+Sincronizzazione automatica per molte settimane con ripresa da errori VPN, nessuna perdita di dati, nessun software aggiuntivo sul server, performance misurate e manuale essenziale. V0.9 è solo prototipo, non produzione.
