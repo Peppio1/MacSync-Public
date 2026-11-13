@@ -262,8 +262,9 @@ public final class MirrorDeletionWorker {
             guard try journal.watchedRootPath(rootID: mapping.rootID) == mapping.source.path
             else { throw MirrorDeletionFailure.noBaseline }
             let inventory = try LocalScanner.scan(root: mapping.source)
-            // Never enable a mirror against a source that appears empty.
-            guard !inventory.isEmpty else { throw MirrorDeletionFailure.noBaseline }
+            // An empty source is allowed ONLY so that previously recovered
+            // items can still expire. DeletionSafety rejects fresh deletes
+            // against a zero-item baseline (no verified source inventory).
             let rootStamp = try Self.statFile(mapping.source)
             let targetStamp = try Self.statFile(mapping.target)
             guard Self.isDirectory(rootStamp), Self.isDirectory(targetStamp)
