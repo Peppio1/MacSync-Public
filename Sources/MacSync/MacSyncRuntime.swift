@@ -15,6 +15,11 @@ final class MacSyncRuntime: ObservableObject {
 
     private var timer: Timer?
     private var suspendedUntilNextLaunch = false
+    private var configurationRevision = 0
+    private var readinessCheckInProgress = false
+    private let readinessWorker = DispatchQueue(
+        label: "macsync.autocopy.readiness", qos: .utility
+    )
 
     init() {
         let t = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
@@ -39,6 +44,7 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     func onAutomaticPreferenceChanged(_ enabled: Bool) {
+        configurationRevision += 1
         copy.setAutomaticCopiesEnabled(enabled)
         if copy.automaticCopiesEnabled {
             suspendedUntilNextLaunch = false
@@ -49,6 +55,7 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     func onFolderConfigurationChanged() {
+        configurationRevision += 1
         // The selected folders may no longer represent the destinations
         // approved for unattended copying. Disarm unattended copy preference.
         if copy.automaticCopiesEnabled {
@@ -59,36 +66,65 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     func checkAutomaticCopies() {
-        guard !suspendedUntilNextLaunch else { return }
-
-        let configured = model.configuredPairs()
-        let decision = AutomaticCopyReadiness.evaluate(
-            enabled: copy.automaticCopiesEnabled,
-            monitorRunning: model.monitoring,
-            copyActive: copy.active,
-            pairs: configured.map {
-                AutomaticCopyPair(
-                    sourcePath: $0.path, destinationPath: $0.destination,
-                    expectedVolume: $0.expected
-                )
-            }
-        )
-
-        switch decision {
-        case .alreadyActive:
+        guard !suspendedUntilNextLaunch, !readinessCheckInProgress else { return }
+        if !copy.automaticCopiesEnabled {
+            automaticStatus = "Copie automatiche disabilitate"
+            return
+        }
+        if copy.active {
             automaticStatus = copy.automaticSession
                 ? "Copie automatiche attive (solo nuovi file e aggiornamenti)"
                 : "Sessione di copie manuale attiva"
-        case .ready:
-            automaticStatus = "Destinazione disponibile: attivo le copie automatiche"
-            copy.startAutomaticSafeCopies(sources: configured)
-            if copy.active {
-                automaticStatus = "Copie automatiche attive (mai cancellazioni)"
-            } else {
-                automaticStatus = "Attivazione rinviata: verifica il registro e la configurazione"
+            return
+        }
+        if !model.monitoring {
+            automaticStatus = "Attendo il monitoraggio delle sorgenti"
+            return
+        }
+
+        // Never run lstat/statfs on a potentially unresponsive SMB mount
+        // from the main thread. Only the final, still-authorized activation
+        // happens on the UI actor.
+        let pairs = model.configuredPairs()
+        let snapshot = pairs.map {
+            AutomaticCopyPair(
+                sourcePath: $0.path, destinationPath: $0.destination,
+                expectedVolume: $0.expected
+            )
+        }
+        let revision = configurationRevision
+        readinessCheckInProgress = true
+        automaticStatus = "Controllo disponibilità destinazioni…"
+        readinessWorker.async { [weak self] in
+            let decision = AutomaticCopyReadiness.evaluate(
+                enabled: true, monitorRunning: true, copyActive: false,
+                pairs: snapshot
+            )
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.readinessCheckInProgress = false
+
+                // The user may have toggled auto-copy, stopped a session, or
+                // changed either folder while this probe was in progress.
+                guard self.configurationRevision == revision,
+                      !self.suspendedUntilNextLaunch,
+                      self.copy.automaticCopiesEnabled,
+                      self.model.monitoring,
+                      !self.copy.active else { return }
+
+                if decision == .ready {
+                    self.automaticStatus = "Destinazione disponibile: attivo copie automatiche"
+                    self.copy.startAutomaticSafeCopies(
+                        sources: self.model.configuredPairs()
+                    )
+                    self.automaticStatus = self.copy.active
+                        ? "Copie automatiche attive (mai cancellazioni)"
+                        : "Attivazione rinviata: verifica il registro e le cartelle"
+                } else {
+                    self.automaticStatus = decision.description
+                }
             }
-        default:
-            automaticStatus = decision.description
         }
     }
+
 }
