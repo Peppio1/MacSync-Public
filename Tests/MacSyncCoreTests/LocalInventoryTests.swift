@@ -126,6 +126,40 @@ final class LocalInventoryTests: XCTestCase {
             .contains(where: { $0.relativePath == "before2/safe.jpg" && $0.kind == .delete }))
     }
 
+    func testRegularFilesBeforeFolderNeverSuppressNestedDescendants() throws {
+        let (base, root, db) = try temporaryFixture()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        // Regression: calling enumerator.skipDescendants() after a regular
+        // file previously suppressed the next folder's children on macOS.
+        try Data("first".utf8).write(to: root.appendingPathComponent("first.dng"))
+        try Data("second".utf8).write(to: root.appendingPathComponent("second.dng"))
+        let album = root.appendingPathComponent("album")
+        let nested = album.appendingPathComponent("2026")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try Data("photo".utf8).write(to: nested.appendingPathComponent("shot.dng"))
+
+        let scanned = try LocalScanner.scan(root: root)
+        let paths = Set(scanned.map { $0.relativePath })
+        XCTAssertEqual(paths, Set([
+            "first.dng", "second.dng", "album",
+            "album/2026", "album/2026/shot.dng"
+        ]))
+
+        let inventory = try LocalInventory(path: db.path)
+        let added = try inventory.reconcile(rootID: "photos", root: root)
+        XCTAssertEqual(added.queuedUpserts, 5)
+
+        try FileManager.default.removeItem(at: album)
+        let removed = try inventory.reconcile(rootID: "photos", root: root, subtree: album)
+        XCTAssertEqual(removed.queuedDeletes, 3)
+        XCTAssertEqual(try inventory.itemCount(rootID: "photos"), 2)
+        let deleted = try ChangeJournal(path: db.path).pending()
+            .filter { $0.kind == .delete }
+        XCTAssertEqual(Set(deleted.map { $0.relativePath }),
+                       Set(["album", "album/2026", "album/2026/shot.dng"]))
+    }
+
     func testRefusesOutOfRootScanWithoutTouchingInventory() throws {
         let (base, root, db) = try temporaryFixture()
         defer { try? FileManager.default.removeItem(at: base) }
