@@ -87,9 +87,11 @@ public protocol RcloneCommandExecuting {
 /// credentials outside the project/repository. Keychain UI is a later phase.
 public final class ProcessRcloneExecutor: RcloneCommandExecuting {
     public let executable: URL
+    private let additionalEnvironment: [String: String]
 
-    public init(executable: URL) {
+    public init(executable: URL, additionalEnvironment: [String: String] = [:]) {
         self.executable = executable
+        self.additionalEnvironment = additionalEnvironment
     }
 
     public func run(arguments: [String], timeout: TimeInterval) throws {
@@ -100,6 +102,11 @@ public final class ProcessRcloneExecutor: RcloneCommandExecuting {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
+        if !additionalEnvironment.isEmpty {
+            process.environment = ProcessInfo.processInfo.environment.merging(
+                additionalEnvironment, uniquingKeysWith: { _, override in override }
+            )
+        }
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice // Never leak SMB data/paths
