@@ -68,7 +68,7 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 - La VPN è configurata/gestita nel router di rete, non sul Mac. Collegandosi via Wi-Fi o Ethernet alla rete locale, il traffico VPN è già disponibile. Non introdurre client VPN, certificati VPN, autenticazione VPN, credenziali SMB aggiuntive o gestori esterni di rete.
 - DestinationProbe e DestinationStatusController: controllo read-only dei percorsi destinazione ogni circa 30 secondi e su richiesta, confronto obbligatorio con fingerprint del volume salvato, blocco se non disponibile, diverso o non verificato. Nessuna enumerazione remota dei file e nessuna scrittura.
 - Se macOS rimonta automaticamente la condivisione SMB nello stesso percorso, il controllo torna READY e un worker di copia GIÀ attivo potrà ritentare al ciclo successivo (300s). MacSync non forza automaticamente il rimontaggio di un volume SMB smontato; senza URL SMB non sarebbe affidabile né sicuro.
-- Avvio al login NON è avvio automatico delle copie o eliminazioni: il monitor locale parte per sorgenti configurate, ma l'attivazione di copie e mirror resta per-sessione e richiede conferma separata. Nessun comportamento distruttivo durante il login.
+- Avvio al login dell'app NON concede consenso a nuove copie o eliminazioni. In v0.9.1 la seconda checkbox, approvata separatamente, consente COPY/UPDATE automatici; la cancellazione mirror resta esclusivamente manuale per sessione. Nessuna cancellazione automatica al login.
 - Test CI macOS per probe di destinazioni disponibili, non disponibili, volume errato e symlink. La registrazione reale ServiceManagement e la continuità Wi-Fi/Ethernet/SMB vanno collaudate su Mac fisico.
 
 ## Stato v0.9.1 — copia automatica non distruttiva, con volumi SMB verificati
