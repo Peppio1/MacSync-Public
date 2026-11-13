@@ -143,13 +143,27 @@ struct MacSyncApp: App {
                 Divider()
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("SMB — SOLO TEST, copie facoltative").font(.caption.bold())
-                    Text("Destinazione rclone (alias:condivisione)")
+                    Text("SMB — SOLO TEST, credenziali nel Portachiavi").font(.caption.bold())
+                    Text("Server SMB (nome host o IP VPN)")
                         .font(.caption2).foregroundStyle(.secondary)
-                    TextField("macsync_smb:Condivisione_SMB",
-                              text: $uploader.remoteParent)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.caption)
+                    TextField("server-esempio", text: $uploader.host)
+                        .textFieldStyle(.roundedBorder).font(.caption)
+                    Text("Nome utente SMB")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    TextField("utente", text: $uploader.username)
+                        .textFieldStyle(.roundedBorder).font(.caption)
+                    Text("Dominio / gruppo di lavoro")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    TextField("WORKGROUP", text: $uploader.domain)
+                        .textFieldStyle(.roundedBorder).font(.caption)
+                    Text("Nome condivisione SMB di PROVA")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    TextField("CondivisioneDiProva", text: $uploader.share)
+                        .textFieldStyle(.roundedBorder).font(.caption)
+                    Text("Password SMB (salvata nel Portachiavi)")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    SecureField("Inserisci per salvare o aggiornare", text: $uploader.password)
+                        .textFieldStyle(.roundedBorder).font(.caption)
 
                     Text("Percorso eseguibile rclone sul Mac")
                         .font(.caption2).foregroundStyle(.secondary)
@@ -178,7 +192,7 @@ struct MacSyncApp: App {
                     }
                 }
 
-                Text("Cancellazioni sul server NON disponibili. Per ora usare soltanto dati di prova; rclone va configurato localmente.")
+                Text("Cancellazioni sul server NON disponibili. Usare solo dati fittizi; nessuna password viene salvata su GitHub o in rclone.conf.")
                     .font(.caption2)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
@@ -197,7 +211,7 @@ struct MacSyncApp: App {
                 }
             }
             .padding(16)
-            .frame(width: 410)
+            .frame(width: 420)
         }
         .menuBarExtraStyle(.window)
     }
