@@ -77,7 +77,15 @@ final class MountedCopyController: ObservableObject {
                            repeating: .seconds(300), leeway: .seconds(5))
             timer.setEventHandler { [weak self] in
                 do {
+                    let startedAt = Date()
                     let summary = try worker.runOnce(enabled: true, maxJobs: 50)
+                    try log.record(
+                        level: summary.failed > 0 ? .warning : .info,
+                        rootID: "app", action: "cycle",
+                        bytes: summary.bytes,
+                        durationSeconds: max(0, Date().timeIntervalSince(startedAt)),
+                        message: "Ciclo completato: \(summary.copied) copie, \(summary.deferred) rimandate, \(summary.failed) errori"
+                    )
                     let result = "Ultimo ciclo: \(summary.copied) copie, "
                         + "\(summary.deferred) rimandate, \(summary.failed) errori, "
                         + "\(ByteCountFormatter.string(fromByteCount: summary.bytes, countStyle: .file)) trasferiti."
