@@ -60,7 +60,7 @@ final class ExperimentalUploadController: ObservableObject {
         alert.informativeText = """
         Questa versione può COPIARE e SOVRASCRIVERE file sul server, ma non
         eliminarli. Ogni file viene caricato prima in una cartella temporanea.
-        Usa ESCLUSIVAMENTE condivisioni e cartelle DI PROVA.
+        Tutte le copie sono limitate alla sottocartella MacSync_TEST_ONLY della share scelta.
         I tentativi interrotti possono lasciare file temporanei sul server.
         L'attivazione vale soltanto per la sessione corrente.
         """
@@ -93,14 +93,14 @@ final class ExperimentalUploadController: ObservableObject {
                 mappings.append(try SMBUploadMapping(
                     rootID: "photo-uploads",
                     localRoot: URL(fileURLWithPath: photoUploads),
-                    remoteRoot: profile.remoteParent + "/Cartella_1"
+                    remoteRoot: profile.sandboxRemoteParent + "/Cartella_1"
                 ))
             }
             if !photoEditing.isEmpty {
                 mappings.append(try SMBUploadMapping(
                     rootID: "photo-editing",
                     localRoot: URL(fileURLWithPath: photoEditing),
-                    remoteRoot: profile.remoteParent + "/Cartella_2"
+                    remoteRoot: profile.sandboxRemoteParent + "/Cartella_2"
                 ))
             }
             guard !mappings.isEmpty else {
@@ -179,13 +179,13 @@ final class ExperimentalUploadController: ObservableObject {
             if !photoUploads.isEmpty {
                 roots.append((
                     URL(fileURLWithPath: photoUploads),
-                    profile.remoteParent + "/Cartella_1"
+                    profile.sandboxRemoteParent + "/Cartella_1"
                 ))
             }
             if !photoEditing.isEmpty {
                 roots.append((
                     URL(fileURLWithPath: photoEditing),
-                    profile.remoteParent + "/Cartella_2"
+                    profile.sandboxRemoteParent + "/Cartella_2"
                 ))
             }
             guard !roots.isEmpty else {
