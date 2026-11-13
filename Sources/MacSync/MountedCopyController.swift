@@ -8,6 +8,20 @@ import MacSyncCore
 final class MountedCopyController: ObservableObject {
     @Published var status = "Copie ferme: puoi selezionare cartelle locali o SMB già montate."
     @Published var active = false
+
+    // Preferences describe the desired policy only. Actual destructive work
+    // remains OFF until explicit activation of the current test session.
+    @Published var mirrorEnabled = UserDefaults.standard.bool(forKey: "MacSync.mirrorEnabled") {
+        didSet { UserDefaults.standard.set(mirrorEnabled, forKey: "MacSync.mirrorEnabled") }
+    }
+    @Published var mirrorRecovery = (UserDefaults.standard.object(forKey: "MacSync.mirrorRecovery") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(mirrorRecovery, forKey: "MacSync.mirrorRecovery") }
+    }
+    /// 0 = never delete recovery files automatically; 1...30 = days.
+    @Published var mirrorRetention = UserDefaults.standard.object(forKey: "MacSync.mirrorRetention") as? Int ?? 30 {
+        didSet { UserDefaults.standard.set(mirrorRetention, forKey: "MacSync.mirrorRetention") }
+    }
+    @Published var mirrorStatus = "Cancellazioni speculari non attive"
     @Published var previewStatus = "Anteprima iniziale non eseguita"
     @Published var recentEntries: [SyncLogEntry] = []
     @Published var logLevel = "all"
@@ -47,18 +61,45 @@ final class MountedCopyController: ObservableObject {
         invalidateSeedReport()
         stop()
 
+        let policy: MirrorDeletionPolicy
+        do {
+            policy = try MirrorDeletionPolicy(
+                enabled: mirrorEnabled, recoveryEnabled: mirrorRecovery,
+                retentionDays: mirrorRetention == 0 ? nil : mirrorRetention
+            )
+        } catch {
+            status = "Impostazioni cancellazione non valide: " + error.localizedDescription
+            return
+        }
+
         let warning = NSAlert()
         warning.alertStyle = .warning
-        warning.messageText = "Abilitare le copie di prova?"
+        warning.messageText = policy.enabled
+            ? "Attivare copie e cancellazioni speculari DI PROVA?"
+            : "Abilitare le copie di prova?"
+        let deleteWarning: String
+        if !policy.enabled {
+            deleteWarning = "La cancellazione speculare è DISABILITATA."
+        } else if policy.recoveryEnabled {
+            deleteWarning = "I file eliminati saranno SPOSTATI in .macsync-recovery. "
+                + (policy.retentionDays.map { "Verranno rimossi automaticamente dopo \($0) giorni." }
+                    ?? "Non verranno eliminati automaticamente.")
+        } else {
+            deleteWarning = "ATTENZIONE: le cancellazioni saranno DEFINITIVE, SENZA RECUPERO MacSync."
+        }
         warning.informativeText = """
-        MacSync può creare e SOVRASCRIVERE file nella cartella di destinazione
-        che hai scelto. Seleziona ESCLUSIVAMENTE cartelle di prova vuote o
-        contenenti dati sintetici. Nessuna cancellazione speculare è attiva.
+        MacSync può creare e SOVRASCRIVERE file nella cartella di destinazione.
+        Seleziona ESCLUSIVAMENTE cartelle con DATI DI PROVA.
 
-        L'attivazione è valida solo per questa sessione. Le credenziali SMB
-        sono gestite da macOS: la condivisione deve essere già montata.
+        \(deleteWarning)
+
+        Le cancellazioni precedenti a questa attivazione non saranno eseguite.
+        La protezione blocca cancellazioni massive e sorgenti/volumi anomali.
+        Questa scelta è valida soltanto per la sessione corrente.
         """
-        warning.addButton(withTitle: "Attiva copie di prova")
+        warning.addButton(withTitle: policy.enabled
+            ? "Conferma copia e cancellazione di prova"
+            : "Attiva copie di prova")
         warning.addButton(withTitle: "Annulla")
         guard warning.runModal() == .alertFirstButtonReturn else {
             status = "Copie non attivate"
@@ -88,6 +129,10 @@ final class MountedCopyController: ObservableObject {
             let worker = try MountedFolderCopyWorker(
                 journal: journal, log: log, mappings: maps
             )
+            let recoveryManifest = try RecoveryManifest(path: database.path)
+            // Initial source audit can be expensive on a large archive.
+            // Create the armed deletion worker on the serial background queue.
+            var mirrorWorker: MirrorDeletionWorker?
             try log.record(
                 level: .info, rootID: "app", action: "session",
                 message: "Sessione di copie di prova abilitata"
@@ -98,13 +143,37 @@ final class MountedCopyController: ObservableObject {
             timer.setEventHandler { [weak self] in
                 do {
                     let startedAt = Date()
+                    if policy.enabled && mirrorWorker == nil {
+                        mirrorWorker = try MirrorDeletionWorker(
+                            journal: journal, manifest: recoveryManifest,
+                            log: log, mappings: maps, policy: policy
+                        )
+                        try? log.record(
+                            level: .info, rootID: "app", action: "mirror_armed",
+                            message: policy.recoveryEnabled
+                                ? "Mirror di prova attivato con recupero" : "Mirror di prova attivato senza recupero"
+                        )
+                    }
                     let summary = try worker.runOnce(enabled: true, maxJobs: 50)
+                    var mirrorSummary = MirrorDeletionSummary()
+                    var expired = 0
+                    if let mirrorWorker {
+                        mirrorSummary = try mirrorWorker.runOnce(maxFiles: 25)
+                        expired = try mirrorWorker.pruneExpiredRecovery()
+                    }
+                    let mirrorDetails = !policy.enabled ? "" :
+                        " Specchio: \(mirrorSummary.removed) eliminati, "
+                        + "\(mirrorSummary.recovered) recuperabili, "
+                        + "\(mirrorSummary.directories) cartelle vuote, "
+                        + "\(mirrorSummary.deferred) rimandati, "
+                        + "\(expired) recuperi scaduti."
+                        + (mirrorSummary.blocked ? " BLOCCATO: \(mirrorSummary.detail)." : "")
                     try log.record(
                         level: summary.failed > 0 ? .warning : .info,
                         rootID: "app", action: "cycle",
                         bytes: summary.bytes,
                         durationSeconds: max(0, Date().timeIntervalSince(startedAt)),
-                        message: "Ciclo completato: \(summary.copied) copie, \(summary.deferred) rimandate, \(summary.failed) errori"
+                        message: "Ciclo completato: \(summary.copied) copie, \(summary.deferred) rimandate, \(summary.failed) errori." + mirrorDetails
                     )
                     // Only the SQLite activity table is pruned, never file
                     // inventory, queue, photographs, backups or staging.
@@ -114,6 +183,7 @@ final class MountedCopyController: ObservableObject {
                         + "\(ByteCountFormatter.string(fromByteCount: summary.bytes, countStyle: .file)) trasferiti."
                     DispatchQueue.main.async { [weak self] in
                         self?.status = result
+                        self?.mirrorStatus = policy.enabled ? mirrorDetails : "Cancellazioni speculari disattivate"
                         self?.refresh()
                     }
                 } catch {
@@ -129,6 +199,9 @@ final class MountedCopyController: ObservableObject {
             }
             self.timer = timer
             active = true
+            mirrorStatus = policy.enabled
+                ? "Configurazione armata: la verifica delle sorgenti avverrà al primo ciclo"
+                : "Cancellazioni speculari disattivate"
             status = "Copie di prova attive; controllo ogni cinque minuti"
             refresh()
             timer.resume()
@@ -520,6 +593,7 @@ final class MountedCopyController: ObservableObject {
         timer?.cancel()
         timer = nil
         active = false
+        mirrorStatus = "Cancellazioni speculari non attive; un'operazione già avviata può terminare"
         status = "Copie fermate. Un trasferimento già avviato può terminare."
     }
 
