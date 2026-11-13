@@ -10,6 +10,7 @@ final class SMBSecureProfileTests: XCTestCase {
         )
         let environment = try profile.environment(obscuredPassword: "OBSCURED_TEST_SECRET")
         XCTAssertEqual(profile.remoteParent, "macsync_smb:Condivisione_SMB")
+        XCTAssertEqual(profile.sandboxRemoteParent, "macsync_smb:Condivisione_SMB/MacSync_TEST_ONLY")
         XCTAssertEqual(environment["RCLONE_CONFIG_MACSYNC_SMB_TYPE"], "smb")
         XCTAssertEqual(environment["RCLONE_CONFIG_MACSYNC_SMB_HOST"], "192.0.2.10")
         XCTAssertEqual(environment["RCLONE_CONFIG_MACSYNC_SMB_USER"], "test-user")
