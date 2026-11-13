@@ -14,7 +14,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Tools
         run: |
           xcodebuild -version
@@ -31,7 +31,7 @@ jobs:
           plutil -lint dist/MacSync.app/Contents/Info.plist
           codesign --force --sign - dist/MacSync.app
           ditto -c -k --sequesterRsrc --keepParent dist/MacSync.app dist/MacSync-prototype.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: MacSync-macos15-prototype
           path: dist/MacSync-prototype.zip
