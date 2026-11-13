@@ -32,6 +32,18 @@ public enum MountedCopyError: Error, LocalizedError, Equatable {
 public struct VolumeFingerprint: Equatable, Codable, Sendable {
     public let fileSystem: String
     public let mountPath: String
+    /// SMB mount source, e.g. //server/share, as reported by statfs.
+    /// Never write this value to activity logs. Nil denotes an old profile
+    /// and must not be trusted for unattended background copying.
+    public let mountSource: String?
+
+    public init(fileSystem: String, mountPath: String, mountSource: String? = nil) {
+        self.fileSystem = fileSystem
+        self.mountPath = mountPath
+        self.mountSource = mountSource
+    }
+
+    public var isStrongIdentity: Bool { mountSource?.isEmpty == false }
 
     public static func read(at url: URL) throws -> VolumeFingerprint {
         var info = statfs()
@@ -47,7 +59,13 @@ public struct VolumeFingerprint: Equatable, Codable, Sendable {
                 String(cString: $0)
             }
         }
-        return VolumeFingerprint(fileSystem: fs, mountPath: mount)
+        let from = withUnsafePointer(to: &info.f_mntfromname) { pointer in
+            pointer.withMemoryRebound(to: CChar.self, capacity: 1) {
+                String(cString: $0)
+            }
+        }
+        return VolumeFingerprint(fileSystem: fs, mountPath: mount,
+                                 mountSource: from.isEmpty ? nil : from)
     }
 
     public var isNetworkVolume: Bool {
@@ -56,8 +74,8 @@ public struct VolumeFingerprint: Equatable, Codable, Sendable {
     }
 }
 
-/// Each selected target is used as-is. The prototype requires an explicit
-/// per-session opt-in, and it NEVER performs remote deletions.
+/// Each selected target is used as-is. Deletion actions are handled only
+/// by the separately confirmed MirrorDeletionWorker.
 public struct MountedFolderMapping: Sendable {
     public let rootID: String
     public let source: URL
