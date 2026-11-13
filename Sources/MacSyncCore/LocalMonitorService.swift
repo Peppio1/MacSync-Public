@@ -6,7 +6,7 @@ public struct MonitorRoot: Equatable, Sendable {
 
     public init(id: String, url: URL) {
         self.id = id
-        self.url = url.standardizedFileURL
+        self.url = url.standardizedFileURL.resolvingSymlinksInPath()
     }
 }
 
