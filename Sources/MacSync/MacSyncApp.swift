@@ -177,6 +177,19 @@ struct MacSyncApp: App {
                         .foregroundStyle(uploader.active ? .green : .secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
+                    Button("Anteprima iniziale (sola lettura)") {
+                        uploader.inspectInitialBaseline(
+                            photoUploads: model.photoUploads,
+                            photoEditing: model.photoEditing
+                        )
+                    }
+                    .disabled(uploader.active)
+
+                    Text(uploader.baselineStatus)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
                     HStack {
                         Button("Salva") { uploader.save() }
                         if uploader.active {
