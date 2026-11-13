@@ -32,7 +32,7 @@ public final class LocalMonitorService {
         self.update = onUpdate
     }
 
-    public func start(roots: [MonitorRoot], databasePath: String) {
+    public func start(roots: [MonitorRoot], databasePath: String, allowSourceRebinding: Bool = false) {
         queue.async { [self] in
             self.stopOnQueue()
             guard !roots.isEmpty else {
@@ -42,6 +42,15 @@ public final class LocalMonitorService {
             do {
                 let checked = try self.validateRoots(roots)
                 let store = try LocalInventory(path: databasePath)
+                for root in checked {
+                    if let existing = try store.rootPath(rootID: root.id),
+                       existing != root.url.path {
+                        guard allowSourceRebinding else {
+                            throw JournalError.database("Source folder mapping changed; confirmation required")
+                        }
+                        try store.resetRootForNewSource(rootID: root.id, newRoot: root.url)
+                    }
+                }
 
                 // Snapshot the event position BEFORE scanning. The stream
                 // replays changes made during the startup scan.
