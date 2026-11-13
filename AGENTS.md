@@ -37,8 +37,17 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 - Registro SQLite: filtri per livello e testo, export TSV filtrato, retention di 20.000 righe o 90 giorni; non registrare segreti/percorsi assoluti, controllare nomi file sensibili.
 - Lo scaricamento/copia di un file grande interrotto riparte dall'inizio. Continuare a vietare cancellazioni speculari e funzionamento unattended in questa fase; usare soltanto cartelle di prova.
 
+## Stato v0.7.0 — seed SHA-256 verificato
+- Implementato SeededArchiveVerifier: legge in streaming da 1 MiB il contenuto dei file UPSERT pendenti, con SHA-256 CryptoKit, considerando soltanto sorgenti/destinazioni regolari. Convalida tutti i parent via lstat, blocca symlink e verifica fingerprint del volume SMB.
+- Non fidarsi mai di dimensione/data come prova di identità: i candidati con stessa dimensione vengono confrontati byte-per-byte via digest SHA-256. Progress basato anche su byte letti; supporto ad annullamento.
+- La scansione non cambia file né coda: il pulsante Conferma N file identici approva esplicitamente. Prima della transazione vengono confrontati nuovamente inode, dev, size, mtime e ctime delle due copie; UPDATE SQLite condizionale verifica job ID, root, path, inventario e assenza di job concorrenti. Nessuna cancellazione e nessuna scrittura nella destinazione.
+- I file mancanti, diversi, cambiati, symlink e cartelle non sono riconosciuti; gli UPSERT restano in coda. Il DELETE non viene mai toccato.
+- La verifica può leggere 100 GB dalla share via VPN e 100 GB localmente: non ritrasferisce i file ma non elimina il costo della lettura SMB. Non eseguirla ogni 5 minuti, solo su richiesta.
+- GitHub Actions testa anche il falso positivo di size+mtime uguale ma hash diverso, il contenuto alterato dopo il preview, i job rimpiazzati da FSEvents e annullamento/atomicità.
+- Ancora necessari: prova reale SMB e validazione carico 100 GB; alternativa opzionale per primo seed con manifest hash calcolati mentre si copia via disco USB (non realizzata).
+
 ## Prossime fasi
-1. Confermare CI completo versione 0.6, testare drop e sostituzione file Mac localmente.
+1. Confermare CI completo versione 0.7, testare drop e sostituzione file Mac localmente.
 2. Rendere trasparente e sicura la sostituzione di file grossi, metadati, e cleanup degli staging/backups; test di interruzione e retry.
 3. Bootstrap guidato dei 100 GB già presenti (differenze per dimensione/data solo presunte; verifica robusta prima di marcare come sincronizzati).
 4. Auto-login e riconnessione mount Finder dopo VPN, sospensione e riavvio; notifiche e politiche log rotation.
@@ -46,4 +55,4 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 6. Collaudo reale su macOS Sequoia + Windows Server 2016/VPN (test iniziali locali e su sottocartelle sintetiche).
 
 ## Definition of done
-Sincronizzazione automatica per molte settimane con ripresa da errori VPN, nessuna perdita di dati, nessun software aggiuntivo sul server, performance misurate e manuale essenziale. V0.6 è solo prototipo, non produzione.
+Sincronizzazione automatica per molte settimane con ripresa da errori VPN, nessuna perdita di dati, nessun software aggiuntivo sul server, performance misurate e manuale essenziale. V0.7 è solo prototipo, non produzione.
