@@ -26,6 +26,7 @@ public final class LocalMonitorService {
     private var inventory: LocalInventory?
     private var roots: [MonitorRoot] = []
     private var lastFullScan: Date?
+    private var recoveryRequired = false
 
     public init(onUpdate: @escaping (MonitorUpdate) -> Void) {
         self.update = onUpdate
@@ -101,6 +102,20 @@ public final class LocalMonitorService {
         guard let inventory else { return }
         var totalChanges = 0
         do {
+            if events.contains(where: { $0.streamHistoryLost }) {
+                // A dropped event stream may have missed modifications under
+                // ANY watched root, not merely under the reported event path.
+                let lastID = events.map(\.eventID).max()
+                for root in roots {
+                    _ = try inventory.reconcile(
+                        rootID: root.id, root: root.url, eventID: lastID
+                    )
+                }
+                lastFullScan = Date()
+                recoveryRequired = false
+                report("Eventi persi: inventario locale ricontrollato", active: true)
+                return
+            }
             for event in events {
                 guard let root = roots.first(where: {
                     event.path == $0.url.path || event.path.hasPrefix($0.url.path + "/")
@@ -126,8 +141,9 @@ public final class LocalMonitorService {
                 report("Modifiche locali registrate: \(totalChanges)", active: true)
             }
         } catch {
-            // Error paths remain unacknowledged and a later local full
-            // reconciliation re-discovers changes even if FSEvents was lost.
+            // Failed event paths remain unacknowledged. Retry by scanning
+            // LOCAL folders at the next 5-minute health check.
+            recoveryRequired = true
             report("Errore inventario: " + error.localizedDescription, active: false)
         }
     }
@@ -145,14 +161,16 @@ public final class LocalMonitorService {
                     }
                 }
                 // This is a LOCAL periodic audit, not a recurring SMB scan.
-                if self.lastFullScan.map({ Date().timeIntervalSince($0) >= 86_400 }) ?? true {
+                if self.recoveryRequired || self.lastFullScan.map({ Date().timeIntervalSince($0) >= 86_400 }) ?? true {
                     for root in self.roots {
                         _ = try store.reconcile(rootID: root.id, root: root.url)
                     }
                     self.lastFullScan = Date()
+                    self.recoveryRequired = false
                     self.report("Verifica completa locale conclusa", active: true)
                 }
             } catch {
+                self.recoveryRequired = true
                 self.report("Verifica locale sospesa: " + error.localizedDescription, active: false)
             }
         }
@@ -168,6 +186,7 @@ public final class LocalMonitorService {
         inventory = nil
         roots = []
         lastFullScan = nil
+        recoveryRequired = false
     }
 
     private func report(_ message: String, active: Bool) {
