@@ -41,6 +41,7 @@ final class MountedCopyController: ObservableObject {
 
     private let queue = DispatchQueue(label: "macsync.mounted.copy.serial", qos: .utility)
     private var timer: DispatchSourceTimer?
+    private var mirrorCancellation: MirrorDeletionCancellation?
 
     private static func databaseURL() throws -> URL {
         let support = try FileManager.default.url(
@@ -132,6 +133,8 @@ final class MountedCopyController: ObservableObject {
             let recoveryManifest = try RecoveryManifest(path: database.path)
             // Initial source audit can be expensive on a large archive.
             // Create the armed deletion worker on the serial background queue.
+            let cancellation = MirrorDeletionCancellation()
+            mirrorCancellation = policy.enabled ? cancellation : nil
             var mirrorWorker: MirrorDeletionWorker?
             try log.record(
                 level: .info, rootID: "app", action: "session",
@@ -146,7 +149,8 @@ final class MountedCopyController: ObservableObject {
                     if policy.enabled && mirrorWorker == nil {
                         mirrorWorker = try MirrorDeletionWorker(
                             journal: journal, manifest: recoveryManifest,
-                            log: log, mappings: maps, policy: policy
+                            log: log, mappings: maps, policy: policy,
+                            cancellation: cancellation
                         )
                         try? log.record(
                             level: .info, rootID: "app", action: "mirror_armed",
@@ -590,6 +594,8 @@ final class MountedCopyController: ObservableObject {
     }
 
     func stop() {
+        mirrorCancellation?.cancel()
+        mirrorCancellation = nil
         timer?.cancel()
         timer = nil
         active = false
