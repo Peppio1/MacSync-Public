@@ -115,6 +115,9 @@ public struct MountedFolderMapping: Sendable {
 }
 
 public struct MountedCopySummary: Equatable {
+    public var created = 0
+    public var updated = 0
+    public var directoriesCreated = 0
     public var copied = 0
     public var deferred = 0
     public var failed = 0
@@ -173,15 +176,28 @@ public final class MountedFolderCopyWorker {
                 continue
             }
             do {
-                let bytes = try transfer(job, mapping: mapping)
+                let outcome = try transfer(job, mapping: mapping)
                 try journal.markCompleted(id: job.id)
                 summary.copied += 1
-                summary.bytes += bytes
+                summary.bytes += outcome.bytes
+                switch outcome.kind {
+                case .created: summary.created += 1
+                case .updated: summary.updated += 1
+                case .directoryCreated: summary.directoriesCreated += 1
+                case .directoryExisting: break
+                }
+                let detail: String
+                switch outcome.kind {
+                case .created: detail = "Nuovo file copiato"
+                case .updated: detail = "File aggiornato"
+                case .directoryCreated: detail = "Cartella creata"
+                case .directoryExisting: detail = "Cartella già presente"
+                }
                 try log.record(
                     level: .success, rootID: job.rootID, action: "copy",
-                    relativePath: job.relativePath, bytes: bytes,
+                    relativePath: job.relativePath, bytes: outcome.bytes,
                     durationSeconds: Date().timeIntervalSince(started),
-                    message: "Trasferimento completato"
+                    message: detail
                 )
             } catch let error as MountedCopyError {
                 switch error {
@@ -210,7 +226,13 @@ public final class MountedFolderCopyWorker {
         return summary
     }
 
-    private func transfer(_ job: QueuedChange, mapping: MountedFolderMapping) throws -> Int64 {
+    private enum TransferKind { case created, updated, directoryCreated, directoryExisting }
+    private struct TransferOutcome {
+        let bytes: Int64
+        let kind: TransferKind
+    }
+
+    private func transfer(_ job: QueuedChange, mapping: MountedFolderMapping) throws -> TransferOutcome {
         try mapping.verify()
         let src = try mapping.fileURL(relativePath: job.relativePath, destination: false)
         let dst = try mapping.fileURL(relativePath: job.relativePath, destination: true)
@@ -222,14 +244,16 @@ public final class MountedFolderCopyWorker {
 
         if snapshot.kind == .directory {
             try ensureSafeParents(dst, under: mapping.target, create: true)
-            if fm.fileExists(atPath: dst.path) {
+            let alreadyPresent = fm.fileExists(atPath: dst.path)
+            if alreadyPresent {
                 let existing = try readSnapshot(dst)
                 guard existing.kind == .directory else { throw MountedCopyError.destinationConflict }
             } else {
                 try fm.createDirectory(at: dst, withIntermediateDirectories: false)
             }
             try mapping.verify()
-            return 0
+            return TransferOutcome(bytes: 0,
+                kind: alreadyPresent ? .directoryExisting : .directoryCreated)
         }
 
         guard now().timeIntervalSince1970 - snapshot.mtime >= minimumStableAge else {
@@ -239,7 +263,8 @@ public final class MountedFolderCopyWorker {
         // Check capacity before creating staging or safety backups. An
         // overwrite temporarily needs space for both old and new copies.
         var existingBytes: Int64 = 0
-        if fm.fileExists(atPath: dst.path) {
+        let targetExisted = fm.fileExists(atPath: dst.path)
+        if targetExisted {
             let targetSnapshot = try readSnapshot(dst)
             guard targetSnapshot.kind == .file else { throw MountedCopyError.destinationConflict }
             existingBytes = targetSnapshot.size
@@ -288,7 +313,8 @@ public final class MountedFolderCopyWorker {
             guard try readSnapshot(src) == snapshot else {
                 throw MountedCopyError.sourceChanging
             }
-            return snapshot.size
+            return TransferOutcome(bytes: snapshot.size,
+                kind: targetExisted ? .updated : .created)
         } catch {
             // NEVER delete anything in the shared destination on failure;
             // interrupted stage objects remain for future safe GC.
