@@ -143,6 +143,25 @@ final class MirrorDeletionTests: XCTestCase {
         ))
     }
 
+    func testRecoveryExpiryAfterRestartWhenSourceIsEmpty() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let firstSession = try worker(f, recover: true, days: 1)
+        try deleteSource(f, name: "photo0.dng")
+        try deleteSource(f, name: "photo1.dng")
+        XCTAssertEqual(try firstSession.runOnce().recovered, 2)
+
+        // Next session sees an intentionally empty but accessible source.
+        // It must NOT enable new mirror deletes without a baseline, yet it
+        // should still honor the expiry of previously recovered files.
+        let nextSession = try worker(f, recover: true, days: 1)
+        XCTAssertEqual(
+            try nextSession.pruneExpiredRecovery(
+                now: Date().addingTimeInterval(2 * 86_400)
+            ), 2
+        )
+    }
+
     func testModifiedRecoveryIsNotAutomaticallyPurged() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }
