@@ -32,6 +32,14 @@ Names (not absolute paths): Cartella_1, Cartella_2; SMB parent Condivisione_SMB.
 - NON implementati: rclone SMB, copia/cancellazioni remote, Keychain, avvio automatico al login, collaudo VPN di test.
 - Prossima priorità: issue #2 (motore SMB selettivo), senza abilitare cancellazioni remote fino ai test di sicurezza issue #3.
 
+## Progress, v0.3.0 (13 November 2026)
+- DONE: local FSEvents watcher, targeted SQLite reconciliation and durable event queue.
+- DONE (experimental, opt-in): selective rclone copyto for a single regular file; mkdir for a single tracked directory; local source stability checks, strict path validation, retry and queue acknowledgement only after success; UI session-only copy toggle.
+- NEVER performed by the upload worker: remote delete, purge, sync, moveto. Local delete events remain queued, untouched.
+- CI macOS unit tests exercise a fake rclone executor; real SMB/VPN and credentials are NOT tested.
+- Next: test rclone against synthetic remote; safe initial bootstrap, staging for partial file writes, robust retry, macOS Keychain, login item; then separately gate deletion policy.
+- Do not declare Issue #2 production complete before real SMB test and atomic transfer safeguards.
+
 ## Development phases
 1. SwiftPM base, SQLite, models, safety tests, macOS CI.
 2. FSEvents, durable event ID, recovery after shutdown and missed events.
