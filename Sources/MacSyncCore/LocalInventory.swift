@@ -234,8 +234,8 @@ public final class LocalInventory {
                 throw JournalError.database("Source root moved; refusing to reconcile against a different path")
             }
 
-            let before = try readEntries(rootID: rootID)
-            let affected = before.filter { fullScan || $0.key == scope || $0.key.hasPrefix(scope + "/") }
+            let before = try readEntries(rootID: rootID, scope: fullScan ? nil : scope)
+            let affected = before
             let seen = Dictionary(uniqueKeysWithValues: rows.map { ($0.relativePath, $0) })
             var upserts = 0
             var deletes = 0
@@ -267,13 +267,34 @@ public final class LocalInventory {
         }
     }
 
-    private func readEntries(rootID: String) throws -> [String: TrackedItem] {
-        let statement = try prepare("""
-            SELECT relative_path, kind, file_size, modified_at
-            FROM file_inventory WHERE root_id = ?;
-            """)
+    private func readEntries(rootID: String, scope: String?) throws -> [String: TrackedItem] {
+        // The composite primary key (root_id, relative_path) makes this a
+        // targeted index lookup for file events, even with huge local archives.
+        // For scope="folder", descendants lie in ["folder/", "folder0")
+        // because ASCII '/' is immediately followed by '0'.
+        let sql: String
+        if scope != nil {
+            sql = """
+                SELECT relative_path, kind, file_size, modified_at
+                FROM file_inventory
+                WHERE root_id = ? AND
+                  (relative_path = ? OR
+                    (relative_path >= ? AND relative_path < ?));
+                """
+        } else {
+            sql = """
+                SELECT relative_path, kind, file_size, modified_at
+                FROM file_inventory WHERE root_id = ?;
+                """
+        }
+        let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
         try bind(rootID, at: 1, statement: statement)
+        if let scope {
+            try bind(scope, at: 2, statement: statement)
+            try bind(scope + "/", at: 3, statement: statement)
+            try bind(scope + "0", at: 4, statement: statement)
+        }
         var items: [String: TrackedItem] = [:]
         while true {
             let result = sqlite3_step(statement)
