@@ -5,12 +5,13 @@ import XCTest
 private final class FakeRclone: RcloneCommandExecuting {
     var commands: [[String]] = []
     var fail = false
+    var failOnCommand: String?
     var onRun: (() -> Void)?
 
     func run(arguments: [String], timeout: TimeInterval) throws {
         commands.append(arguments)
         onRun?()
-        if fail { throw UploadError.commandFailed(77) }
+        if fail || arguments.first == failOnCommand { throw UploadError.commandFailed(77) }
     }
 }
 
@@ -70,12 +71,16 @@ final class SelectiveSMBCopyTests: XCTestCase {
         )
         let outcome = try worker.runOnce(enabled: true)
         XCTAssertEqual(outcome.succeeded, 1)
-        XCTAssertEqual(fake.commands.count, 1)
+        XCTAssertEqual(fake.commands.count, 2)
         XCTAssertEqual(fake.commands[0][0], "copyto")
         XCTAssertEqual(fake.commands[0][1], image.path)
-        XCTAssertEqual(fake.commands[0][2], "macsync_smb:Condivisione_SMB/Cartella_1/set 2026/foto àè 😀.dng")
+        XCTAssertTrue(fake.commands[0][2].contains("/.macsync-staging/"))
+        XCTAssertTrue(fake.commands[0][2].hasSuffix(".partial"))
+        XCTAssertEqual(fake.commands[1][0], "moveto")
+        XCTAssertEqual(fake.commands[1][1], fake.commands[0][2])
+        XCTAssertEqual(fake.commands[1][2], "macsync_smb:Condivisione_SMB/Cartella_1/set 2026/foto àè 😀.dng")
         XCTAssertFalse(fake.commands[0].contains("sync"))
-        XCTAssertFalse(fake.commands[0].contains("delete"))
+        XCTAssertFalse(fake.commands.flatMap { $0 }.contains("delete"))
         XCTAssertTrue(try journal.pending().isEmpty)
     }
 
@@ -109,7 +114,7 @@ final class SelectiveSMBCopyTests: XCTestCase {
             journal: journal, runner: fake, mappings: [mapping(root)]
         )
         XCTAssertEqual(try worker.runOnce(enabled: true, maxJobs: 1).succeeded, 1)
-        XCTAssertEqual(fake.commands.map { $0[0] }, ["copyto"])
+        XCTAssertEqual(fake.commands.map { $0[0] }, ["copyto", "moveto"])
         XCTAssertEqual(try journal.pending().filter { $0.kind == .delete }.count, 60)
     }
 
@@ -186,8 +191,44 @@ final class SelectiveSMBCopyTests: XCTestCase {
 
         XCTAssertEqual(try worker.runOnce(enabled: true, maxJobs: 1).deferred, 1)
         XCTAssertEqual(try worker.runOnce(enabled: true, maxJobs: 1).succeeded, 1)
-        XCTAssertEqual(fake.commands.count, 1)
-        XCTAssertEqual(fake.commands[0][0], "copyto")
+        XCTAssertEqual(fake.commands.count, 2)
+        XCTAssertEqual(fake.commands.map { $0[0] }, ["copyto", "moveto"])
+        XCTAssertEqual(try journal.pending().count, 1)
+    }
+
+    func testFailedPromotionLeavesJobQueued() throws {
+        let (base, root, _, journal) = try fixture()
+        defer { try? FileManager.default.removeItem(at: base) }
+        try oldFile(root.appendingPathComponent("important.psd"))
+        try journal.enqueue(rootID: "photos", relativePath: "important.psd", kind: .upsert)
+
+        let fake = FakeRclone()
+        fake.failOnCommand = "moveto"
+        let worker = try SelectiveSMBCopyWorker(
+            journal: journal, runner: fake, mappings: [mapping(root)]
+        )
+        let result = try worker.runOnce(enabled: true)
+        XCTAssertEqual(result.failed, 1)
+        XCTAssertEqual(fake.commands.map { $0[0] }, ["copyto", "moveto"])
+        XCTAssertTrue(fake.commands[0][2].contains(".macsync-staging"))
+        XCTAssertEqual(try journal.pending().count, 1)
+    }
+
+    func testSourceChangedBeforePromotionDoesNotOverwriteFinalDestination() throws {
+        let (base, root, _, journal) = try fixture()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let file = root.appendingPathComponent("open-project.psd")
+        try oldFile(file)
+        try journal.enqueue(rootID: "photos", relativePath: "open-project.psd", kind: .upsert)
+        let fake = FakeRclone()
+        fake.onRun = {
+            try? Data("an actively modified document".utf8).write(to: file)
+        }
+        let worker = try SelectiveSMBCopyWorker(
+            journal: journal, runner: fake, mappings: [mapping(root)]
+        )
+        XCTAssertEqual(try worker.runOnce(enabled: true).deferred, 1)
+        XCTAssertEqual(fake.commands.map { $0[0] }, ["copyto"])
         XCTAssertEqual(try journal.pending().count, 1)
     }
 
