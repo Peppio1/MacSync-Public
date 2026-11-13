@@ -1,4 +1,4 @@
-# MacSync — Architettura v0.9.0 (prototipo)
+# MacSync — Architettura v0.9.1 (prototipo)
 
 ## Flusso
 Cartella Sorgente macOS → FSEvents → inventario e coda SQLite → worker seriale → cartella Destinazione (locale oppure SMB già montata dal Finder). Nessun componente sul server Windows 2016; macOS gestisce il login SMB esistente.
@@ -64,6 +64,15 @@ Transazioni SQLite e filesystem non formano una transazione distribuita: un cras
 - DestinationProbe in MacSyncCore verifica solo tipo directory via lstat e VolumeFingerprint.read, confrontato con il fingerprint salvato. Ritorna notConfigured/unverified/unavailable/differentVolume/ready. Non esegue mount, browse ricorsivo, trasferimenti o eliminazioni. DestinationStatusController in target app esegue probe su queue di background ogni 30 secondi e quando la finestra si riattiva, con lo stato mostrato nella schermata principale.
 - Se macOS rimonta automaticamente la condivisione, i probe tornano READY e la coda delle copie già attivata viene ritentata dopo il controllo di MountedFolderMapping.verify. Se macOS smonta completamente la share, MacSync non è ancora in grado di rimontarla senza URL/servizio disponibili; non riutilizzare mai directory di ripiego.
 - Test automatici del probe per destinazione mancante, rimontata localmente, symlink e fingerprint incompatibile. Mancano prove end-to-end SMAppService su app installata e resilienza SMB/VPN reale.
+
+## v0.9.1 — coordinatore di avvio automatico delle copie
+- MacSyncRuntime è inizializzato da MacSyncApp, indipendentemente dalla finestra di configurazione, e possiede MacSyncViewModel + MountedCopyController. Il coordinatore valuta periodicamente AutomaticCopyReadiness soltanto se la checkbox di copia automatica è stata approvata. Valuta l'indice pronto, la presenza dei percorsi e il fingerprint del volume, senza tentare di montare SMB.
+- Lo stato di readiness viene valutato su DispatchQueue utility, così un statfs bloccato dalla share SMB non occupa il thread della GUI. Al rientro su main actor vengono ricontrollate le condizioni di consenso, monitor, configurazione e stop prima di avviare il worker.
+- MountedCopyController.startAutomaticSafeCopies crea MirrorDeletionPolicy(enabled:false,recoveryEnabled:false,retentionDays:nil) senza consultare la preferenza mirror. Il ramo manuale continua a richiedere la conferma specifica dell'utente. La modalità automatic copia/esegue update, ma non rimuove files, directory o elementi di recovery.
+- La nuova VolumeFingerprint contiene anche mountSource (f_mntfromname) e viene codificata in UserDefaults al momento della selezione; la connessione è giudicata la stessa solo se filesystem/mountPath/mountSource coincidono. Profili vecchi decodificabili con mountSource nil NON sono autorizzati ad auto-copia; l'utente deve riselezionare la share nel Finder.
+- Lo stop manuale mantiene una sospensione in memoria dell'auto-copy fino al successivo avvio app, per evitare riattivazioni 30 secondi dopo che l'utente ha premuto Ferma. Modifiche dei percorsi disabilitano la checkbox automatica. La ripresa di una coda al ritorno del volume è serializzata con SQLite, non con sync integrale di rete.
+- Test CLI GitHub Actions macOS: automatic-readiness false/true, due destinazioni con una assente, legacy fingerprint; scenario simulato con destinazione temporaneamente cancellata e ripristinata, job conservato e DELETE intatto.
+- LIMITI: Login Item SMAppService non testabile realmente su runner senza utente interattivo; nessun rimontaggio di condivisione totalmente smontata (macOS deve gestirlo), nessuna prova di velocità né autenticazione SMB reale. Non usare dati di produzione per QA.
 
 ## Rischi non ancora risolti
 - Automatic login SMB e rimontaggio Finder dopo cambio VPN/sospensione/riavvio.
