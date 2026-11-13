@@ -156,7 +156,7 @@ struct MacSyncApp: App {
                         .font(.caption2).foregroundStyle(.secondary)
                     TextField("WORKGROUP", text: $uploader.domain)
                         .textFieldStyle(.roundedBorder).font(.caption)
-                    Text("Nome condivisione SMB di PROVA")
+                    Text("Nome condivisione SMB (copie isolate in MacSync_TEST_ONLY)")
                         .font(.caption2).foregroundStyle(.secondary)
                     TextField("CondivisioneDiProva", text: $uploader.share)
                         .textFieldStyle(.roundedBorder).font(.caption)
