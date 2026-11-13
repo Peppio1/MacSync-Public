@@ -114,8 +114,21 @@ final class MountedCopyController: ObservableObject {
         do {
             let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
             guard !configured.isEmpty,
-                  configured.allSatisfy({ !$0.path.isEmpty && !$0.destination.isEmpty }) else {
+                  configured.allSatisfy({
+                      !$0.path.isEmpty && !$0.destination.isEmpty &&
+                      $0.expected != nil
+                  }) else {
                 throw MountedCopyError.invalidMapping
+            }
+            // A saved SMB volume identity is mandatory. If the share has
+            // disappeared and /Volumes contains a local placeholder, never
+            // start a session against that local path.
+            guard configured.allSatisfy({
+                DestinationProbe.inspect(
+                    path: $0.destination, expectedVolume: $0.expected
+                ).isReady
+            }) else {
+                throw MountedCopyError.volumeChanged
             }
             let maps = try configured.map {
                 try MountedFolderMapping(
