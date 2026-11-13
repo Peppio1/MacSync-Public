@@ -1,54 +1,39 @@
-# Architecture and safety strategy
+# MacSync — Architettura v0.5 (prototipo)
 
-Mac source directories -> FSEvents -> durable SQLite journal -> single serialized sync worker -> selective rclone SMB operations -> existing Windows Server 2016 share.
+## Flusso
+Cartella Sorgente macOS → FSEvents → inventario e coda SQLite → worker seriale → cartella Destinazione (locale oppure SMB già montata dal Finder). Nessun componente sul server Windows 2016; macOS gestisce il login SMB esistente.
 
-## Safety invariants
-- Only Mac is authoritative for configured mirror pairs.
-- No server-side software or writable state outside destination files.
-- Disconnected SMB/VPN, inaccessible source, dropped events, unresolved errors or invalid mappings = pause, never purge.
-- During bootstrap, existing remote-only files MUST NOT be deleted automatically. Establish and verify a baseline first.
-- Remote deletes require verified absence of originally tracked local paths, source root available, matching inventory state and healthy remote.
-- Bulk deletion threshold causes pause and requires intervention.
-- No full remote scan every 5 minutes; allow first baseline and occasional deliberate reconciliation.
-- The app provides a **mirror, not a versioned backup**. Keep separate server backups.
+L'app permette due coppie separate di cartelle: Cartella_1 e Cartella_2. Sorgente e Destinazione possono essere scelte con NSOpenPanel o trascinamento Finder (UTType.fileURL). Le coppie non devono sovrapporsi, anche tra coppie.
 
-## Correctness details
-- Persist FSEvents event ID and inspect MustScanSubDirs, UserDropped and KernelDropped flags.
-- Treat watcher notifications as hints; resolve actual filesystem state before enqueuing safe work.
-- On watcher overflow or downtime, reconcile local inventory first; reconcile server during scheduled audited maintenance.
-- Ignore temporary active writes until stable; copy to remote temp then commit to final filename when possible.
-- Rename may be validated as a create of new path plus delete of old tracked path.
-- Every queued operation is retriable, idempotent and logged without secrets.
-- No credentials or private server paths in GitHub.
+## Monitor e database
+- Alla partenza: scansione locale della sorgente, recupero modifiche durante lo spegnimento, FSEvents dal cursore impostato prima dell'inventario iniziale.
+- Durante l'attività: scansioni mirate a file o sottoalberi; query SQLite indicizzate. Nessuna scansione ricorsiva SMB ad ogni 5 minuti.
+- Eventi persi, root non disponibile ed errori: interrompere i processi potenzialmente distruttivi, ritentare con scansione locale programmata.
+- ChangeJournal ha righe upsert e delete, ma solo upsert sono consumati dal worker di copia. Nessun worker di cancellazione è disponibile.
+- Cambio sorgente: dopo avviso esplicito, reset del solo inventario locale relativo, senza cancellare alcun file; cambio destinazione: riprepara gli upsert dei file sorgente tracciati.
+- SQLite WAL in ~/Library/Application Support/MacSync/inventory.sqlite.
 
-## Mandatory test phases
-1. Synthetic directories and no remote destructive operations.
-2. Copies, edits, deletes and renames against temporary SMB test share.
-3. VPN disconnected mid-copy, reconnect, Mac sleeps/boots, missing source folder.
-4. Bulk-delete fail-safe, partial PSD writes, inode/path changes, dropped FSEvents.
-5. Representative archive performance tests and safe non-destructive bootstrap.
-6. Only after successful tests permit any production mirror deletion.
+## Motore di trasferimento
+- Controllo della disponibilità di Sorgente/Destinazione e fingerprint del volume scelto, per evitare scrittura in un mount point SMB divenuto una cartella locale.
+- Validate path relativo dentro la mappatura. Rifiuta symlink come file o nelle gerarchie destinazione; niente shell né processo rclone.
+- Per un singolo file (PSD/DNG/JPG ecc): copia tramite Foundation FileManager in .macsync-staging/<UUID>.partial dentro destinazione, poi verifica local file size, modification time e inode (lstat). Se stabile, sposta il temporaneo al percorso definitivo; se già esiste, utilizza replaceItemAt con backup senza cancellazione automatica. Verifica nuovamente il sorgente e solo dopo completa il job SQLite.
+- Job falliti o deferred rimangono in coda, con registro dettagliato e ritentativi. In caso di errore, i file temporanei possono rimanere e devono essere puliti solo con regole di sicurezza future.
+- Versione attuale: copia attivabile soltanto manualmente e per la sessione corrente. Lo spostamento può sovrascrivere un file esistente nella destinazione che l'utente ha scelto.
 
-## Stato implementato al 13 novembre 2026
+## Storico
+SyncActivityLog crea una tabella SQLite sync_activity con timestamp, livello, root ID, azione, percorso relativo, byte, durata ed esito. Il menu bar presenta gli ultimi 200 record ed esporta fino a 5000 righe TSV; controllare i nomi file prima di condividere i log. Registro non contiene password o indirizzi IP. Future attività: filtraggio, retention/rotazione, diagnostica per codice errore.
 
-Il monitor FSEvents macOS aggiorna l'inventario SQLite locale: prima scansione completa locale, successive scansioni mirate per file o sottoalbero, audit locale al riavvio e ogni 24 ore, retry locale dopo errore. Nessuna connessione SMB o modifica di file sul server è attualmente attiva. Test automatici e smoke-test FSEvents superati sul runner macOS 15.
+## Anteprima di baseline
+MountedBootstrapPreview esegue una scansione completa delle due cartelle selezionate solo su richiesta dell'utente e senza scrivere. BootstrapPlanner classifica i file già presenti: match presunti (size+mtime), mismatch, server-only, conflitti case insensitive. Non autorizza automaticamente il salto di trasferimenti né le cancellazioni.
 
-## Experimental SMB copy engine (v0.3)
-SelectiveSMBCopyWorker filters pending UPSERT entries from SQLite, checks that source paths stay inside configured local roots, forbids symlinks, and starts one rclone copyto per regular file or rclone mkdir for tracked directories. It checks source file size, inode and modification timestamp after a successful copy, then acknowledges that queue ID. If a file is still being written, disappears, or rclone fails, the pending record is retained. It cycles through queue IDs to prevent one failed file starving later files. No deletes are executed and sync recursion is never invoked.
+## Rischi non ancora risolti
+- Automatic login SMB e rimontaggio Finder dopo cambio VPN/sospensione/riavvio.
+- Foundation.replaceItemAt e atomicità su Windows SMB: test con vere grandi foto richiesti.
+- Inventario iniziale dei file già caricati sul server, evitando ricopia molto lenta.
+- Staging temporanei e backup conservati; manca pulizia sicura e spazio minimo.
+- FSEvents e file in scrittura/rename/permessi: necessita collaudo prolungato.
+- Eventuali cancellazioni speculari in futuro richiedono policy fail-closed rigorosa e snapshot/verifiche dei percorsi.
+- Test GitHub Actions macOS 15 non provano la VPN o i volumi reali.
 
-The operator MUST explicitly enable uploads on each app run and use TEST folders only; the endpoint is a locally defined rclone SMB remote. No Windows server installation. The UI does not persist upload enablement and no Keychain integration exists yet. Existing rclone config files are locally managed and may contain obscured (not securely encrypted) passwords.
-
-Before production: verify over actual VPN/SMB, perform a safe initial baseline, implement temp upload and atomic rename, prevent accidental overwrites, migrate credentials to Keychain, add unattended login and error notifications, and separately implement guarded deletes after extensive tests.
-
-## v0.4 — temporanei, Portachiavi, verifica iniziale
-
-Il worker di test usa rclone copyto per caricare UN file in una posizione .macsync-staging/<UUID>.partial del remote, confronta un nuovo lstat con lo snapshot sorgente e usa rclone moveto per pubblicare sul percorso di destinazione. Dopo la pubblicazione ricontrolla ancora il sorgente; solo in caso di successo marca il job SQLite come completato. In caso di errore il job rimane nella coda e NON viene eseguita nessuna cancellazione remota. Lo staging può accumulare residui: pianificare garbage collection limitata al solo prefisso gestito da MacSync, dopo test.
-
-Password SMB conservata nel Keychain utente via Security.framework. Il comando rclone obscure - riceve la password su STDIN; la configurazione SMB temporanea viene passata a rclone tramite RCLONE_CONFIG_MACSYNC_SMB_* in environment, mentre RCLONE_CONFIG è /dev/null. Le preferenze ordinarie su host/utente/dominio/share non contengono password. Non usare debug o dump di environment per non esporre i dati.
-
-Il pannello di test costruisce il percorso sandbox remote:share/MacSync_TEST_ONLY/<sottocartella>; non esegue mai scritture nel percorso produttivo. Il pulsante di anteprima legge le vere sottocartelle remote con rclone lsjson --recursive --files-only, solo quando richiesto esplicitamente: NON ad ogni ciclo di cinque minuti. Il confronto di metadati non prova l'identità del contenuto e NON autorizza cancellazioni.
-
-Da verificare prima della produzione: rclone moveto su backend SMB Windows 2016 e atomicità effettiva, tolleranza date e timezone, comportamento su VPN instabile, file aperti PSD, riallineamento manual seed 100 GB, sicurezza completa delle credenziali, performance e backup indipendenti.
-
-## Current implementation
-This repo begins with SQLite queue + safety checks + menu bar placeholder and CI. It does **not** perform real SMB transfers yet.
+## Privacy
+Non caricare fotografie, DB reali, file di configurazione privati, password o log sensibili nel repository. Le destinazioni non devono mai essere lette/riutilizzate come sorgente per una copia inversa.
