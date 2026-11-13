@@ -352,6 +352,55 @@ private struct MacSyncConfigurationView: View {
                     .foregroundStyle(.secondary)
 
                 Divider()
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Cancellazioni speculari")
+                        .font(.headline)
+                    Toggle(
+                        "Abilita cancellazione speculare (solo dopo conferma all'avvio)",
+                        isOn: $copy.mirrorEnabled
+                    )
+                    .disabled(copy.active || copy.seedBusy || copy.maintaining)
+
+                    if copy.mirrorEnabled {
+                        Toggle(
+                            "Sposta i file eliminati nella cartella di recupero",
+                            isOn: $copy.mirrorRecovery
+                        )
+                        .disabled(copy.active || copy.seedBusy || copy.maintaining)
+
+                        if copy.mirrorRecovery {
+                            HStack {
+                                Text("Conservazione dei file eliminati")
+                                Spacer()
+                                Picker("Conservazione", selection: $copy.mirrorRetention) {
+                                    Text("Mai — conserva sempre").tag(0)
+                                    ForEach(1...30, id: \.self) { days in
+                                        Text("\(days) \(days == 1 ? "giorno" : "giorni")").tag(days)
+                                    }
+                                }
+                                .labelsHidden()
+                                .frame(width: 210)
+                                .disabled(copy.active || copy.seedBusy || copy.maintaining)
+                            }
+                            Text("Recupero gestito in .macsync-recovery nella destinazione. I file scaduti verranno rimossi nei cicli successivi, solo se la protezione del volume è valida.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("ATTENZIONE: i file verranno eliminati DEFINITIVAMENTE dalla destinazione. MacSync non potrà ripristinarli.")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                    } else {
+                        Text("Disabilitata: i file cancellati dalla Sorgente rimarranno nella Destinazione.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(copy.mirrorStatus)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Divider()
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 7) {
                         Text("Sincronizzazione di prova")
@@ -441,7 +490,7 @@ private struct MacSyncConfigurationView: View {
                 Text(copy.maintenanceStatus)
                     .font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("Questa versione di test non propaga le cancellazioni. Le copie possono sovrascrivere file nella destinazione selezionata: utilizzare soltanto dati sintetici.")
+                Text("Modalità sperimentale: le cancellazioni richiedono conferma per sessione, inventario valido e controlli anti-cancellazioni massive. Usare soltanto cartelle di prova con dati sintetici.")
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
