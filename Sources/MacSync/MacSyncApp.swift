@@ -326,6 +326,15 @@ struct MacSyncApp: App {
                         Text(model.pendingCount.formatted()).monospacedDigit()
                     }.font(.caption)
 
+                    Button("Anteprima iniziale (sola lettura)") {
+                        copy.preview(sources: model.configuredPairs())
+                    }
+                    .disabled(copy.active)
+                    Text(copy.previewStatus)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
                     Text(copy.status)
                         .font(.caption)
                         .foregroundStyle(copy.active ? .green : .secondary)
