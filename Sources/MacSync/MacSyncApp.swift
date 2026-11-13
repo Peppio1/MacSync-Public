@@ -380,6 +380,21 @@ private struct MacSyncConfigurationView: View {
                 Text(copy.previewStatus)
                     .font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Button("Verifica file temporanei") {
+                        copy.inspectStaging(sources: model.configuredPairs())
+                    }
+                    .disabled(copy.active || copy.maintaining)
+                    Button("Pulisci temporanei…") {
+                        copy.cleanupStaging(sources: model.configuredPairs())
+                    }
+                    .disabled(copy.active || copy.maintaining)
+                    Spacer()
+                }
+                Text(copy.maintenanceStatus)
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text("Questa versione di test non propaga le cancellazioni. Le copie possono sovrascrivere file nella destinazione selezionata: utilizzare soltanto dati sintetici.")
                     .font(.caption)
                     .foregroundStyle(.orange)
@@ -406,6 +421,20 @@ private struct MacSyncConfigurationView: View {
                 Text("Registro sincronizzazioni").font(.title2.bold())
                 Text("Storico SQLite: ogni copia, errore, durata e byte trasferiti.")
                     .font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    TextField("Cerca file o errore…", text: $copy.logSearch)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: copy.logSearch) { _ in copy.refresh() }
+                    Picker("Esito", selection: $copy.logLevel) {
+                        Text("Tutti").tag("all")
+                        Text("Completati").tag("success")
+                        Text("Avvisi").tag("warning")
+                        Text("Errori").tag("error")
+                        Text("Informazioni").tag("info")
+                    }
+                    .frame(width: 205)
+                    .onChange(of: copy.logLevel) { _ in copy.refresh() }
+                }
                 List(copy.recentEntries, id: \.id) { entry in
                     VStack(alignment: .leading, spacing: 4) {
                         Text("\(entry.action.uppercased()) · \(entry.level) · \(entry.rootID)")
