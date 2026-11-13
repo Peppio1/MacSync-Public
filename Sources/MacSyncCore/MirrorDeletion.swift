@@ -18,6 +18,25 @@ public struct MirrorDeletionPolicy: Equatable, Sendable {
     }
 }
 
+/// Stops processing future destructive operations after the user presses
+/// Ferma copie or changes the configured folders. A filesystem operation
+/// already started may finish; no process can roll back a completed unlink.
+public final class MirrorDeletionCancellation {
+    private let lock = NSLock()
+    private var stopped = false
+    public init() {}
+    public func cancel() {
+        lock.lock()
+        stopped = true
+        lock.unlock()
+    }
+    public var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopped
+    }
+}
+
 public enum MirrorDeletionFailure: Error, LocalizedError {
     case disabled
     case noBaseline
@@ -215,10 +234,12 @@ public final class MirrorDeletionWorker {
     private let mappings: [String: MountedFolderMapping]
     private let baselines: [String: MirrorRootIdentity]
     private let armedAt: Date
+    private let cancellation: MirrorDeletionCancellation
 
     public init(
         journal: ChangeJournal, manifest: RecoveryManifest, log: SyncActivityLog,
-        mappings: [MountedFolderMapping], policy: MirrorDeletionPolicy
+        mappings: [MountedFolderMapping], policy: MirrorDeletionPolicy,
+        cancellation: MirrorDeletionCancellation = MirrorDeletionCancellation()
     ) throws {
         guard policy.enabled, !mappings.isEmpty,
               Set(mappings.map(\.rootID)).count == mappings.count else {
@@ -228,6 +249,7 @@ public final class MirrorDeletionWorker {
         self.manifest = manifest
         self.log = log
         self.policy = policy
+        self.cancellation = cancellation
         self.mappings = Dictionary(uniqueKeysWithValues: mappings.map { ($0.rootID, $0) })
 
         var captured: [String: MirrorRootIdentity] = [:]
@@ -252,6 +274,11 @@ public final class MirrorDeletionWorker {
 
     public func runOnce(maxFiles: Int = 25) throws -> MirrorDeletionSummary {
         var result = MirrorDeletionSummary()
+        guard !cancellation.isCancelled else {
+            result.blocked = true
+            result.detail = "Operazioni annullate"
+            return result
+        }
         let total = try journal.pendingDeleteCount(after: armedAt)
         guard total > 0 else { return result }
         // Check mass-delete thresholds for ALL candidate jobs, not only the
@@ -281,6 +308,7 @@ public final class MirrorDeletionWorker {
         // job and NEVER a recursive scan of the SMB destination.
         var availableRoots: Set<String> = []
         for job in sorted.prefix(max(1, min(100, maxFiles))) {
+            if cancellation.isCancelled { break }
             guard let mapping = mappings[job.rootID],
                   let baseline = baselines[job.rootID] else {
                 result.deferred += 1
@@ -312,6 +340,7 @@ public final class MirrorDeletionWorker {
                 guard try journal.deletionIsCurrent(
                     id: job.id, rootID: job.rootID, relativePath: job.relativePath
                 ) else { throw MirrorDeletionFailure.pendingTransfer }
+                if cancellation.isCancelled { break }
                 if Self.isRegularFile(target) {
                     // Never execute destructive operations on symlinks or
                     // directories with content.
@@ -363,9 +392,11 @@ public final class MirrorDeletionWorker {
     /// This cleanup cannot remove ordinary destination photos or backups.
     @discardableResult
     public func pruneExpiredRecovery(now: Date = Date()) throws -> Int {
-        guard policy.enabled, policy.recoveryEnabled, policy.retentionDays != nil else { return 0 }
+        guard policy.enabled, policy.recoveryEnabled, policy.retentionDays != nil,
+              !cancellation.isCancelled else { return 0 }
         var removed = 0
         for item in try manifest.expired(before: now) {
+            if cancellation.isCancelled { break }
             guard let mapping = mappings[item.rootID], let baseline = baselines[item.rootID] else { continue }
             do {
                 try verifyRoots(mapping, baseline)
@@ -378,6 +409,7 @@ public final class MirrorDeletionWorker {
                       UInt64(current.st_ino) == item.inode,
                       Int64(current.st_size) == item.size,
                       abs(Self.modificationTime(current) - item.mtime) < 0.001 else { continue }
+                if cancellation.isCancelled { break }
                 try FileManager.default.removeItem(at: safe)
                 try manifest.forget(id: item.id)
                 removed += 1
