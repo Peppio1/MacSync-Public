@@ -259,6 +259,58 @@ final class MirrorDeletionTests: XCTestCase {
         ))
     }
 
+    func testStoppingMirrorSessionLeavesPendingDeletionAndTargetUnchanged() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let cancel = MirrorDeletionCancellation()
+        let mirror = try MirrorDeletionWorker(
+            journal: f.journal, manifest: f.manifest, log: f.log,
+            mappings: [f.mapping],
+            policy: MirrorDeletionPolicy(enabled: true, recoveryEnabled: false,
+                                         retentionDays: nil),
+            cancellation: cancel
+        )
+        try deleteSource(f, name: "photo0.dng")
+        cancel.cancel() // Simulates pressing "Ferma copie" before the next cycle.
+        let outcome = try mirror.runOnce()
+        XCTAssertTrue(outcome.blocked)
+        XCTAssertEqual(outcome.removed, 0)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: f.destination.appendingPathComponent("photo0.dng").path
+        ))
+        XCTAssertTrue(try f.journal.pending().contains(where: {
+            $0.kind == .delete && $0.relativePath == "photo0.dng"
+        }))
+        // Reinitializing the app cannot silently replay a deletion from the
+        // previous session, since the new worker arms after that event.
+        let restarted = try worker(f, recover: false)
+        XCTAssertEqual(try restarted.runOnce().removed, 0)
+    }
+
+    func testNonEmptyDestinationFolderIsNeverRecursivelyRemoved() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let srcDir = f.source.appendingPathComponent("album")
+        let dstDir = f.destination.appendingPathComponent("album")
+        try FileManager.default.createDirectory(at: srcDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dstDir, withIntermediateDirectories: true)
+        // This file was created by a server user, not by the iMac.
+        let untracked = dstDir.appendingPathComponent("important-server-file.txt")
+        try Data("keep".utf8).write(to: untracked)
+        _ = try LocalInventory(path: f.database)
+            .reconcile(rootID: "photos", root: f.source)
+        let mirror = try worker(f, recover: false)
+        try FileManager.default.removeItem(at: srcDir)
+        _ = try LocalInventory(path: f.database)
+            .reconcile(rootID: "photos", root: f.source, subtree: srcDir)
+
+        let outcome = try mirror.runOnce()
+        XCTAssertEqual(outcome.directories, 0)
+        XCTAssertGreaterThan(outcome.deferred, 0)
+        XCTAssertEqual(try String(contentsOf: untracked, encoding: .utf8), "keep")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dstDir.path))
+    }
+
     func testDirectoriesAreRemovedOnlyWhenEmpty() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }
