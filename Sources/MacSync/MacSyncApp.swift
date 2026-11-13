@@ -89,6 +89,7 @@ final class MacSyncViewModel: ObservableObject {
 @main
 struct MacSyncApp: App {
     @StateObject private var model = MacSyncViewModel()
+    @StateObject private var uploader = ExperimentalUploadController()
 
     var body: some Scene {
         MenuBarExtra("MacSync", systemImage: "arrow.triangle.2.circlepath") {
@@ -113,7 +114,10 @@ struct MacSyncApp: App {
                         .font(.caption2)
                         .lineLimit(2)
                         .foregroundStyle(.secondary)
-                    Button("Seleziona cartella…") { model.chooseFolder(1) }
+                    Button("Seleziona cartella…") {
+                        uploader.stop()
+                        model.chooseFolder(1)
+                    }
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
@@ -122,7 +126,10 @@ struct MacSyncApp: App {
                         .font(.caption2)
                         .lineLimit(2)
                         .foregroundStyle(.secondary)
-                    Button("Seleziona cartella…") { model.chooseFolder(2) }
+                    Button("Seleziona cartella…") {
+                        uploader.stop()
+                        model.chooseFolder(2)
+                    }
                 }
 
                 Divider()
@@ -133,20 +140,64 @@ struct MacSyncApp: App {
                     Text(model.pendingCount.formatted()).monospacedDigit()
                 }.font(.caption)
 
-                Text("Il monitor registra solo modifiche locali. Nessun file viene trasferito o eliminato sul server.")
+                Divider()
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("SMB — SOLO TEST, copie facoltative").font(.caption.bold())
+                    Text("Destinazione rclone (alias:condivisione)")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    TextField("macsync_smb:Condivisione_SMB",
+                              text: $uploader.remoteParent)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+
+                    Text("Percorso eseguibile rclone sul Mac")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    TextField("/opt/homebrew/bin/rclone",
+                              text: $uploader.rcloneExecutable)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+
+                    Text(uploader.status)
+                        .font(.caption2)
+                        .foregroundStyle(uploader.active ? .green : .secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack {
+                        Button("Salva") { uploader.save() }
+                        if uploader.active {
+                            Button("Ferma copie") { uploader.stop() }
+                        } else {
+                            Button("Attiva copie di prova") {
+                                uploader.start(
+                                    photoUploads: model.photoUploads,
+                                    photoEditing: model.photoEditing
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Text("Cancellazioni sul server NON disponibili. Per ora usare soltanto dati di prova; rclone va configurato localmente.")
                     .font(.caption2)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
 
                 HStack {
                     Button("Avvia / riavvia") { model.startMonitoring() }
-                    Button("Arresta") { model.stopMonitoring() }
+                    Button("Arresta") {
+                        uploader.stop()
+                        model.stopMonitoring()
+                    }
                     Spacer()
-                    Button("Esci") { NSApplication.shared.terminate(nil) }
+                    Button("Esci") {
+                        uploader.stop()
+                        NSApplication.shared.terminate(nil)
+                    }
                 }
             }
             .padding(16)
-            .frame(width: 360)
+            .frame(width: 410)
         }
         .menuBarExtraStyle(.window)
     }
