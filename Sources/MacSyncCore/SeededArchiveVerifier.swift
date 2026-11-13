@@ -123,8 +123,10 @@ public final class SeededArchiveVerifier {
                     let verified = try verifyOne(job, mapping: mapping, cancellation: cancellation)
                     if let verified {
                         matches.append(verified)
-                        let (newBytes, overflow) = bytesRead.addingReportingOverflow(verified.verifiedBytes)
-                        bytesRead = overflow ? Int64.max : newBytes
+                        // Both source and destination are read in full.
+                        let (twice, doubledOverflow) = verified.verifiedBytes.multipliedReportingOverflow(by: 2)
+                        let (newBytes, sumOverflow) = bytesRead.addingReportingOverflow(twice)
+                        bytesRead = doubledOverflow || sumOverflow ? Int64.max : newBytes
                     } else {
                         differences += 1
                     }
@@ -157,13 +159,16 @@ public final class SeededArchiveVerifier {
         )
     }
 
+    /// User must explicitly approve. We recheck both file fingerprints and
+    /// the volume mapping, then conditionally acknowledge all eligible jobs in
+    /// ONE SQLite transaction. No file or remote content is modified.
     public func approve(
         report: SeedVerificationReport,
         cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
         progress: ((Int, Int) -> Void)? = nil
     ) throws -> Int {
-        var acknowledged = 0
-        for match in report.matches {
+        var stillValid: [SeedVerifiedMatch] = []
+        for (index, match) in report.matches.enumerated() {
             if cancellation.isCancelled { throw SeedVerificationError.cancelled }
             guard let mapping = mappings[match.rootID] else { continue }
             do {
@@ -173,31 +178,23 @@ public final class SeededArchiveVerifier {
                 guard try Self.fingerprint(src) == match.source,
                       try Self.fingerprint(dst) == match.target else { continue }
                 try mapping.verify()
-
-                // Conditional transaction atomically verifies the pending job
-                // and source inventory still refer to this exact file size and
-                // mtime. A newer FSEvents event is never consumed by mistake.
-                if try journal.acknowledgeVerifiedFile(
-                    id: match.jobID,
-                    rootID: match.rootID,
-                    relativePath: match.relativePath,
-                    size: match.source.size,
-                    modifiedAt: match.source.modifiedAt
-                ) {
-                    acknowledged += 1
-                }
-            } catch SeedVerificationError.cancelled {
-                throw SeedVerificationError.cancelled
+                stillValid.append(match)
             } catch {
-                // Remote disconnected or changed: leave job pending.
+                // A file changed or disappeared AFTER the initial preview.
+                // We do not mark it complete and never silently overwrite it.
                 continue
             }
-            if acknowledged % 25 == 0 {
-                progress?(acknowledged, report.matches.count)
+            if (index + 1) % 25 == 0 {
+                progress?(index + 1, report.matches.count)
             }
         }
-        progress?(acknowledged, report.matches.count)
-        return acknowledged
+        if cancellation.isCancelled { throw SeedVerificationError.cancelled }
+        let sources = mappings.mapValues { $0.source.path }
+        let changed = try journal.acknowledgeVerifiedFiles(
+            stillValid, sourceRoots: sources
+        )
+        progress?(report.matches.count, report.matches.count)
+        return changed
     }
 
     private func verifyOne(
