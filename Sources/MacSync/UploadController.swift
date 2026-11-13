@@ -35,7 +35,7 @@ final class ExperimentalUploadController: ObservableObject {
         let answer = NSAlert()
         answer.messageText = "Attivare le copie SMB sperimentali?"
         answer.informativeText = """
-        Questa versione può COPIARE file sul server, ma non può eliminarli.
+        Questa versione può COPIARE e SOVRASCRIVERE file sul server, ma non può eliminarli.
         Usare esclusivamente cartelle e condivisioni DI PROVA; non è ancora
         stato effettuato il collaudo sulla VPN di test.
         La sessione si disattiva quando chiudi l'app.
