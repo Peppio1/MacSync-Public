@@ -9,6 +9,13 @@ public struct RemoteFileMetadata: Decodable, Equatable {
     public let modTime: String
     public let isDir: Bool
 
+    public init(path: String, size: Int64, modTime: String, isDir: Bool) {
+        self.path = path
+        self.size = size
+        self.modTime = modTime
+        self.isDir = isDir
+    }
+
     enum CodingKeys: String, CodingKey {
         case path = "Path"
         case size = "Size"
