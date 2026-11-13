@@ -5,7 +5,7 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 
 ## REQUISITI CONFERMATI (novembre 2026)
 - UI con configurazione per entrambe le coppie: Sorgente → Destinazione. Le due cartelle si scelgono con NSOpenPanel o drag & drop dal Finder. I nomi di riferimento sono Cartella_1 e Cartella_2 ma sono configurabili gli effettivi percorsi.
-- Destinazioni locali e SMB già montate; sfruttare le credenziali memorizzate nel sistema operativo. Niente form IP/utente/password/dominio, niente rclone o Keychain proprietario per il trasferimento.
+- Sorgenti locali del Mac (monitor FSEvents); destinazioni locali o SMB già montate; sfruttare le credenziali memorizzate nel sistema operativo. Niente form IP/utente/password/dominio, niente rclone o Keychain proprietario per il trasferimento.
 - SQLite locale per inventario, coda persistente, attività e log esportabili. FSEvents per rilevare modifiche, con scansioni locali mirate e audit periodici.
 - Copie ogni circa 5 minuti quando abilitate; non enumerare ricorsivamente la destinazione a ogni ciclo.
 - Obiettivo finale: installo/configuro/dimentico, avvio automatico al login, recupero VPN e verifica monte SMB, mirror di cancellazioni e rinomine.
