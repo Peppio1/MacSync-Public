@@ -10,6 +10,8 @@ public enum MountedCopyError: Error, LocalizedError, Equatable {
     case destinationConflict
     case sourceMissing
     case copyFailed(Int)
+    case insufficientSpace(required: Int64, available: Int64)
+    case stagingIncomplete
 
     public var errorDescription: String? {
         switch self {
@@ -21,6 +23,8 @@ public enum MountedCopyError: Error, LocalizedError, Equatable {
         case .destinationConflict: return "Destinazione incompatibile: elemento già esistente"
         case .sourceMissing: return "File sorgente mancante: copia rimandata"
         case .copyFailed(let code): return "Copia non riuscita (codice filesystem: \(code)); operazione mantenuta in coda"
+        case .insufficientSpace(let required, let available): return "Spazio insufficiente: richiesti \(required) byte, disponibili \(available) byte"
+        case .stagingIncomplete: return "File temporaneo incompleto; operazione mantenuta in coda"
         }
     }
 }
@@ -129,13 +133,15 @@ public final class MountedFolderCopyWorker {
     private let fm = FileManager.default
     private let minimumStableAge: TimeInterval
     private let now: () -> Date
+    private let availableCapacity: (URL) throws -> Int64?
     private var nextAfterID: Int64 = 0
 
     public init(
         journal: ChangeJournal, log: SyncActivityLog,
         mappings: [MountedFolderMapping],
         minimumStableAge: TimeInterval = 20,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        availableCapacity: @escaping (URL) throws -> Int64? = TransferPreflight.availableBytes
     ) throws {
         guard !mappings.isEmpty,
               Dictionary(grouping: mappings, by: \.rootID).allSatisfy({ $0.value.count == 1 })
@@ -145,6 +151,7 @@ public final class MountedFolderCopyWorker {
         self.mappings = Dictionary(uniqueKeysWithValues: mappings.map { ($0.rootID, $0) })
         self.minimumStableAge = max(0, minimumStableAge)
         self.now = now
+        self.availableCapacity = availableCapacity
     }
 
     public func runOnce(enabled: Bool = false, maxJobs: Int = 50) throws -> MountedCopySummary {
@@ -177,10 +184,11 @@ public final class MountedFolderCopyWorker {
                     message: "Trasferimento completato"
                 )
             } catch let error as MountedCopyError {
-                if error == .sourceChanging || error == .sourceMissing ||
-                   error == .volumeChanged || error == .rootUnavailable {
+                switch error {
+                case .sourceChanging, .sourceMissing, .volumeChanged,
+                     .rootUnavailable, .insufficientSpace:
                     summary.deferred += 1
-                } else {
+                default:
                     summary.failed += 1
                 }
                 try log.record(
@@ -228,6 +236,18 @@ public final class MountedFolderCopyWorker {
             throw MountedCopyError.sourceChanging
         }
         try ensureSafeParents(dst, under: mapping.target, create: true)
+        // Check capacity before creating staging or safety backups. An
+        // overwrite temporarily needs space for both old and new copies.
+        var existingBytes: Int64 = 0
+        if fm.fileExists(atPath: dst.path) {
+            let targetSnapshot = try readSnapshot(dst)
+            guard targetSnapshot.kind == .file else { throw MountedCopyError.destinationConflict }
+            existingBytes = targetSnapshot.size
+        }
+        try TransferPreflight.requireCapacity(
+            available: try availableCapacity(mapping.target),
+            incoming: snapshot.size, existing: existingBytes
+        )
         let stageFolder = mapping.target.appendingPathComponent(".macsync-staging", isDirectory: true)
         try createSafeDirectory(stageFolder, parent: mapping.target)
         let staging = stageFolder.appendingPathComponent(UUID().uuidString + ".partial")
@@ -240,6 +260,11 @@ public final class MountedFolderCopyWorker {
         // app RAM. Failure leaves journal pending and may leave a .partial file.
         do {
             try fm.copyItem(at: src, to: staging)
+            // Inspect the transferred staging file before publication.
+            let staged = try readSnapshot(staging)
+            guard staged.kind == .file, staged.size == snapshot.size else {
+                throw MountedCopyError.stagingIncomplete
+            }
             guard try readSnapshot(src) == snapshot else {
                 throw MountedCopyError.sourceChanging
             }
