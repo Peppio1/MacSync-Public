@@ -8,6 +8,7 @@ import MacSyncCore
 final class MountedCopyController: ObservableObject {
     @Published var status = "Copie ferme: puoi selezionare cartelle locali o SMB già montate."
     @Published var active = false
+    @Published var previewStatus = "Anteprima iniziale non eseguita"
     @Published var recentEntries: [SyncLogEntry] = []
 
     private let queue = DispatchQueue(label: "macsync.mounted.copy.serial", qos: .utility)
@@ -112,6 +113,66 @@ final class MountedCopyController: ObservableObject {
         } catch {
             active = false
             status = "Impossibile avviare: " + error.localizedDescription
+        }
+    }
+
+    /// A one-off, read-only scan of the already mounted destination.
+    /// It may take time for large photo archives, and is NOT repeated on timers.
+    func preview(sources: [(
+        id: String, path: String, destination: String, expected: VolumeFingerprint?
+    )]) {
+        guard !active else {
+            previewStatus = "Ferma le copie di prova prima dell'anteprima"
+            return
+        }
+        do {
+            let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
+            guard !configured.isEmpty,
+                  configured.allSatisfy({ !$0.path.isEmpty && !$0.destination.isEmpty })
+            else { throw MountedCopyError.invalidMapping }
+            let mappings = try configured.map {
+                try MountedFolderMapping(
+                    rootID: $0.id, source: URL(fileURLWithPath: $0.path),
+                    target: URL(fileURLWithPath: $0.destination),
+                    expectedTargetVolume: $0.expected
+                )
+            }
+            let db = try Self.databaseURL()
+            previewStatus = "Confronto in sola lettura: scansione cartelle…"
+            queue.async { [weak self] in
+                do {
+                    var matched = 0
+                    var differences = 0
+                    var remoteOnly = 0
+                    var collisions = 0
+                    for mapping in mappings {
+                        let result = try MountedBootstrapPreview.inspect(mapping: mapping)
+                        matched += result.candidateMatches
+                        differences += result.requiresCopyOrReview.count
+                        remoteOnly += result.remoteOnlyPaths.count
+                        collisions += result.macOSCaseCollisions.count
+                    }
+                    let summary =
+                        "Anteprima (nessuna modifica): \(matched) match PRESUNTI per " +
+                        "dimensione e data, \(differences) da verificare, " +
+                        "\(remoteOnly) solo a destinazione, \(collisions) conflitti di nome."
+                    try? SyncActivityLog(path: db.path).record(
+                        level: .info, rootID: "app", action: "preview",
+                        message: "Confronto in sola lettura terminato"
+                    )
+                    DispatchQueue.main.async { [weak self] in
+                        self?.previewStatus = summary
+                        self?.refresh()
+                    }
+                } catch {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.previewStatus = "Anteprima non riuscita: "
+                            + error.localizedDescription
+                    }
+                }
+            }
+        } catch {
+            previewStatus = "Anteprima non avviata: " + error.localizedDescription
         }
     }
 
