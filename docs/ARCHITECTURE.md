@@ -40,5 +40,15 @@ The operator MUST explicitly enable uploads on each app run and use TEST folders
 
 Before production: verify over actual VPN/SMB, perform a safe initial baseline, implement temp upload and atomic rename, prevent accidental overwrites, migrate credentials to Keychain, add unattended login and error notifications, and separately implement guarded deletes after extensive tests.
 
+## v0.4 — temporanei, Portachiavi, verifica iniziale
+
+Il worker di test usa rclone copyto per caricare UN file in una posizione .macsync-staging/<UUID>.partial del remote, confronta un nuovo lstat con lo snapshot sorgente e usa rclone moveto per pubblicare sul percorso di destinazione. Dopo la pubblicazione ricontrolla ancora il sorgente; solo in caso di successo marca il job SQLite come completato. In caso di errore il job rimane nella coda e NON viene eseguita nessuna cancellazione remota. Lo staging può accumulare residui: pianificare garbage collection limitata al solo prefisso gestito da MacSync, dopo test.
+
+Password SMB conservata nel Keychain utente via Security.framework. Il comando rclone obscure - riceve la password su STDIN; la configurazione SMB temporanea viene passata a rclone tramite RCLONE_CONFIG_MACSYNC_SMB_* in environment, mentre RCLONE_CONFIG è /dev/null. Le preferenze ordinarie su host/utente/dominio/share non contengono password. Non usare debug o dump di environment per non esporre i dati.
+
+Il pannello di test costruisce il percorso sandbox remote:share/MacSync_TEST_ONLY/<sottocartella>; non esegue mai scritture nel percorso produttivo. Il pulsante di anteprima legge le vere sottocartelle remote con rclone lsjson --recursive --files-only, solo quando richiesto esplicitamente: NON ad ogni ciclo di cinque minuti. Il confronto di metadati non prova l'identità del contenuto e NON autorizza cancellazioni.
+
+Da verificare prima della produzione: rclone moveto su backend SMB Windows 2016 e atomicità effettiva, tolleranza date e timezone, comportamento su VPN instabile, file aperti PSD, riallineamento manual seed 100 GB, sicurezza completa delle credenziali, performance e backup indipendenti.
+
 ## Current implementation
 This repo begins with SQLite queue + safety checks + menu bar placeholder and CI. It does **not** perform real SMB transfers yet.
