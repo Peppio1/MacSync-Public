@@ -65,15 +65,14 @@ public enum RclonePasswordObscurer {
         process.standardInput = input
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
+        let terminated = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in terminated.signal() }
         try process.run()
         input.fileHandleForReading.closeFile()
 
         let secret = Data((password + "\n").utf8)
         input.fileHandleForWriting.write(secret)
         input.fileHandleForWriting.closeFile()
-
-        let terminated = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in terminated.signal() }
         if terminated.wait(timeout: .now() + 10) == .timedOut {
             if process.isRunning { process.terminate() }
             throw UploadError.commandTimedOut
