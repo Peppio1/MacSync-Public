@@ -375,6 +375,17 @@ public final class MirrorDeletionWorker {
                 guard try journal.deletionIsCurrent(
                     id: job.id, rootID: job.rootID, relativePath: job.relativePath
                 ) else { throw MirrorDeletionFailure.pendingTransfer }
+                // Recheck at the last possible moment, including the
+                // destination identity. Another client must not be able to
+                // replace a file and have us move/unlink the replacement.
+                guard try Self.statIfPresent(source) == nil,
+                      let latest = try Self.statIfPresent(destination),
+                      latest.st_dev == target.st_dev,
+                      latest.st_ino == target.st_ino,
+                      latest.st_mode == target.st_mode,
+                      latest.st_size == target.st_size else {
+                    throw MirrorDeletionFailure.destinationChanged
+                }
                 if cancellation.isCancelled { break }
                 if Self.isRegularFile(target) {
                     // Never execute destructive operations on symlinks or
