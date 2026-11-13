@@ -104,6 +104,28 @@ final class LocalInventoryTests: XCTestCase {
         XCTAssertEqual(try inventory.rootPath(rootID: "photos"), root.resolvingSymlinksInPath().path)
     }
 
+    func testSubtreeReconciliationDoesNotTouchSiblingWithSimilarName() throws {
+        let (base, root, db) = try temporaryFixture()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let first = root.appendingPathComponent("before")
+        let sibling = root.appendingPathComponent("before2")
+        try FileManager.default.createDirectory(at: first, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: sibling, withIntermediateDirectories: true)
+        try Data("old".utf8).write(to: first.appendingPathComponent("old.jpg"))
+        try Data("safe".utf8).write(to: sibling.appendingPathComponent("safe.jpg"))
+
+        let inventory = try LocalInventory(path: db.path)
+        try inventory.reconcile(rootID: "photos", root: root)
+        XCTAssertEqual(try inventory.itemCount(rootID: "photos"), 4)
+
+        try FileManager.default.removeItem(at: first)
+        let outcome = try inventory.reconcile(rootID: "photos", root: root, subtree: first)
+        XCTAssertEqual(outcome.queuedDeletes, 2)
+        XCTAssertEqual(try inventory.itemCount(rootID: "photos"), 2)
+        XCTAssertFalse(try ChangeJournal(path: db.path).pending()
+            .contains(where: { $0.relativePath == "before2/safe.jpg" && $0.kind == .delete }))
+    }
+
     func testRefusesOutOfRootScanWithoutTouchingInventory() throws {
         let (base, root, db) = try temporaryFixture()
         defer { try? FileManager.default.removeItem(at: base) }
