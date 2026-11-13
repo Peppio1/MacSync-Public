@@ -173,4 +173,47 @@ final class MountedFolderCopyTests: XCTestCase {
         XCTAssertEqual(pending[0].kind, .upsert)
         XCTAssertEqual(pending[0].relativePath, "photo.jpg")
     }
+    func testReplacingExistingFileKeepsOldBackup() throws {
+        let fixture = try setup()
+        defer { try? FileManager.default.removeItem(at: fixture.base) }
+        let source = fixture.source.appendingPathComponent("same-name.psd")
+        let destination = fixture.target.appendingPathComponent("same-name.psd")
+        try oldFile(source, data: "new version")
+        try oldFile(destination, data: "old version")
+        let journal = try ChangeJournal(path: fixture.db)
+        let log = try SyncActivityLog(path: fixture.db)
+        try journal.enqueue(rootID: "photos", relativePath: "same-name.psd", kind: .upsert)
+        let mapping = try MountedFolderMapping(
+            rootID: "photos", source: fixture.source, target: fixture.target
+        )
+        let worker = try MountedFolderCopyWorker(journal: journal, log: log, mappings: [mapping])
+        let outcome = try worker.runOnce(enabled: true)
+        XCTAssertEqual(outcome.copied, 1)
+        XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "new version")
+        let names = try FileManager.default.contentsOfDirectory(atPath: fixture.target.path)
+        XCTAssertTrue(names.contains(where: { $0.hasPrefix(".macsync-backup-") }))
+    }
+
+    func testReadOnlyMountedBaselineDoesNotAlterFilesOrQueue() throws {
+        let fixture = try setup()
+        defer { try? FileManager.default.removeItem(at: fixture.base) }
+        let file = fixture.source.appendingPathComponent("same.jpg")
+        try oldFile(file, data: "same content")
+        try FileManager.default.copyItem(
+            at: file, to: fixture.target.appendingPathComponent("same.jpg")
+        )
+        try oldFile(fixture.target.appendingPathComponent("target-only.jpg"), data: "untouched")
+        let mapping = try MountedFolderMapping(
+            rootID: "photos", source: fixture.source, target: fixture.target
+        )
+        let preview = try MountedBootstrapPreview.inspect(mapping: mapping)
+        XCTAssertEqual(preview.candidateMatches, 1)
+        XCTAssertEqual(preview.remoteOnlyPaths, ["target-only.jpg"])
+        XCTAssertFalse(preview.isSafeForAutomaticProductionBootstrap)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: fixture.target.appendingPathComponent("target-only.jpg").path
+        ))
+        XCTAssertEqual(try ChangeJournal(path: fixture.db).pending().count, 0)
+    }
+
 }
