@@ -215,6 +215,30 @@ final class MountedCopyController: ObservableObject {
         }
     }
 
+    /// Opens only existing MacSync-managed recovery folders. These are dot
+    /// folders and are otherwise hidden in Finder. No files are moved.
+    func revealRecoveryFolders(sources: [(
+        id: String, path: String, destination: String, expected: VolumeFingerprint?
+    )]) {
+        var opened = 0
+        for pair in sources where !pair.destination.isEmpty {
+            let base = URL(fileURLWithPath: pair.destination)
+                .standardizedFileURL.resolvingSymlinksInPath()
+            guard (try? VolumeFingerprint.read(at: base)) == pair.expected,
+                  FileManager.default.fileExists(atPath: base.path) else { continue }
+            let folder = base.appendingPathComponent(".macsync-recovery", isDirectory: true)
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(
+                atPath: folder.path, isDirectory: &isDirectory
+            ), isDirectory.boolValue else { continue }
+            NSWorkspace.shared.open(folder)
+            opened += 1
+        }
+        mirrorStatus = opened > 0
+            ? "Cartelle recupero aperte nel Finder: \(opened)"
+            : "Nessuna cartella recupero disponibile; verifica destinazioni e volumi"
+    }
+
     /// No transfers and no deletions. SHA-256 is streamed from both source
     /// and target, including through SMB. A size/time match alone NEVER
     /// clears the queue. Verifier and journal stay on a serial worker queue.
