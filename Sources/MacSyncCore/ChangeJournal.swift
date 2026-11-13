@@ -152,6 +152,71 @@ public final class ChangeJournal {
         return result
     }
 
+    /// Atomic, conditional baseline acknowledgement. A verified hash is only
+    /// accepted when the SAME job is still pending, its source inventory
+    /// still records that exact file size and modification timestamp, the
+    /// source root has not been rebound and no concurrent newer operation for
+    /// the same path is pending. No DELETE job can ever be completed here.
+    ///
+    /// All eligible jobs are acknowledged in one transaction. A cancelled
+    /// verification never calls this method.
+    public func acknowledgeVerifiedFiles(
+        _ entries: [SeedVerifiedMatch],
+        sourceRoots: [String: String]
+    ) throws -> Int {
+        guard !entries.isEmpty else { return 0 }
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            let sql = """
+                UPDATE change_queue SET completed=1
+                 WHERE id=? AND root_id=? AND relative_path=?
+                   AND kind='upsert' AND completed=0
+                   AND EXISTS (
+                       SELECT 1 FROM file_inventory f
+                        WHERE f.root_id=change_queue.root_id
+                          AND f.relative_path=change_queue.relative_path
+                          AND f.kind='file'
+                          AND f.file_size=?
+                          AND ABS(f.modified_at - ?) < 0.002
+                   )
+                   AND EXISTS (
+                       SELECT 1 FROM watched_roots w
+                        WHERE w.root_id=change_queue.root_id
+                          AND w.absolute_path=?
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM change_queue q
+                        WHERE q.root_id=change_queue.root_id
+                          AND q.relative_path=change_queue.relative_path
+                          AND q.completed=0 AND q.id<>change_queue.id
+                   );
+                """
+            let statement = try prepare(sql)
+            defer { sqlite3_finalize(statement) }
+            var changed = 0
+            for entry in entries {
+                guard let root = sourceRoots[entry.rootID] else { continue }
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+                guard sqlite3_bind_int64(statement, 1, entry.jobID) == SQLITE_OK
+                else { throw databaseFailure() }
+                try bind(entry.rootID, at: 2, in: statement)
+                try bind(entry.relativePath, at: 3, in: statement)
+                guard sqlite3_bind_int64(statement, 4, entry.source.size) == SQLITE_OK,
+                      sqlite3_bind_double(statement, 5, entry.source.modifiedAt) == SQLITE_OK
+                else { throw databaseFailure() }
+                try bind(root, at: 6, in: statement)
+                guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseFailure() }
+                changed += Int(sqlite3_changes(connection))
+            }
+            try execute("COMMIT;")
+            return changed
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
     public func markCompleted(id: Int64) throws {
         let statement = try prepare("UPDATE change_queue SET completed = 1 WHERE id = ?;")
         defer { sqlite3_finalize(statement) }
