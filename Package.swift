@@ -10,7 +10,7 @@ let package = Package(
     targets: [
         .target(
             name: "MacSyncCore",
-            linkerSettings: [.linkedLibrary("sqlite3")]
+            linkerSettings: [.linkedLibrary("sqlite3"), .linkedFramework("Security")]
         ),
         .executableTarget(
             name: "MacSync",
