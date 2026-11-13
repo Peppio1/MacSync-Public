@@ -193,6 +193,28 @@ final class MirrorDeletionTests: XCTestCase {
         ))
     }
 
+    func testSmallRepeatedBatchesCannotBypassMassDeletionThreshold() throws {
+        let f = try fixture(fileCount: 200)
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let mirror = try worker(f, recover: false)
+        for index in 0..<20 {
+            try deleteSource(f, name: "photo\(index).dng")
+        }
+        XCTAssertEqual(try mirror.runOnce(maxFiles: 25).removed, 20)
+
+        // A second group would exceed the protected fraction when combined
+        // with the 20 deletions already applied in the SAME session.
+        for index in 20..<40 {
+            try deleteSource(f, name: "photo\(index).dng")
+        }
+        let stopped = try mirror.runOnce()
+        XCTAssertTrue(stopped.blocked)
+        XCTAssertEqual(stopped.removed, 0)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: f.destination.appendingPathComponent("photo20.dng").path
+        ))
+    }
+
     func testSourceUnavailableSuspendsDeletionWithoutLosingJob() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }
