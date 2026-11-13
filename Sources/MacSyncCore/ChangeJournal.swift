@@ -217,6 +217,98 @@ public final class ChangeJournal {
         }
     }
 
+    /// Pending DELETE events created AFTER the operator armed this session.
+    /// Prior delete events are intentionally never executed retroactively.
+    public func pendingDeletes(
+        after: Date, limit: Int = 500, afterID: Int64 = 0
+    ) throws -> [QueuedChange] {
+        let statement = try prepare("""
+            SELECT id,root_id,relative_path,kind,recorded_at
+              FROM change_queue
+             WHERE completed=0 AND kind='delete'
+               AND recorded_at > ? AND id > ?
+             ORDER BY id LIMIT ?;
+            """)
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_bind_double(statement, 1, after.timeIntervalSince1970) == SQLITE_OK,
+              sqlite3_bind_int64(statement, 2, afterID) == SQLITE_OK,
+              sqlite3_bind_int(statement, 3, Int32(max(1, min(1000, limit)))) == SQLITE_OK
+        else { throw databaseFailure() }
+        var rows: [QueuedChange] = []
+        while true {
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { break }
+            guard status == SQLITE_ROW else { throw databaseFailure() }
+            rows.append(QueuedChange(
+                id: sqlite3_column_int64(statement, 0),
+                rootID: columnText(statement, at: 1),
+                relativePath: columnText(statement, at: 2),
+                kind: .delete,
+                recordedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 4))
+            ))
+        }
+        return rows
+    }
+
+    public func pendingDeleteCount(after: Date) throws -> Int {
+        let stmt = try prepare("""
+            SELECT COUNT(*) FROM change_queue
+            WHERE completed=0 AND kind='delete' AND recorded_at > ?;
+            """)
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_bind_double(stmt, 1, after.timeIntervalSince1970) == SQLITE_OK,
+              sqlite3_step(stmt) == SQLITE_ROW else { throw databaseFailure() }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
+    /// Any new upload or inventory entry makes an old delete unsafe.
+    /// Check both before the move/remove and again when acknowledging it.
+    public func deletionIsCurrent(id: Int64, rootID: String, relativePath: String) throws -> Bool {
+        let stmt = try prepare("""
+            SELECT COUNT(*) FROM change_queue q
+            WHERE q.id=? AND q.root_id=? AND q.relative_path=?
+              AND q.kind='delete' AND q.completed=0
+              AND NOT EXISTS (
+                 SELECT 1 FROM file_inventory f
+                  WHERE f.root_id=q.root_id AND f.relative_path=q.relative_path
+              )
+              AND NOT EXISTS (
+                 SELECT 1 FROM change_queue other
+                  WHERE other.root_id=q.root_id AND other.relative_path=q.relative_path
+                    AND other.completed=0 AND other.id<>q.id
+              );
+            """)
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_bind_int64(stmt, 1, id) == SQLITE_OK else { throw databaseFailure() }
+        try bind(rootID, at: 2, in: stmt)
+        try bind(relativePath, at: 3, in: stmt)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { throw databaseFailure() }
+        return sqlite3_column_int64(stmt, 0) == 1
+    }
+
+    @discardableResult
+    public func acknowledgeDeletion(id: Int64, rootID: String, relativePath: String) throws -> Bool {
+        let stmt = try prepare("""
+            UPDATE change_queue SET completed=1
+            WHERE id=? AND root_id=? AND relative_path=? AND kind='delete' AND completed=0
+            AND NOT EXISTS (
+                SELECT 1 FROM file_inventory f
+                WHERE f.root_id=change_queue.root_id AND f.relative_path=change_queue.relative_path
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM change_queue q
+                WHERE q.root_id=change_queue.root_id AND q.relative_path=change_queue.relative_path
+                  AND q.completed=0 AND q.id<>change_queue.id
+            );
+            """)
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_bind_int64(stmt, 1, id) == SQLITE_OK else { throw databaseFailure() }
+        try bind(rootID, at: 2, in: stmt)
+        try bind(relativePath, at: 3, in: stmt)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseFailure() }
+        return sqlite3_changes(connection) == 1
+    }
+
     public func markCompleted(id: Int64) throws {
         let statement = try prepare("UPDATE change_queue SET completed = 1 WHERE id = ?;")
         defer { sqlite3_finalize(statement) }
