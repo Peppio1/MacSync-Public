@@ -1,4 +1,4 @@
-# MacSync — prototipo v0.8.0
+# MacSync — prototipo v0.8.1
 
 Applicazione nativa macOS per la futura sincronizzazione **unidirezionale Sorgente → Destinazione**, con copie selettive ogni 5 minuti, SQLite e FSEvents.
 
@@ -83,6 +83,16 @@ Quando un file viene cancellato dalla Sorgente, MacSync ricontrolla che l'assenz
 **Limiti importanti:** `.macsync-recovery` si trova all'interno della Destinazione, così i file rimangono sullo stesso volume SMB e possono essere spostati senza ricopiare i dati, ma occupano spazio e sono separati dal normale archivio speculare. Le cancellazioni definitive NON hanno cestino. File già eliminati in sessioni precedenti non vengono rimossi automaticamente alla prima attivazione. La replica dei file rinominati funziona come aggiunta del nuovo percorso e rimozione del precedente; il trasferimento può richiedere una nuova copia e non è ancora ottimizzato con un rename SMB diretto.
 
 **Non usare sui dati di produzione:** la logica v0.8 è testata automaticamente su cartelle locali fittizie. La sicurezza di `unlink`, `rmdir`, `moveItem` e della gestione di ACL/volumi SMB va collaudata sul vero iMac con Windows Server 2016 e VPN prima dell'uso produttivo.
+
+## Stabilizzazione v0.8.1 — scanner e riepilogo sincronizzazioni
+
+- **Correzione inventario locale:** il monitor non chiama più skipDescendants() dopo file ordinari, poiché su macOS poteva omettere le sottocartelle successive. Un test di regressione controlla directory annidate dopo file nel livello principale.
+- **Cancellazioni di directory:** riconosce i file figli e li elabora prima delle cartelle. I file vengono rimossi con unlink, le directory con rmdir soltanto se vuote. Cartelle con elementi non tracciati sono preservate.
+- **Ulteriori test di sicurezza:** stop con eliminazioni ancora pendenti, riavvio senza replay di precedenti eliminazioni e conservazione dei file presenti soltanto sul server.
+- **Riepilogo sincronizzazione:** cinque contatori in finestra (nuovi, aggiornati, eliminati, recuperabili, errori) e un pannello dettagliato accessibile tramite Apri riepilogo. È possibile passare da ultimo ciclo a sessione corrente, con conteggi aggiuntivi di rimandati, directory, recuperi scaduti e byte trasferiti.
+- La distinzione nuovo/aggiornato viene effettuata dal motore di copia. Le operazioni rimandate non contano come completate. I contatori di sessione ripartono a ogni nuova attivazione; lo storico durevole rimane nel registro SQLite e nell'esportazione TSV.
+
+**Stato:** test automatizzati macOS 15 riusciti, ma Finder drag-and-drop, VPN, SMB e cancellazioni su Windows Server 2016 devono ancora essere collaudati con file sintetici sull'iMac. Non utilizzare la cancellazione definitiva sui dati di produzione.
 
 ## Test, limiti e sicurezza
 
