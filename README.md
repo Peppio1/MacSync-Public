@@ -1,4 +1,4 @@
-# MacSync — prototipo v0.6.0
+# MacSync — prototipo v0.7.0
 
 Applicazione nativa macOS per la futura sincronizzazione **unidirezionale Sorgente → Destinazione**, con copie selettive ogni 5 minuti, SQLite e FSEvents.
 
@@ -17,7 +17,7 @@ Per ognuna delle due coppie iniziali (Cartella_1 e Cartella_2):
 
 - Monitoraggio delle cartelle con **FSEvents** e inventario **SQLite** in ~/Library/Application Support/MacSync/inventory.sqlite.
 - Scansione completa delle sorgenti locali all'avvio, poi rilevamento file e sottoalberi modificati. Riconciliazione locale programmata o in caso di eventi persi.
-- Coda persistente per i file aggiunti e modificati. Le cancellazioni sono memorizzate come eventi ma **NON sono mai applicate alla destinazione** in v0.5.
+- Coda persistente per i file aggiunti e modificati. Le cancellazioni sono memorizzate come eventi ma **NON sono mai applicate alla destinazione** in v0.7.
 - Motore **Foundation/FileManager** che copia un file alla volta verso la cartella destinazione selezionata, con staging nella directory .macsync-staging. Nella v0.6 verifica lo spazio libero per il file, un eventuale backup e 16 MiB di margine; controlla inoltre la dimensione del file temporaneo e la stabilità della sorgente prima della pubblicazione. Se lo spazio non è dichiarato dal filesystem, il controllo preventivo non può garantire la capacità.
 - Per un file già presente alla destinazione, backup preventivo seguito da sostituzione, senza cancellazione speculare. Nella v0.6 è possibile ispezionare, e soltanto dopo esplicita conferma ripulire, file UUID .partial più vecchi di sette giorni nella cartella .macsync-staging. I backup non vengono puliti. Su share SMB, atomicità/compatibilità devono ancora essere verificate con prove reali.
 - Verifica dell'identità del volume di destinazione (filesystem e mount point), così la scomparsa di una share SMB montata non viene trattata come un normale percorso locale di ripiego.
@@ -46,6 +46,23 @@ Montare e aprire la condivisione da Finder con le credenziali **già salvate in 
 - **Test:** GitHub Actions verifica il blocco per spazio insufficiente, preservazione dei file nuovi/vecchi durante la pulizia, cambiamenti dopo l'anteprima e le ricerche nel log.
 
 Il trasferimento riparte dall'inizio dopo un'interruzione; i temporanei recenti non vengono eliminati automaticamente e i backup possono occupare spazio significativo. Non usare con file di produzione finché non sono stati effettuati test reali su Mac Sequoia e Windows Server SMB/VPN.
+## Novità v0.7 — prima sincronizzazione intelligente senza ritrasferire i file identici
+
+La v0.7 permette di **riconoscere i file già presenti nella Destinazione**, per esempio dopo una prima copia di 100 GB tramite disco esterno, senza sovrascriverli o copiarli nuovamente se il loro contenuto coincide.
+
+1. Configurare la **Sorgente** locale e la **Destinazione** (cartella locale oppure condivisione SMB già montata nel Finder), utilizzando **Sfoglia** o trascinamento.
+2. Avviare il monitoraggio e attendere che SQLite registri i file locali. Prima di verificare, fermare le copie sperimentali.
+3. Premere **Verifica file già presenti**. MacSync prende i job UPSERT in coda, controlla il volume e i percorsi, scarta file assenti o di dimensione diversa e confronta il contenuto dei candidati con **SHA-256 calcolato a blocchi da 1 MiB**. Non modifica alcun file né i job durante la verifica.
+4. Consultare numero di file esaminati, file con hash identico, file diversi/non verificabili e byte letti; è possibile annullare la verifica senza cambiare la coda SQLite.
+5. Solo dopo la verifica, premere **Conferma N file identici** e approvare l'avviso. MacSync ricontrolla i metadati dei file verificati, l'identità del volume e lo stato della coda, quindi contrassegna in una transazione SQLite unicamente i job ancora validi. **Nessuna scrittura nella cartella di destinazione.**
+6. Le copie successive elaboreranno soltanto i file che restano in coda: quelli mancanti, differenti o non verificabili. Le cancellazioni speculari restano disabilitate.
+
+**Traffico VPN:** il confronto SHA-256 deve **leggere per intero il contenuto della Destinazione e della Sorgente** per ciascun file candidato. Per 100 GB di file già identici potrebbe significare circa **100 GB letti dal server via VPN più 100 GB letti localmente**, se tutti vengono verificati. Questa modalità evita di riscrivere il server e permette di distinguere file con uguali date/dimensioni ma contenuto differente, **non elimina il traffico di lettura sulla VPN**. Per il primo archivio può essere utile un'alternativa basata su manifest di hash calcolati localmente durante la copia iniziale; questa funzione non è ancora implementata.
+
+**Prestazioni e sicurezza:** la scansione SHA-256 avviene soltanto su richiesta, NON ogni cinque minuti, e usa RAM limitata perché legge blocchi piccoli. I file non disponibili, symlink, modificati durante il controllo o con volume smontato non vengono marcati come sincronizzati. Le corrispondenze per sola dimensione/data nell'altra Anteprima iniziale restano soltanto presunte. Non sono previsti write/delete o rimozioni automatiche sul server.
+
+**Stato sperimentale:** la funzione è verificata con test automatici su due cartelle locali in runner macOS 15. Il collaudo su share SMB montata, VPN e Windows Server 2016, l'esecuzione per 100 GB reali, la resistenza a interruzioni e le prestazioni devono essere verificati sull'iMac prima dell'uso in produzione.
+
 ## Test, limiti e sicurezza
 
 GitHub Actions macOS 15 esegue swift test, swift build -c release e prepara un pacchetto sperimentale .app, firmato ad hoc e non notarizzato. I test usano cartelle locali sintetiche; **non verificano la VPN di test, una condivisione SMB effettiva né le prestazioni con 100 GB**.
