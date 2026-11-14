@@ -69,6 +69,22 @@ public struct SyncSchedule: Codable, Equatable, Sendable {
         }
     }
 
+    /// Continue the original cadence, not the completion time of a copy.
+    /// Missed slots are skipped; no concurrent or catch-up burst is created.
+    public func nextSlot(after scheduled: Date, completedAt now: Date,
+                         calendar: Calendar = .current) -> Date? {
+        guard isValid else { return nil }
+        let reference = max(scheduled, now)
+        switch frequency {
+        case .minutes, .hours:
+            let seconds = Double(interval) * (frequency == .minutes ? 60 : 3600)
+            let steps = floor(reference.timeIntervalSince(scheduled) / seconds) + 1
+            return scheduled.addingTimeInterval(steps * seconds)
+        case .daily, .weekly:
+            return next(after: reference, calendar: calendar)
+        }
+    }
+
     public var summary: String {
         switch frequency {
         case .minutes: return "Ogni \(interval) minuti"
