@@ -16,9 +16,9 @@ public struct ConnectionOutageTracker: Codable, Equatable, Sendable {
     public private(set) var outages: [String: Outage] = [:]
     public init() {}
 
-    /// Returns the identifiers requiring their FIRST notification for this
-    /// outage. An alert never recurs until the destination becomes ready and
-    /// a distinct future outage begins. Time is wall-clock since first check.
+    /// Returns destinations due for an alert. A failed delivery stays due,
+    /// and is retried only on a subsequent scheduled check. Mark acceptance
+    /// separately, only when the operating system accepts the notification.
     public mutating func record(
         _ checked: [String: DestinationAvailability],
         at now: Date, policy: ConnectionAlertPolicy
@@ -41,7 +41,6 @@ public struct ConnectionOutageTracker: Codable, Equatable, Sendable {
                 let elapsed = now.timeIntervalSince(outage.firstObserved)
                 if !outage.alertSent &&
                     elapsed >= TimeInterval(policy.afterHours) * 3_600 {
-                    outage.alertSent = true
                     newlyDue.append(id)
                 }
                 outages[id] = outage
@@ -50,6 +49,16 @@ public struct ConnectionOutageTracker: Codable, Equatable, Sendable {
         // Remove old entries if an entire destination was unconfigured.
         // Do not assume missing readings mean the network has recovered.
         return newlyDue.sorted()
+    }
+
+    /// A delayed callback must not acknowledge a different outage.
+    @discardableResult
+    public mutating func markAccepted(for id: String, firstObserved: Date) -> Bool {
+        guard var outage = outages[id], outage.firstObserved == firstObserved,
+              !outage.alertSent else { return false }
+        outage.alertSent = true
+        outages[id] = outage
+        return true
     }
 
     public func firstObserved(for id: String) -> Date? {
