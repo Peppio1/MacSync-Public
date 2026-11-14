@@ -1,6 +1,6 @@
-# MacSync — prototipo v0.9.1
+# MacSync — prototipo v0.10.0
 
-Applicazione nativa macOS per la futura sincronizzazione **unidirezionale Sorgente → Destinazione**, con copie selettive ogni 5 minuti, SQLite e FSEvents.
+Applicazione nativa macOS per la futura sincronizzazione **unidirezionale Sorgente → Destinazione**, con copie selettive a frequenza configurabile, SQLite e FSEvents.
 
 > **STATO: PROTOTIPO DA TESTARE, NON VERSIONE DI PRODUZIONE.** Le copie sono disabilitate per impostazione predefinita e si attivano solo su conferma per la sessione corrente. Le cancellazioni speculari possono essere abilitate SOLO nella sessione sperimentale dopo una conferma esplicita e con protezioni contro operazioni anomale. Per ora selezionare **solo cartelle di prova**, senza dati di produzione.
 
@@ -100,7 +100,7 @@ Quando un file viene cancellato dalla Sorgente, MacSync ricontrolla che l'assenz
 - Lo stato mostrato dalla checkbox proviene da macOS, non da un valore UserDefaults. MacSync lo aggiorna quando la finestra compare e quando l'app torna attiva; rileva quindi modifiche effettuate nelle Impostazioni di Sistema. Se serve approvazione, compare il pulsante per aprire Elementi login.
 - L'avvio al login registra **l'applicazione**, non autorizza da solo copie o eliminazioni. Al login riparte il monitoraggio delle Sorgenti già configurate; nella v0.9.1, soltanto un'**ulteriore checkbox** approvata esplicitamente può abilitare copie e aggiornamenti automatici. Le cancellazioni speculari restano sempre sotto conferma manuale.
 - La registrazione va effettuata aprendo il pacchetto MacSync.app, preferibilmente collocato in Applicazioni. L'eseguibile avviato direttamente con swift run non può essere registrato come app al login. Il pacchetto CI è firmato ad hoc e non notarizzato; l'autorizzazione effettiva al login richiede un test su Mac reale.
-- **Controllo destinazioni:** ogni 30 secondi, senza scrivere o leggere fotografie, MacSync verifica le cartelle selezionate e confronta il volume corrente con quello registrato al momento della scelta. Gli stati possibili sono non configurata, non verificata, non accessibile, volume differente e pronta. Il pulsante Verifica ora forza un nuovo controllo.
+- **Controllo destinazioni (in v0.9):** era previsto ogni 30 secondi. **Dalla v0.10 il controllo avviene solo insieme alle sincronizzazioni**, alla frequenza configurata, prima di ogni trasferimento. Gli stati possibili sono non configurata, non verificata, non accessibile, volume differente e pronta. Il pulsante Verifica ora forza un nuovo controllo.
 - **VPN di test:** il collegamento VPN è gestito dal router di rete. MacSync non installa, avvia né configura alcun client VPN. Funziona con Wi-Fi o Ethernet quando il Mac può già raggiungere il server e macOS ha montato correttamente la condivisione SMB.
 - **Riconnessione:** se macOS rimonta la stessa condivisione al percorso configurato, il monitor la riconosce e i cicli di copia già attivati potranno ritentare le operazioni in coda. Se la condivisione SMB è stata smontata completamente, questa versione non può forzarne il rimontaggio, poiché non memorizza l'URL SMB né le credenziali: potrebbe essere necessario riaprirla dal Finder.
 - Durante l'assenza del volume atteso, MacSync non deve interpretare la destinazione come cartella locale sostitutiva né effettuare cancellazioni. Le copie già attivate ritentano ogni cinque minuti ma non vengono avviate automaticamente dopo un login.
@@ -114,7 +114,7 @@ Questa fase distingue due opzioni indipendenti nella sezione **Impostazioni di a
 - **Avvia automaticamente MacSync al login macOS:** registra l'app tramite Apple SMAppService. Mostra lo stato reale di Elementi login. Non comporta automaticamente scritture.
 - **Avvia automaticamente le copie e gli aggiornamenti:** facoltativa e **OFF di default**, richiede un'apposita conferma una tantum. Se attiva, dopo il login MacSync può eseguire **SOLO copie e sovrascritture**, anche a finestra chiusa. La modalità non può mai eseguire eliminazioni speculari o pulizia del recupero. Richiede ancora test veri prima di qualsiasi dato di produzione.
 
-**Flusso operativo v0.9.1:** all'avvio viene indicizzato l'inventario delle Sorgenti locali; ogni 30 secondi un coordinatore verifica che l'inventario sia operativo e che tutte le destinazioni configurate corrispondano esattamente al volume scelto. Se una destinazione SMB manca, MacSync aspetta, senza scrivere e senza creare cartelle di ripiego. Se macOS rimonta lo stesso volume, il coordinatore può avviare una sessione di copie senza nuova finestra di conferma, perché l'utente ha già autorizzato esplicitamente questa funzione. Il worker controlla la coda SQLite ogni 5 minuti e ritenta i file non ancora copiati.
+**Flusso operativo storico v0.9.1:** all'avvio veniva indicizzato l'inventario delle Sorgenti locali; in quella versione ogni 30 secondi un coordinatore verificava la presenza della destinazione. **Dalla v0.10 il controllo è legato esclusivamente al ciclo di sincronizzazione configurato.** Se una destinazione SMB manca, MacSync aspetta, senza scrivere e senza creare cartelle di ripiego. Se macOS rimonta lo stesso volume, il coordinatore può avviare una sessione di copie senza nuova finestra di conferma, perché l'utente ha già autorizzato esplicitamente questa funzione. Il worker controlla la coda SQLite ogni 5 minuti e ritenta i file non ancora copiati.
 
 **Identità forte del volume:** oltre a filesystem e mount point, la v0.9.1 salva anche la provenienza del montaggio rilevata da macOS (`statfs.f_mntfromname`, p.es. share SMB). Profili di destinazione delle versioni precedenti non hanno questo dato: per le copie automatiche sarà necessario **riselezionare la Destinazione dal Finder una volta**, così l'automazione non si avvia su una share non verificata. I dati del server non vengono inseriti nei log.
 
@@ -125,6 +125,31 @@ Questa fase distingue due opzioni indipendenti nella sezione **Impostazioni di a
 **VPN e SMB:** il router di rete gestisce la VPN. MacSync non imposta VPN né credenziali SMB. Questa versione riconosce il ritorno del volume se **macOS lo ha già rimontato**; non invia nuove richieste di mount. L'eventuale rimontaggio automatico della share all'accesso macOS andrà configurato con il Finder/Elementi login o sviluppato solo dopo collaudo sul Mac reale.
 
 **Collaudo automatico:** gli unit test simulano destinazioni offline/online, volumi errati, profili legacy non verificati, consenso alla copia mancante e mantenimento degli eventi DELETE; uno scenario end-to-end usa due cartelle locali temporanee, elimina e ricrea la destinazione, verifica il recupero della coda delle copie e dimostra che i file destinati alla cancellazione restano intatti. Non provano la connessione SMB, le credenziali memorizzate, il funzionamento effettivo SMAppService né 100 GB reali.
+
+## MacSync v0.10.0 — Frequenza sincronizzazione e avvisi su disconnessione
+
+### Programmazione selezionabile
+
+- **Minuti:** qualsiasi intervallo da **1 a 45 minuti**.
+- **Ore:** qualsiasi intervallo da **1 a 12 ore**.
+- **Ogni giorno:** orario locale selezionabile (HH:mm).
+- **Ogni settimana:** giorno (lunedì–domenica) e orario locale selezionabili.
+- La configurazione viene memorizzata nelle preferenze; valore iniziale 5 minuti. I controlli del volume SMB sono effettuati **solo prima del ciclo programmato**, non più ogni 30 secondi né dal solo aprire la finestra. I cicli si svolgono mentre MacSync resta in esecuzione.
+- Se una sincronizzazione dura a lungo o il Mac va in stop, non vengono recuperati in massa tutti gli slot saltati: il prossimo ciclo viene ripianificato in modo sicuro. Nei cicli a minuti/ore, l'intervallo decorre dalla fine del precedente; per giorno/settimana viene rispettato il prossimo orario locale, considerando anche il cambio ora legale.
+
+### Avviso opzionale dopo prolungata indisponibilità
+
+- Checkbox **Invia una notifica dopo una disconnessione prolungata**, OFF per impostazione predefinita.
+- **Avvisa dopo:** durata configurabile da **1 a 168 ore**. Le ore decorrono dalla **prima verifica programmata** che ha riscontrato la destinazione non disponibile, non dall'istante reale (non noto) in cui la rete è caduta.
+- Ad ogni successivo ciclo la destinazione viene verificata. Quando la soglia è superata, MacSync invia **una sola notifica per episodio e per cartella**, senza suoni e solo se le notifiche native sono state autorizzate. Alla prima verifica che trova la cartella nuovamente disponibile il conteggio viene azzerato.
+- Il controllo non viene eseguito tra due cicli: ad esempio, se la sincronizzazione è settimanale e l'avviso è dopo 2 ore, non può arrivare prima del **successivo slot settimanale**. Le notifiche richiedono che MacSync sia in esecuzione (e i permessi macOS siano concessi).
+- Le informazioni sullo stato di disconnessione sono registrate in UserDefaults, senza credenziali SMB; i contatori e le condizioni non autorizzano rimontaggi automatici o eliminazioni. Se una cartella è assente, i lavori rimangono in SQLite e vengono ripresi dopo il ritorno della stessa destinazione.
+
+### Limitazioni
+
+- Avvio al login e avvio delle copie rimangono preferenze separate; le cancellazioni speculari sono sempre soggette alla conferma specifica per la sessione, mai automatizzate al login.
+- MacSync non monta automaticamente la condivisione, non richiede username/password e non configura la VPN. L'avviso non è obbligatorio e non viene ripetuto a ogni controllo.
+- Test CI simulano calendario giornaliero/settimanale, fusi orari/cambio ora legale, intervalli min/ore, soglia di notifica, una notifica per episodio e ripristino della destinazione. Servono comunque prove sul Mac con Finder, SMB e notifiche reali.
 
 ## Test, limiti e sicurezza
 
