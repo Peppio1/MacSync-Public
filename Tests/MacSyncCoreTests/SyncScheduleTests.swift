@@ -182,12 +182,12 @@ final class ConnectionOutageTrackerTests: XCTestCase {
         let p = ConnectionAlertPolicy(enabled: true, afterHours: 1)
         var tracker = ConnectionOutageTracker()
         _ = tracker.record(["A": .unavailable], at: t, policy: p)
-        XCTAssertEqual(tracker.record(["A": .unavailable"],
+        XCTAssertEqual(tracker.record(["A": .unavailable],
             at: t.addingTimeInterval(3600), policy: p), ["A"])
-        _ = tracker.record(["A": .ready"], at: t.addingTimeInterval(3700), policy: p)
-        _ = tracker.record(["A": .unavailable"], at: t.addingTimeInterval(3800), policy: p)
+        _ = tracker.record(["A": .ready], at: t.addingTimeInterval(3700), policy: p)
+        _ = tracker.record(["A": .unavailable], at: t.addingTimeInterval(3800), policy: p)
         XCTAssertFalse(tracker.markAccepted(for: "A", firstObserved: t))
-        XCTAssertEqual(tracker.record(["A": .unavailable"],
+        XCTAssertEqual(tracker.record(["A": .unavailable],
             at: t.addingTimeInterval(7400), policy: p), ["A"])
     }
 
