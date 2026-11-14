@@ -8,6 +8,8 @@ import MacSyncCore
 final class MountedCopyController: ObservableObject {
     @Published var status = "Copie ferme: puoi selezionare cartelle locali o SMB già montate."
     @Published var active = false
+    @Published private(set) var nextScheduledRun: Date?
+    var onConnectionCheck: (([String: DestinationAvailability], Date) -> Void)?
     @Published var automaticCopiesEnabled = UserDefaults.standard.bool(forKey: "MacSync.autoCopiesEnabled") {
         didSet {
             UserDefaults.standard.set(automaticCopiesEnabled, forKey: "MacSync.autoCopiesEnabled")
@@ -52,6 +54,7 @@ final class MountedCopyController: ObservableObject {
     private let queue = DispatchQueue(label: "macsync.mounted.copy.serial", qos: .utility)
     private var timer: DispatchSourceTimer?
     private var mirrorCancellation: MirrorDeletionCancellation?
+    private var sessionCancellation: MirrorDeletionCancellation?
 
     private static func databaseURL() throws -> URL {
         let support = try FileManager.default.url(
@@ -63,7 +66,8 @@ final class MountedCopyController: ObservableObject {
     }
 
     func start(
-        sources: [(id: String, path: String, destination: String, expected: VolumeFingerprint?)]
+        sources: [(id: String, path: String, destination: String, expected: VolumeFingerprint?)],
+        schedule: SyncSchedule
     ) {
         guard !maintaining && !seedBusy else {
             status = "Una verifica/manutenzione è in corso. Le copie restano ferme."
@@ -116,7 +120,8 @@ final class MountedCopyController: ObservableObject {
             status = "Copie non attivate"
             return
         }
-        beginSession(sources: sources, policy: policy, automatic: false)
+        beginSession(sources: sources, policy: policy, automatic: false,
+                     schedule: schedule)
     }
 
     /// Explicit persistent opt-in: future app launches may copy or update,
@@ -147,7 +152,8 @@ final class MountedCopyController: ObservableObject {
     /// approved unattended COPY/UPDATE operations. No remote DELETE worker
     /// is instantiated, regardless of the persisted mirror preference.
     func startAutomaticSafeCopies(
-        sources: [(id: String, path: String, destination: String, expected: VolumeFingerprint?)]
+        sources: [(id: String, path: String, destination: String, expected: VolumeFingerprint?)],
+        schedule: SyncSchedule
     ) {
         guard automaticCopiesEnabled, !active, !maintaining, !seedBusy else { return }
         let policy: MirrorDeletionPolicy
@@ -159,15 +165,17 @@ final class MountedCopyController: ObservableObject {
             status = "Copie automatiche sospese: politica non valida"
             return
         }
-        beginSession(sources: sources, policy: policy, automatic: true)
+        beginSession(sources: sources, policy: policy, automatic: true,
+                     schedule: schedule)
     }
 
     private func beginSession(
         sources: [(id: String, path: String, destination: String, expected: VolumeFingerprint?)],
         policy: MirrorDeletionPolicy,
-        automatic: Bool
+        automatic: Bool,
+        schedule: SyncSchedule
     ) {
-        guard !active && !seedBusy && !maintaining else { return }
+        guard !active && !seedBusy && !maintaining, schedule.isValid else { return }
         do {
             let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
             guard !configured.isEmpty,
@@ -208,6 +216,7 @@ final class MountedCopyController: ObservableObject {
             // Initial source audit can be expensive on a large archive.
             // Create the armed deletion worker on the serial background queue.
             let cancellation = MirrorDeletionCancellation()
+            sessionCancellation = cancellation
             mirrorCancellation = policy.enabled ? cancellation : nil
             var mirrorWorker: MirrorDeletionWorker?
             try log.record(
@@ -215,9 +224,53 @@ final class MountedCopyController: ObservableObject {
                 message: "Sessione di copie di prova abilitata"
             )
             let timer = DispatchSource.makeTimerSource(queue: queue)
-            timer.schedule(deadline: .now() + .seconds(3),
-                           repeating: .seconds(300), leeway: .seconds(5))
+            // Each synchronization has one connection check immediately
+            // before its transfers. No independent 30-second SMB probes.
+            // A scheduled clock time is honored even for the first run.
+            let firstRun = automatic ? Date().addingTimeInterval(2)
+                : (schedule.next(after: Date()) ?? Date().addingTimeInterval(300))
+            timer.schedule(
+                deadline: .now() + max(0.5, firstRun.timeIntervalSinceNow),
+                leeway: .seconds(2)
+            )
             timer.setEventHandler { [weak self] in
+                guard !cancellation.isCancelled else { return }
+                defer {
+                    // A one-shot timer avoids overlapping cycles and skips
+                    // missed daily/weekly slots after sleep or long copies.
+                    if !cancellation.isCancelled,
+                       let next = schedule.next(after: Date()) {
+                        timer.schedule(
+                            deadline: .now() + max(0.5, next.timeIntervalSinceNow),
+                            leeway: .seconds(2)
+                        )
+                        DispatchQueue.main.async { [weak self] in
+                            if self?.active == true { self?.nextScheduledRun = next }
+                        }
+                    }
+                }
+                let checkedAt = Date()
+                let states = Dictionary(uniqueKeysWithValues: maps.map {
+                    ($0.rootID, DestinationProbe.inspect(
+                        path: $0.target.path, expectedVolume: $0.targetVolume
+                    ))
+                })
+                DispatchQueue.main.async { [weak self] in
+                    guard !cancellation.isCancelled else { return }
+                    self?.onConnectionCheck?(states, checkedAt)
+                }
+                guard states.values.allSatisfy({ $0.isReady }) else {
+                    try? log.record(
+                        level: .warning, rootID: "app", action: "connection_wait",
+                        message: "Destinazione non disponibile al controllo pianificato"
+                    )
+                    DispatchQueue.main.async { [weak self] in
+                        if self?.active == true {
+                            self?.status = "Destinazione non disponibile: sincronizzazione sospesa; file in coda mantenuti"
+                        }
+                    }
+                    return
+                }
                 do {
                     let startedAt = Date()
                     if policy.enabled && mirrorWorker == nil {
@@ -288,6 +341,7 @@ final class MountedCopyController: ObservableObject {
                 }
             }
             self.timer = timer
+            nextScheduledRun = firstRun
             lastCycleStats = SyncDashboardStats()
             sessionStats = SyncDashboardStats()
             lastCycleAt = nil
@@ -299,7 +353,7 @@ final class MountedCopyController: ObservableObject {
                 : "Cancellazioni speculari disattivate"
             status = automatic
                 ? "Copie automatiche di prova attive (solo aggiunte e aggiornamenti)"
-                : "Copie di prova attive; controllo ogni cinque minuti"
+                : "Copie di prova attive; " + schedule.summary
             refresh()
             timer.resume()
         } catch {
@@ -713,6 +767,9 @@ final class MountedCopyController: ObservableObject {
     }
 
     func stop() {
+        sessionCancellation?.cancel()
+        sessionCancellation = nil
+        nextScheduledRun = nil
         automaticSession = false
         mirrorCancellation?.cancel()
         mirrorCancellation = nil
