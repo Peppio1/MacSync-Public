@@ -110,30 +110,35 @@ enum MacSyncConnectionNotifier {
         }
     }
 
+    @MainActor
     static func send(destinationID: String, firstObserved: Date,
+                     shouldSend: @escaping @MainActor () -> Bool,
                      completion: @escaping (Error?) -> Void) {
         let center = UNUserNotificationCenter.current()
         center.getNotificationSettings { settings in
-            guard settings.authorizationStatus == .authorized ||
-                  settings.authorizationStatus == .provisional ||
-                  settings.authorizationStatus == .ephemeral else {
-                completion(DeliveryError.notAuthorized)
-                return
+            DispatchQueue.main.async {
+                guard shouldSend() else { return }
+                guard settings.authorizationStatus == .authorized ||
+                      settings.authorizationStatus == .provisional ||
+                      settings.authorizationStatus == .ephemeral else {
+                    completion(DeliveryError.notAuthorized)
+                    return
+                }
+                let notification = UNMutableNotificationContent()
+                notification.title = "MacSync — Destinazione non disponibile"
+                let name: String
+                switch destinationID {
+                case "photo-uploads": name = "Cartella_1"
+                case "photo-editing": name = "Cartella_2"
+                default: name = "Cartella di destinazione"
+                }
+                notification.body = "\(name): la condivisione non risulta accessibile. Le sincronizzazioni restano sospese fino al ritorno della destinazione."
+                notification.sound = nil
+                let key = "MacSync.disconnected.\(destinationID).\(firstObserved.timeIntervalSince1970)"
+                center.add(UNNotificationRequest(
+                    identifier: key, content: notification, trigger: nil
+                ), withCompletionHandler: completion)
             }
-            let notification = UNMutableNotificationContent()
-            notification.title = "MacSync — Destinazione non disponibile"
-            let name: String
-            switch destinationID {
-            case "photo-uploads": name = "Cartella_1"
-            case "photo-editing": name = "Cartella_2"
-            default: name = "Cartella di destinazione"
-            }
-            notification.body = "\(name): la condivisione non risulta accessibile. Le sincronizzazioni restano sospese fino al ritorno della destinazione."
-            notification.sound = nil
-            let key = "MacSync.disconnected.\(destinationID).\(firstObserved.timeIntervalSince1970)"
-            center.add(UNNotificationRequest(
-                identifier: key, content: notification, trigger: nil
-            ), withCompletionHandler: completion)
         }
     }
 }
