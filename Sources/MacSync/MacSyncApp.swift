@@ -860,9 +860,11 @@ private struct MacSyncConfigurationView: View {
         .frame(minWidth: 700, minHeight: 580)
         .onAppear {
             loginAtStartup.refresh()
+            settings.refreshNotificationPermission()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             loginAtStartup.refresh()
+            settings.refreshNotificationPermission()
         }
         .sheet(isPresented: $showSummary) {
             SyncSummarySheet(copy: copy)
