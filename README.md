@@ -1,4 +1,4 @@
-# MacSync — prototipo v0.11.0
+# MacSync — prototipo v0.12.0
 
 Applicazione nativa macOS per la futura sincronizzazione **unidirezionale Sorgente → Destinazione**, con copie selettive a frequenza configurabile, SQLite e FSEvents.
 
@@ -169,6 +169,16 @@ Questa fase distingue due opzioni indipendenti nella sezione **Impostazioni di a
 - LocalScanner distingue ENOENT dagli errori di accesso/I/O e verifica l'identità della radice prima e dopo la scansione. Una scansione fallita non modifica inventario, coda o checkpoint FSEvents.
 - Test deterministici tramite fault injection locale: staging interrotto, retry con nuovo worker/connessione SQLite, modifica concorrente di sorgente e target, target comparso durante staging, root sostituita, spazio esaurito, pubblicazione senza conferma, job superato, symlink, rinomina con upload fallito e subtree inaccessibile.
 - Restano necessari collaudo SMB reale e verifica con file grandi/archivio rappresentativo, atomicità e durabilità su Windows Server 2016, permessi, connessione intermittente e comportamento di macOS. I test non equivalgono a prove di crash del processo o di perdita alimentazione reali. Non utilizzare ancora dati di produzione.
+
+## MacSync v0.12 — coda e prestazioni
+
+- Il ciclo pianificato usa MountedFolderCopyWorker.runCycle: niente limite di 50 operazioni complessive. Acquisisce MAX(id) degli upload pendenti all'inizio; elabora pagine ordinate per ID di 100 record (limite interno configurabile nel core 1–1000). Non carica tutta la coda in memoria.
+- Ogni ID viene tentato al massimo una volta per ciclo. Gli eventi nuovi, con ID superiore al limite acquisito, restano al prossimo slot; i job rimandati o falliti restano persistenti. Se la coda è vuota non accede ai singoli file. Nessun polling aggiuntivo o scansione ricorsiva della destinazione.
+- Il controllo della sorgente, del volume e dei percorsi sicuri resta invariato. Un errore di volume/radice interrompe il ciclo, e una generica copyFailed verifica nuovamente la mappatura per non insistere su un volume scollegato. Stop protegge la coda; nessuna fase mirror dopo ciclo interrotto. Progress UI aggiornato a ogni pagina; una sola coda seriale, nessuna sovrapposizione fra slot.
+- SQLite: nuovo indice root_id, relative_path, completed, id per verificare job ancora correnti; query con limite superiore e paginazione keyset tramite indice degli upload. Salvataggio delle impostazioni e schema precedente conservati; non si azzerano dati utente.
+- Test: ampio ciclo con 235 file locali, coda sintetica da 20.000 record, eventi concorrenti, retry, interruzione/ripartenza, destinazione indisponibile e file sintetico di 64 MiB con controllo SHA-256 nel test. Non misurano banda reale o RAM durante uso SMB.
+- Rinomine: rimane la procedura prudente upload prima, eventuale cancellazione dopo e solo in sessione mirror esplicitamente autorizzata. Non si interpreta una coincidenza di dimensione/data come prova di identità. Rinomina server-side e rimozione/riduzione dei backup restano da validare con SMB reale; nessuna ottimizzazione distruttiva introdotta. Nessun trasferimento di recupero parziale a offset implementato.
+- Il bootstrap di archivio preseeded continua a supportare verifica SHA-256 esplicita, che legge anche i dati attraverso SMB: non dichiarare gratuito in banda. Test sintetici non dimostrano prestazioni per 100 GB, affidabilità SMB, o sicurezza di un ambiente produttivo.
 
 ## Test, limiti e sicurezza
 
