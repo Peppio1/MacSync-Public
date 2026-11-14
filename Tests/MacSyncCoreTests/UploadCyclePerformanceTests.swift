@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import XCTest
 @testable import MacSyncCore
 
@@ -110,6 +111,36 @@ final class UploadCyclePerformanceTests: XCTestCase {
         XCTAssertEqual(try f.journal.pendingUploads().count, 65)
         try FileManager.default.createDirectory(at: f.target, withIntermediateDirectories: false)
         XCTAssertEqual(try f.worker.runCycle(enabled: true).copied, 65)
+    }
+
+    func testLargeSyntheticFileTransfersIntact() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let source = f.source.appendingPathComponent("large.psd")
+        XCTAssertTrue(FileManager.default.createFile(atPath: source.path, contents: nil))
+        let writer = try FileHandle(forWritingTo: source)
+        var expected = SHA256()
+        // 64 MiB, created and checked with a 1 MiB working chunk.
+        for i in 0..<64 {
+            let chunk = Data(repeating: UInt8(i), count: 1024 * 1024)
+            try writer.write(contentsOf: chunk)
+            expected.update(data: chunk)
+        }
+        try writer.close()
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -120)],
+            ofItemAtPath: source.path)
+        try f.journal.enqueue(rootID: "photos", relativePath: "large.psd", kind: .upsert)
+        let result = try f.worker.runCycle(enabled: true)
+        XCTAssertEqual(result.created, 1)
+        XCTAssertEqual(result.bytes, 64 * 1024 * 1024)
+        XCTAssertTrue(try f.journal.pendingUploads().isEmpty)
+        let reader = try FileHandle(forReadingFrom: f.target.appendingPathComponent("large.psd"))
+        defer { try? reader.close() }
+        var actual = SHA256()
+        while let bytes = try reader.read(upToCount: 1024 * 1024), !bytes.isEmpty {
+            actual.update(data: bytes)
+        }
+        XCTAssertEqual(Data(actual.finalize()), Data(expected.finalize()))
     }
 
     func testLargeQueuePagesAreBoundedAndExcludeNewEvents() throws {
