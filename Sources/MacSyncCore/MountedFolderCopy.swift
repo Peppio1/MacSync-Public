@@ -319,6 +319,15 @@ public final class MountedFolderCopyWorker {
                 case .volumeChanged, .rootUnavailable, .sourceRootChanged:
                     summary.interrupted = true
                     return false
+                case .copyFailed:
+                    // A network failure may be reported as a generic
+                    // Foundation copy error. Revalidate only on failure,
+                    // not on a separate timer or a recursive remote scan.
+                    do { try mapping.verify() }
+                    catch {
+                        summary.interrupted = true
+                        return false
+                    }
                 default: break
                 }
             } catch {
