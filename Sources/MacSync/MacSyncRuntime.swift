@@ -18,10 +18,6 @@ final class MacSyncRuntime: ObservableObject {
     private var autoTimer: Timer?
     private var suspendedUntilNextLaunch = false
     private var configurationRevision = 0
-    private var readinessCheckInProgress = false
-    private let readinessWorker = DispatchQueue(
-        label: "macsync.autocopy.readiness", qos: .utility
-    )
     private var outages = ConnectionOutageTracker()
 
     init() {
@@ -112,103 +108,67 @@ final class MacSyncRuntime: ObservableObject {
         }
     }
 
-    private func scheduleNextAutomaticAttempt() {
+    private func scheduleNextAutomaticAttempt(afterSlot: Date? = nil) {
         autoTimer?.invalidate()
         autoTimer = nil
         nextAutomaticAttempt = nil
         guard !suspendedUntilNextLaunch,
               copy.automaticCopiesEnabled,
-              !copy.active,
-              let next = settings.schedule.next(after: Date()) else { return }
+              !copy.active else { return }
+        let schedule = settings.schedule
+        let now = Date()
+        let next = afterSlot.flatMap {
+            schedule.nextSlot(after: $0, completedAt: now)
+        } ?? schedule.next(after: now)
+        guard let next else { return }
 
         nextAutomaticAttempt = next
+        let revision = configurationRevision
         let timer = Timer(fire: next, interval: 0, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.autoTimer = nil
-                self?.nextAutomaticAttempt = nil
-                self?.checkAutomaticCopies()
+                guard let self, self.configurationRevision == revision else { return }
+                self.autoTimer = nil
+                self.nextAutomaticAttempt = nil
+                self.activateAutomaticSession(at: next)
             }
         }
         RunLoop.main.add(timer, forMode: .common)
         autoTimer = timer
     }
 
-    private func checkAutomaticCopies() {
+    /// The app-level timer only waits for a usable local monitor. It never
+    /// probes SMB. Once armed, the copy worker owns all subsequent slots,
+    /// including offline checks, retries and notifications.
+    private func activateAutomaticSession(at slot: Date) {
         guard !suspendedUntilNextLaunch,
-              !readinessCheckInProgress,
-              copy.automaticCopiesEnabled else {
-            scheduleNextAutomaticAttempt()
-            return
-        }
-        if copy.active {
-            automaticStatus = copy.automaticSession
-                ? "Copie automatiche attive (solo aggiunte e aggiornamenti)"
-                : "Sessione di copie manuale attiva"
-            scheduleNextAutomaticAttempt()
-            return
-        }
-        if !model.monitoring {
+              copy.automaticCopiesEnabled, !copy.active else { return }
+        guard model.monitoring else {
             automaticStatus = "Attendo il monitoraggio delle sorgenti"
-            scheduleNextAutomaticAttempt()
+            scheduleNextAutomaticAttempt(afterSlot: slot)
             return
         }
         let pairs = model.configuredPairs()
-        let snapshot = pairs.map {
-            AutomaticCopyPair(
-                sourcePath: $0.path, destinationPath: $0.destination,
-                expectedVolume: $0.expected
-            )
+        // Reuse the pure configuration gate without filesystem probes.
+        let decision = AutomaticCopyReadiness.evaluate(
+            enabled: true, monitorRunning: true, copyActive: false,
+            pairs: pairs.map {
+                AutomaticCopyPair(sourcePath: $0.path,
+                                  destinationPath: $0.destination,
+                                  expectedVolume: $0.expected)
+            },
+            probe: { _, _ in .ready }
+        )
+        guard decision == .ready else {
+            automaticStatus = decision.description
+            scheduleNextAutomaticAttempt(afterSlot: slot)
+            return
         }
-        let configured = pairs.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
-        let revision = configurationRevision
-        readinessCheckInProgress = true
-        automaticStatus = "Verifica delle destinazioni prima della sincronizzazione…"
-
-        // If only the SMB target is unavailable, do not run a copy session.
-        // The next attempt comes from the SAME selected synchronization plan.
-        readinessWorker.async { [weak self] in
-            var states: [String: DestinationAvailability] = [:]
-            var byPath: [String: DestinationAvailability] = [:]
-            // Exactly one filesystem probe per configured destination for
-            // this scheduled slot; reuse its result for the readiness gate.
-            for item in configured {
-                let value = DestinationProbe.inspect(
-                    path: item.destination, expectedVolume: item.expected
-                )
-                states[item.id] = value
-                byPath[item.destination] = value
-            }
-            let decision = AutomaticCopyReadiness.evaluate(
-                enabled: true, monitorRunning: true, copyActive: false,
-                pairs: snapshot,
-                probe: { path, _ in byPath[path] ?? .notConfigured }
-            )
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.readinessCheckInProgress = false
-                guard self.configurationRevision == revision,
-                      !self.suspendedUntilNextLaunch,
-                      self.copy.automaticCopiesEnabled,
-                      self.model.monitoring,
-                      !self.copy.active else {
-                    self.scheduleNextAutomaticAttempt()
-                    return
-                }
-                self.receiveConnectionStates(states, at: Date())
-                if decision == .ready {
-                    self.automaticStatus = "Destinazioni pronte: avvio copie automatiche"
-                    self.copy.startAutomaticSafeCopies(
-                        sources: self.model.configuredPairs(),
-                        schedule: self.settings.schedule
-                    )
-                    self.automaticStatus = self.copy.active
-                        ? "Copie automatiche attive (senza cancellazioni)"
-                        : "Attivazione rinviata: verifica configurazione e registro"
-                } else {
-                    self.automaticStatus = decision.description
-                }
-                self.scheduleNextAutomaticAttempt()
-            }
-        }
+        copy.startAutomaticSafeCopies(
+            sources: pairs, schedule: settings.schedule, firstSlot: slot
+        )
+        automaticStatus = copy.active
+            ? "Copie automatiche pianificate (senza cancellazioni)"
+            : "Attivazione rinviata: verifica configurazione e registro"
+        if !copy.active { scheduleNextAutomaticAttempt(afterSlot: slot) }
     }
 }
