@@ -153,7 +153,8 @@ final class MountedCopyController: ObservableObject {
     /// is instantiated, regardless of the persisted mirror preference.
     func startAutomaticSafeCopies(
         sources: [(id: String, path: String, destination: String, expected: VolumeFingerprint?)],
-        schedule: SyncSchedule
+        schedule: SyncSchedule,
+        firstSlot: Date
     ) {
         guard automaticCopiesEnabled, !active, !maintaining, !seedBusy else { return }
         let policy: MirrorDeletionPolicy
@@ -166,14 +167,15 @@ final class MountedCopyController: ObservableObject {
             return
         }
         beginSession(sources: sources, policy: policy, automatic: true,
-                     schedule: schedule)
+                     schedule: schedule, firstSlot: firstSlot)
     }
 
     private func beginSession(
         sources: [(id: String, path: String, destination: String, expected: VolumeFingerprint?)],
         policy: MirrorDeletionPolicy,
         automatic: Bool,
-        schedule: SyncSchedule
+        schedule: SyncSchedule,
+        firstSlot: Date? = nil
     ) {
         guard !active && !seedBusy && !maintaining, schedule.isValid else { return }
         do {
@@ -185,34 +187,22 @@ final class MountedCopyController: ObservableObject {
                   }) else {
                 throw MountedCopyError.invalidMapping
             }
-            // A saved SMB volume identity is mandatory. If the share has
-            // disappeared and /Volumes contains a local placeholder, never
-            // start a session against that local path.
-            guard configured.allSatisfy({
-                DestinationProbe.inspect(
-                    path: $0.destination, expectedVolume: $0.expected
-                ).isReady
-            }) else {
-                throw MountedCopyError.volumeChanged
-            }
-            let maps = try configured.map {
-                try MountedFolderMapping(
-                    rootID: $0.id,
-                    source: URL(fileURLWithPath: $0.path),
-                    target: URL(fileURLWithPath: $0.destination),
-                    expectedTargetVolume: $0.expected
-                )
-            }
+            // No remote filesystem access while arming a session.
+            // The original destination fingerprint is mandatory, even
+            // when the share is currently offline.
+            guard Set(configured.map { $0.id }).count == configured.count,
+                  configured.allSatisfy({ $0.expected?.isStrongIdentity == true })
+            else { throw MountedCopyError.volumeChanged }
             let database = try Self.databaseURL()
             guard FileManager.default.fileExists(atPath: database.path) else {
                 throw JournalError.database("Avvia prima il monitoraggio delle sorgenti")
             }
             let journal = try ChangeJournal(path: database.path)
             let log = try SyncActivityLog(path: database.path)
-            let worker = try MountedFolderCopyWorker(
-                journal: journal, log: log, mappings: maps
-            )
-            let recoveryManifest = try RecoveryManifest(path: database.path)
+            // These workers are initialized only at the first healthy
+            // scheduled slot, on the serial utility queue.
+            var maps: [MountedFolderMapping] = []
+            var worker: MountedFolderCopyWorker?
             // Initial source audit can be expensive on a large archive.
             // Create the armed deletion worker on the serial background queue.
             let cancellation = MirrorDeletionCancellation()
@@ -227,34 +217,42 @@ final class MountedCopyController: ObservableObject {
             // Each synchronization has one connection check immediately
             // before its transfers. No independent 30-second SMB probes.
             // A scheduled clock time is honored even for the first run.
-            let firstRun = automatic ? Date().addingTimeInterval(2)
-                : (schedule.next(after: Date()) ?? Date().addingTimeInterval(300))
+            guard let firstRun = firstSlot ?? schedule.next(after: Date()) else {
+                throw MountedCopyError.invalidMapping
+            }
+            var scheduledSlot = firstRun
             timer.schedule(
-                deadline: .now() + max(0.5, firstRun.timeIntervalSinceNow),
-                leeway: .seconds(2)
+                wallDeadline: .now() + max(0, firstRun.timeIntervalSinceNow),
+                leeway: .milliseconds(250)
             )
             timer.setEventHandler { [weak self] in
                 guard !cancellation.isCancelled else { return }
                 defer {
-                    // A one-shot timer avoids overlapping cycles and skips
-                    // missed daily/weekly slots after sleep or long copies.
+                    // Keep the cadence anchored to its scheduled slot.
+                    // If a long copy crosses a slot, skip that slot.
                     if !cancellation.isCancelled,
-                       let next = schedule.next(after: Date()) {
+                       let next = schedule.nextSlot(
+                           after: scheduledSlot, completedAt: Date()
+                       ) {
+                        scheduledSlot = next
                         timer.schedule(
-                            deadline: .now() + max(0.5, next.timeIntervalSinceNow),
-                            leeway: .seconds(2)
+                            wallDeadline: .now() + max(0, next.timeIntervalSinceNow),
+                            leeway: .milliseconds(250)
                         )
                         DispatchQueue.main.async { [weak self] in
-                            if self?.active == true { self?.nextScheduledRun = next }
+                            if !cancellation.isCancelled, self?.active == true {
+                                self?.nextScheduledRun = next
+                            }
                         }
                     }
                 }
-                let checkedAt = Date()
-                let states = Dictionary(uniqueKeysWithValues: maps.map {
-                    ($0.rootID, DestinationProbe.inspect(
-                        path: $0.target.path, expectedVolume: $0.targetVolume
+                let states = Dictionary(uniqueKeysWithValues: configured.map {
+                    ($0.id, DestinationProbe.inspect(
+                        path: $0.destination, expectedVolume: $0.expected
                     ))
                 })
+                let checkedAt = Date()
+                guard !cancellation.isCancelled else { return }
                 DispatchQueue.main.async { [weak self] in
                     guard !cancellation.isCancelled else { return }
                     self?.onConnectionCheck?(states, checkedAt)
@@ -265,7 +263,7 @@ final class MountedCopyController: ObservableObject {
                         message: "Destinazione non disponibile al controllo pianificato"
                     )
                     DispatchQueue.main.async { [weak self] in
-                        if self?.active == true {
+                        if !cancellation.isCancelled, self?.active == true {
                             self?.status = "Destinazione non disponibile: sincronizzazione sospesa; file in coda mantenuti"
                         }
                     }
@@ -273,9 +271,32 @@ final class MountedCopyController: ObservableObject {
                 }
                 do {
                     let startedAt = Date()
+                    guard !cancellation.isCancelled else { return }
+                    if worker == nil {
+                        maps = try configured.map {
+                            try MountedFolderMapping(
+                                rootID: $0.id,
+                                source: URL(fileURLWithPath: $0.path),
+                                target: URL(fileURLWithPath: $0.destination),
+                                expectedTargetVolume: $0.expected
+                            )
+                        }
+                        worker = try MountedFolderCopyWorker(
+                            journal: journal, log: log, mappings: maps
+                        )
+                    }
+                    // Do not process a queue belonging to a different source.
+                    for mapping in maps {
+                        guard try journal.watchedRootPath(rootID: mapping.rootID)
+                            == mapping.source.path else {
+                            throw MountedCopyError.invalidMapping
+                        }
+                    }
+                    guard let worker, !cancellation.isCancelled else { return }
                     if policy.enabled && mirrorWorker == nil {
                         mirrorWorker = try MirrorDeletionWorker(
-                            journal: journal, manifest: recoveryManifest,
+                            journal: journal,
+                            manifest: RecoveryManifest(path: database.path),
                             log: log, mappings: maps, policy: policy,
                             cancellation: cancellation
                         )
@@ -285,10 +306,13 @@ final class MountedCopyController: ObservableObject {
                                 ? "Mirror di prova attivato con recupero" : "Mirror di prova attivato senza recupero"
                         )
                     }
-                    let summary = try worker.runOnce(enabled: true, maxJobs: 50)
+                    let summary = try worker.runOnce(
+                        enabled: true, maxJobs: 50,
+                        shouldContinue: { !cancellation.isCancelled }
+                    )
                     var mirrorSummary = MirrorDeletionSummary()
                     var expired = 0
-                    if let mirrorWorker {
+                    if let mirrorWorker, !cancellation.isCancelled {
                         mirrorSummary = try mirrorWorker.runOnce(maxFiles: 25)
                         expired = try mirrorWorker.pruneExpiredRecovery()
                     }
@@ -316,6 +340,7 @@ final class MountedCopyController: ObservableObject {
                         + "\(summary.deferred) rimandate, \(summary.failed) errori, "
                         + "\(ByteCountFormatter.string(fromByteCount: summary.bytes, countStyle: .file)) trasferiti."
                     DispatchQueue.main.async { [weak self] in
+                        guard !cancellation.isCancelled else { return }
                         self?.status = result
                         self?.mirrorStatus = policy.enabled ? mirrorDetails : "Cancellazioni speculari disattivate"
                         self?.lastCycleStats = dashboard
@@ -330,6 +355,7 @@ final class MountedCopyController: ObservableObject {
                         message: "Errore generale durante il ciclo di copia"
                     )
                     DispatchQueue.main.async { [weak self] in
+                        guard !cancellation.isCancelled else { return }
                         self?.status = "Copia sospesa: " + error.localizedDescription
                         let failed = SyncDashboardStats(failed: 1)
                         self?.lastCycleStats = failed
@@ -352,8 +378,8 @@ final class MountedCopyController: ObservableObject {
                 ? "Configurazione armata: la verifica delle sorgenti avverrà al primo ciclo"
                 : "Cancellazioni speculari disattivate"
             status = automatic
-                ? "Copie automatiche di prova attive (solo aggiunte e aggiornamenti)"
-                : "Copie di prova attive; " + schedule.summary
+                ? "Copie automatiche di prova pianificate (solo aggiunte e aggiornamenti)"
+                : "Copie di prova pianificate; " + schedule.summary
             refresh()
             timer.resume()
         } catch {
