@@ -35,6 +35,11 @@ final class MirrorDeletionTests: XCTestCase {
             rootID: "photos", source: source, target: destination
         )
         try LocalInventory(path: database).reconcile(rootID: "photos", root: source)
+        // Both sides were seeded with identical fixture data above.
+        // Model the completed upload baseline before testing mirror.
+        for job in try journal.pendingUploads() {
+            try journal.markCompleted(id: job.id)
+        }
         return Fixture(base: base, source: source, destination: destination,
                        database: database, journal: journal, log: log,
                        manifest: manifest, mapping: mapping)
@@ -88,6 +93,38 @@ final class MirrorDeletionTests: XCTestCase {
             $0.kind == .delete && $0.relativePath == "photo0.dng"
         })
         XCTAssertTrue(try f.log.recent().contains { $0.action == "mirror_permanent" })
+    }
+
+    func testRenameRetainsOldTargetUntilNewFileIsSuccessfullyCopied() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let mirror = try worker(f, recover: false)
+        let oldSource = f.source.appendingPathComponent("photo0.dng")
+        let newSource = f.source.appendingPathComponent("renamed.dng")
+        let oldTarget = f.destination.appendingPathComponent("photo0.dng")
+        let newTarget = f.destination.appendingPathComponent("renamed.dng")
+        try FileManager.default.moveItem(at: oldSource, to: newSource)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -120)],
+            ofItemAtPath: newSource.path
+        )
+        _ = try LocalInventory(path: f.database).reconcile(rootID: "photos", root: f.source)
+        let blockedCopy = try MountedFolderCopyWorker(
+            journal: f.journal, log: f.log, mappings: [f.mapping],
+            availableCapacity: { _ in 0 }
+        )
+        XCTAssertEqual(try blockedCopy.runOnce(enabled: true).deferred, 1)
+        XCTAssertTrue(try mirror.runOnce().blocked)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: oldTarget.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: newTarget.path))
+        let retry = try MountedFolderCopyWorker(
+            journal: f.journal, log: f.log, mappings: [f.mapping],
+            availableCapacity: { _ in nil }
+        )
+        XCTAssertEqual(try retry.runOnce(enabled: true).copied, 1)
+        XCTAssertEqual(try mirror.runOnce().removed, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: oldTarget.path))
+        XCTAssertEqual(try String(contentsOf: newTarget, encoding: .utf8), "simulated image 0")
     }
 
     func testOldDeletionBeforeArmingIsNeverExecuted() throws {
