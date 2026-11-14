@@ -1,0 +1,198 @@
+import Foundation
+import XCTest
+@testable import MacSyncCore
+
+final class MountedCopyResilienceTests: XCTestCase {
+    private struct Fixture {
+        let base: URL
+        let src: URL
+        let dst: URL
+        let db: String
+        let mapping: MountedFolderMapping
+    }
+    private enum SimulatedFailure: Error { case connectionLost }
+    private func fixture() throws -> Fixture {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macsync-resilience-" + UUID().uuidString)
+            .resolvingSymlinksInPath()
+        let src = base.appendingPathComponent("source")
+        let dst = base.appendingPathComponent("destination")
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dst, withIntermediateDirectories: true)
+        let db = base.appendingPathComponent("state.sqlite").path
+        try write("new image content", to: src.appendingPathComponent("photo.psd"))
+        let journal = try ChangeJournal(path: db)
+        try journal.enqueue(rootID: "photos", relativePath: "photo.psd", kind: .upsert)
+        return Fixture(base: base, src: src, dst: dst, db: db,
+            mapping: try MountedFolderMapping(rootID: "photos", source: src, target: dst))
+    }
+    private func write(_ content: String, to url: URL) throws {
+        try Data(content.utf8).write(to: url)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -120)],
+            ofItemAtPath: url.path
+        )
+    }
+    private func worker(_ f: Fixture, capacity: Int64? = nil) throws -> MountedFolderCopyWorker {
+        try MountedFolderCopyWorker(journal: ChangeJournal(path: f.db),
+            log: SyncActivityLog(path: f.db), mappings: [f.mapping],
+            availableCapacity: { _ in capacity })
+    }
+    private func pending(_ f: Fixture) throws -> [QueuedChange] {
+        try ChangeJournal(path: f.db).pending()
+    }
+    private func read(_ url: URL) throws -> String { try String(contentsOf: url, encoding: .utf8) }
+
+    func testInterruptedStagingPreservesOldFileAndReopensQueue() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let target = f.dst.appendingPathComponent("photo.psd")
+        try write("old original", to: target)
+        do {
+            let w = try worker(f)
+            w.checkpoint = { phase, path in
+                if phase == .beforeStageCopy {
+                    try Data("partial".utf8).write(to: path)
+                    throw SimulatedFailure.connectionLost
+                }
+            }
+            XCTAssertEqual(try w.runOnce(enabled: true).failed, 1)
+        }
+        XCTAssertEqual(try read(target), "old original")
+        XCTAssertEqual(try pending(f).count, 1)
+        let stage = f.dst.appendingPathComponent(".macsync-staging")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: stage.path).count, 1)
+        // A fresh worker + fresh SQLite connection emulate restart.
+        XCTAssertEqual(try worker(f).runOnce(enabled: true).updated, 1)
+        XCTAssertEqual(try read(target), "new image content")
+        XCTAssertTrue(try pending(f).isEmpty)
+    }
+
+    func testSourceChangesAfterStageAreNeverPublished() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let target = f.dst.appendingPathComponent("photo.psd")
+        try write("old original", to: target)
+        let w = try worker(f)
+        w.checkpoint = { phase, _ in
+            if phase == .afterStageCopy {
+                try self.write("newer file under edit", to: f.src.appendingPathComponent("photo.psd"))
+            }
+        }
+        XCTAssertEqual(try w.runOnce(enabled: true).deferred, 1)
+        XCTAssertEqual(try read(target), "old original")
+        XCTAssertEqual(try pending(f).count, 1)
+        XCTAssertEqual(try worker(f).runOnce(enabled: true).updated, 1)
+        XCTAssertEqual(try read(target), "newer file under edit")
+    }
+
+    func testTargetChangesAfterBackupAreNotOverwritten() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let target = f.dst.appendingPathComponent("photo.psd")
+        try write("old original", to: target)
+        let w = try worker(f)
+        w.checkpoint = { phase, _ in
+            if phase == .afterBackup { try self.write("another client's edit", to: target) }
+        }
+        XCTAssertEqual(try w.runOnce(enabled: true).deferred, 1)
+        XCTAssertEqual(try read(target), "another client's edit")
+        XCTAssertEqual(try pending(f).count, 1)
+        let backups = try FileManager.default.contentsOfDirectory(at: f.dst,
+            includingPropertiesForKeys: nil).filter { $0.lastPathComponent.hasPrefix(".macsync-backup-") }
+        XCTAssertEqual(backups.count, 1)
+        XCTAssertEqual(try read(XCTUnwrap(backups.first)), "old original")
+    }
+
+    func testTargetAppearsWhileStagingDoesNotOverwrite() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let target = f.dst.appendingPathComponent("photo.psd")
+        let w = try worker(f)
+        w.checkpoint = { phase, _ in
+            if phase == .afterStageCopy { try self.write("arrived during copy", to: target) }
+        }
+        XCTAssertEqual(try w.runOnce(enabled: true).deferred, 1)
+        XCTAssertEqual(try read(target), "arrived during copy")
+        XCTAssertEqual(try pending(f).count, 1)
+    }
+
+    func testDestinationReplacedMidTransferDoesNotWriteToNewRoot() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let old = f.base.appendingPathComponent("old-destination")
+        let w = try worker(f)
+        w.checkpoint = { phase, _ in
+            if phase == .afterStageCopy {
+                try FileManager.default.moveItem(at: f.dst, to: old)
+                try FileManager.default.createDirectory(at: f.dst, withIntermediateDirectories: false)
+            }
+        }
+        XCTAssertEqual(try w.runOnce(enabled: true).deferred, 1)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.dst.path), [])
+        XCTAssertEqual(try pending(f).count, 1)
+    }
+
+    func testSourceRootReplacementBlocksExistingMapping() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        try FileManager.default.moveItem(at: f.src, to: f.base.appendingPathComponent("old-source"))
+        try FileManager.default.createDirectory(at: f.src, withIntermediateDirectories: false)
+        try write("unrelated photo", to: f.src.appendingPathComponent("photo.psd"))
+        XCTAssertEqual(try worker(f).runOnce(enabled: true).deferred, 1)
+        XCTAssertEqual(try pending(f).count, 1)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.dst.path), [])
+    }
+
+    func testDiskFullDefersWithoutCreatingStageOrOverwriting() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let target = f.dst.appendingPathComponent("photo.psd")
+        try write("old original", to: target)
+        XCTAssertEqual(try worker(f, capacity: 0).runOnce(enabled: true).deferred, 1)
+        XCTAssertEqual(try read(target), "old original")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.dst.appendingPathComponent(".macsync-staging").path))
+        XCTAssertEqual(try pending(f).count, 1)
+    }
+
+    func testFailedAcknowledgmentAfterPublicationKeepsQueueAndCanRetry() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let target = f.dst.appendingPathComponent("photo.psd")
+        let w = try worker(f)
+        w.checkpoint = { phase, _ in
+            if phase == .afterPublish { throw SimulatedFailure.connectionLost }
+        }
+        XCTAssertEqual(try w.runOnce(enabled: true).failed, 1)
+        XCTAssertEqual(try read(target), "new image content")
+        XCTAssertEqual(try pending(f).count, 1)
+        XCTAssertEqual(try worker(f).runOnce(enabled: true).updated, 1)
+        XCTAssertTrue(try pending(f).isEmpty)
+        XCTAssertEqual(try read(target), "new image content")
+    }
+
+    func testNewQueueEventDuringStagingPreventsOldPublication() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let w = try worker(f)
+        w.checkpoint = { phase, _ in
+            if phase == .afterStageCopy {
+                try ChangeJournal(path: f.db).enqueue(rootID: "photos", relativePath: "photo.psd", kind: .delete)
+            }
+        }
+        XCTAssertEqual(try w.runOnce(enabled: true).deferred, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.dst.appendingPathComponent("photo.psd").path))
+        XCTAssertEqual(try pending(f).count, 2)
+    }
+
+    func testDanglingSymlinkAndReservedNamesAreBlocked() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let target = f.dst.appendingPathComponent("photo.psd")
+        try FileManager.default.createSymbolicLink(at: target, withDestinationURL: f.base.appendingPathComponent("missing"))
+        XCTAssertEqual(try worker(f).runOnce(enabled: true).failed, 1)
+        XCTAssertEqual(try pending(f).count, 1)
+        XCTAssertThrowsError(try f.mapping.fileURL(relativePath: ".MACSYNC-staging/intruder", destination: true))
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: target.path), f.base.appendingPathComponent("missing").path)
+    }
+}
