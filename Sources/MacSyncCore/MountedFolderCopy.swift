@@ -188,7 +188,7 @@ public final class MountedFolderCopyWorker {
 
     // Internal fault injection for deterministic core tests, never configured
     // by the application or exposed to users.
-    enum Checkpoint { case beforeStageCopy, afterStageCopy, afterBackup, afterPublish }
+    enum Checkpoint: Equatable { case beforeStageCopy, afterStageCopy, afterBackup, afterPublish }
     var checkpoint: ((Checkpoint, URL) throws -> Void)?
 
     public init(
@@ -230,6 +230,10 @@ public final class MountedFolderCopyWorker {
                 continue
             }
             do {
+                guard try journal.uploadIsCurrent(job) else {
+                    summary.deferred += 1
+                    continue
+                }
                 let outcome = try transfer(job, mapping: mapping)
                 try journal.markCompleted(id: job.id)
                 summary.copied += 1
@@ -308,6 +312,7 @@ public final class MountedFolderCopyWorker {
             try verifyRoots()
             try ensureSafeParents(dst, under: mapping.target, create: true)
             try verifyRoots()
+            guard try journal.uploadIsCurrent(job) else { throw MountedCopyError.sourceChanging }
             let alreadyPresent = try optionalSnapshot(dst) != nil
             if alreadyPresent {
                 let existing = try readSnapshot(dst)
@@ -369,6 +374,7 @@ public final class MountedFolderCopyWorker {
             }
             func verifyPublication() throws {
                 try verifyRoots()
+                guard try journal.uploadIsCurrent(job) else { throw MountedCopyError.sourceChanging }
                 try ensureSafeParents(src, under: mapping.source, create: false)
                 try ensureSafeParents(dst, under: mapping.target, create: false)
                 guard try CopyDirectoryIdentity.read(stageFolder) == stageIdentity,
