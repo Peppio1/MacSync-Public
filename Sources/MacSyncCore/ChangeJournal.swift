@@ -122,6 +122,29 @@ public final class ChangeJournal {
     }
 
 
+    /// Inventory reconciliation can replace a queued job while the copy
+    /// is staging. Never publish a job which is no longer current.
+    public func uploadIsCurrent(_ job: QueuedChange) throws -> Bool {
+        let stmt = try prepare("""
+            SELECT COUNT(*) FROM change_queue q
+            WHERE q.id=? AND q.root_id=? AND q.relative_path=?
+              AND q.kind='upsert' AND q.completed=0
+              AND NOT EXISTS (
+                  SELECT 1 FROM change_queue n
+                   WHERE n.root_id=q.root_id AND n.relative_path=q.relative_path
+                     AND n.completed=0 AND n.id>q.id
+              );
+            """)
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_bind_int64(stmt, 1, job.id) == SQLITE_OK else {
+            throw databaseFailure()
+        }
+        try bind(job.rootID, at: 2, in: stmt)
+        try bind(job.relativePath, at: 3, in: stmt)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { throw databaseFailure() }
+        return sqlite3_column_int64(stmt, 0) == 1
+    }
+
     /// Fetch only pending upserts. Pending deletes must never starve uploads;
     /// deletes remain queued for a future, separately gated mirror phase.
     public func pendingUploads(limit: Int = 100, afterID: Int64 = 0) throws -> [QueuedChange] {
