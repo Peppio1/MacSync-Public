@@ -170,6 +170,7 @@ public struct MountedCopySummary: Equatable {
     public var failed = 0
     public var bytes: Int64 = 0
     public var disabled = false
+    public var interrupted = false
     public init() {}
 }
 
@@ -221,8 +222,46 @@ public final class MountedFolderCopyWorker {
             nextAfterID = 0
             jobs = try journal.pendingUploads(limit: maxJobs)
         }
+        _ = try process(jobs, summary: &summary, shouldContinue: shouldContinue)
+        return summary
+    }
+
+    /// Process every eligible job present at the beginning of the cycle,
+    /// with bounded memory. A failing job is tried at most once per cycle;
+    /// new events wait for the next scheduled run.
+    public func runCycle(enabled: Bool = false, pageSize: Int = 100,
+                         shouldContinue: () -> Bool = { true },
+                         onProgress: (MountedCopySummary) -> Void = { _ in }) throws -> MountedCopySummary {
+        var summary = MountedCopySummary()
+        guard enabled else {
+            summary.disabled = true
+            return summary
+        }
+        guard let upper = try journal.pendingUploadUpperBound() else { return summary }
+        let size = max(1, min(pageSize, 1000))
+        nextAfterID = 0
+        while shouldContinue() {
+            let page = try journal.pendingUploads(
+                limit: size, afterID: nextAfterID, throughID: upper
+            )
+            guard !page.isEmpty else { return summary }
+            let completedPage = try process(page, summary: &summary,
+                                            shouldContinue: shouldContinue)
+            onProgress(summary)
+            guard completedPage else { return summary }
+        }
+        summary.interrupted = true
+        return summary
+    }
+
+    /// Serial batch processing; returns false if transfers should stop.
+    private func process(_ jobs: [QueuedChange], summary: inout MountedCopySummary,
+                         shouldContinue: () -> Bool) throws -> Bool {
         for job in jobs {
-            guard shouldContinue() else { break }
+            guard shouldContinue() else {
+                summary.interrupted = true
+                return false
+            }
             nextAfterID = job.id
             let started = Date()
             guard let mapping = mappings[job.rootID] else {
@@ -237,7 +276,8 @@ public final class MountedFolderCopyWorker {
                 let outcome = try transfer(job, mapping: mapping)
                 try journal.markCompleted(id: job.id)
                 summary.copied += 1
-                summary.bytes += outcome.bytes
+                let (totalBytes, overflow) = summary.bytes.addingReportingOverflow(outcome.bytes)
+                summary.bytes = overflow ? Int64.max : totalBytes
                 switch outcome.kind {
                 case .created: summary.created += 1
                 case .updated: summary.updated += 1
@@ -272,6 +312,15 @@ public final class MountedFolderCopyWorker {
                     durationSeconds: Date().timeIntervalSince(started),
                     message: error.localizedDescription
                 )
+                // A lost mount or changed root is not a per-file failure.
+                // Stop the cycle rather than attempting thousands of jobs
+                // against the same unavailable destination.
+                switch error {
+                case .volumeChanged, .rootUnavailable, .sourceRootChanged:
+                    summary.interrupted = true
+                    return false
+                default: break
+                }
             } catch {
                 summary.failed += 1
                 try log.record(
@@ -282,7 +331,7 @@ public final class MountedFolderCopyWorker {
                 )
             }
         }
-        return summary
+        return true
     }
 
     private enum TransferKind { case created, updated, directoryCreated, directoryExisting }
