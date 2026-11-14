@@ -72,6 +72,27 @@ final class LocalInventoryTests: XCTestCase {
         XCTAssertEqual(try inventory.pendingCount(), originalQueued)
     }
 
+    func testInaccessibleSubtreeDoesNotAcknowledgeDeletionOrEvent() throws {
+        let (base, root, db) = try temporaryFixture()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let folder = root.appendingPathComponent("album")
+        let file = folder.appendingPathComponent("photo.dng")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("image".utf8).write(to: file)
+        let inventory = try LocalInventory(path: db.path)
+        _ = try inventory.reconcile(rootID: "photos", root: root, eventID: 100)
+        let before = try ChangeJournal(path: db.path).pending()
+        // A file in place of an expected directory gives ENOTDIR, not ENOENT.
+        try FileManager.default.removeItem(at: folder)
+        try Data("unexpected object".utf8).write(to: folder)
+        XCTAssertThrowsError(try inventory.reconcile(
+            rootID: "photos", root: root, subtree: file, eventID: 101
+        ))
+        XCTAssertEqual(try inventory.itemCount(rootID: "photos"), 2)
+        XCTAssertEqual(try inventory.lastEventID(rootID: "photos"), 100)
+        XCTAssertEqual(try ChangeJournal(path: db.path).pending(), before)
+    }
+
     func testDirectoryRenameDiscoversBothSides() throws {
         let (base, root, db) = try temporaryFixture()
         defer { try? FileManager.default.removeItem(at: base) }
