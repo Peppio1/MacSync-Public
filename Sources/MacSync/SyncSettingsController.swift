@@ -104,9 +104,12 @@ final class SyncSettingsController: ObservableObject {
 /// outage, and report acceptance/failure instead of silently losing alerts.
 enum MacSyncConnectionNotifier {
     enum DeliveryError: LocalizedError {
-        case notAuthorized
+        case notAuthorized, cancelled
         var errorDescription: String? {
-            "Notifiche non autorizzate da macOS"
+            switch self {
+            case .notAuthorized: return "Notifiche non autorizzate da macOS"
+            case .cancelled: return "Avviso non più necessario"
+            }
         }
     }
 
@@ -117,7 +120,10 @@ enum MacSyncConnectionNotifier {
         let center = UNUserNotificationCenter.current()
         center.getNotificationSettings { settings in
             DispatchQueue.main.async {
-                guard shouldSend() else { return }
+                guard shouldSend() else {
+                    completion(DeliveryError.cancelled)
+                    return
+                }
                 guard settings.authorizationStatus == .authorized ||
                       settings.authorizationStatus == .provisional else {
                     completion(DeliveryError.notAuthorized)
