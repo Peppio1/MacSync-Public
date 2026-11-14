@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import Darwin
 
 public struct TrackedItem: Equatable, Sendable {
     public let relativePath: String
@@ -24,6 +25,22 @@ public struct ReconciliationResult: Sendable {
 /// Local-only scanner: never follows symbolic links or reads the SMB destination.
 /// Errors abort the whole scan, so an unavailable root never becomes a mass deletion.
 public enum LocalScanner {
+    private struct RootStamp: Equatable {
+        let device: Int64
+        let inode: UInt64
+    }
+
+    private static func stamp(_ root: URL) throws -> RootStamp {
+        var info = stat()
+        guard root.path.withCString({ lstat($0, &info) }) == 0,
+              (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR) else {
+            throw JournalError.database("Source root is unavailable or not a directory")
+        }
+        return RootStamp(device: Int64(info.st_dev), inode: UInt64(info.st_ino))
+    }
+
+    /// Validate the root identity again before accepting an enumeration.
+    /// A vanished or replaced root must never be interpreted as empty.
     public static func scan(root: URL, subtree: URL? = nil) throws -> [TrackedItem] {
         let root = root.standardizedFileURL.resolvingSymlinksInPath()
         let target = (subtree ?? root).standardizedFileURL.resolvingSymlinksInPath()
@@ -36,8 +53,22 @@ public enum LocalScanner {
             throw JournalError.database("Source root is not a regular accessible directory")
         }
 
-        // Missing leaf is valid (deleted file); a missing ancestor is not a missing root.
-        guard FileManager.default.fileExists(atPath: target.path) else {
+        let original = try stamp(root)
+        func assertRootUnchanged() throws {
+            guard try stamp(root) == original else {
+                throw JournalError.database("Source root changed during scan")
+            }
+        }
+
+        // Only ENOENT is a missing subtree. Access-denied or I/O failures
+        // cannot create deletion jobs, and a missing root is never empty.
+        var targetStat = stat()
+        if target.path.withCString({ lstat($0, &targetStat) }) != 0 {
+            let code = errno
+            guard code == ENOENT, target.path != root.path else {
+                throw JournalError.database("Source scan path inaccessible (filesystem code \(code))")
+            }
+            try assertRootUnchanged()
             return []
         }
 
@@ -85,7 +116,10 @@ public enum LocalScanner {
 
         if target != root {
             let kind = try record(target)
-            if kind != "directory" { return found }
+            if kind != "directory" {
+                try assertRootUnchanged()
+                return found
+            }
         }
 
         var enumerationError: Error?
@@ -114,6 +148,7 @@ public enum LocalScanner {
             }
         }
         if let enumerationError { throw enumerationError }
+        try assertRootUnchanged()
         return found
     }
 }
