@@ -36,6 +36,32 @@ final class SyncScheduleTests: XCTestCase {
         XCTAssertEqual(schedule(.hours, 12).next(after: now), now.addingTimeInterval(12*3600))
     }
 
+    func testIntervalCadenceDoesNotDriftAfterFinishing() {
+        let start = local(2026, 11, 14, 10, 0)
+        let plan = schedule(.minutes, 5)
+        XCTAssertEqual(plan.nextSlot(after: start, completedAt: start.addingTimeInterval(120)),
+                       start.addingTimeInterval(300))
+        XCTAssertEqual(plan.nextSlot(after: start, completedAt: start.addingTimeInterval(420)),
+                       start.addingTimeInterval(600))
+        XCTAssertEqual(plan.nextSlot(after: start, completedAt: start.addingTimeInterval(600)),
+                       start.addingTimeInterval(900))
+        XCTAssertEqual(plan.nextSlot(after: start, completedAt: start.addingTimeInterval(-10)),
+                       start.addingTimeInterval(300))
+        let hours = schedule(.hours, 2)
+        XCTAssertEqual(hours.nextSlot(after: start, completedAt: start.addingTimeInterval(9000)),
+                       start.addingTimeInterval(14400))
+    }
+
+    func testCalendarSlotsAfterLongCycle() {
+        let start = local(2026, 11, 16, 9, 0)
+        XCTAssertEqual(schedule(.daily, 5, 9, 0).nextSlot(
+            after: start, completedAt: local(2026, 11, 17, 10, 0), calendar: rome
+        ), local(2026, 11, 18, 9, 0))
+        XCTAssertEqual(schedule(.weekly, 5, 9, 0, 2).nextSlot(
+            after: start, completedAt: local(2026, 11, 23, 10, 0), calendar: rome
+        ), local(2026, 11, 30, 9, 0))
+    }
+
     func testDailyFiresAtNextLocalTimeAndWeeklyAtSelectedDay() {
         let now = local(2026, 11, 14, 10, 15) // Saturday
         XCTAssertEqual(schedule(.daily, 1, 9, 30).next(after: now, calendar: rome),
@@ -97,6 +123,14 @@ final class ConnectionOutageTrackerTests: XCTestCase {
             ["photos": .unavailable], at: t0.addingTimeInterval(7200),
             policy: policy
         ), ["photos"])
+        XCTAssertFalse(tracker.outages["photos"]!.alertSent)
+        // Simulated OS submission failure: no acceptance, so the next
+        // scheduled observation can try once more.
+        XCTAssertEqual(tracker.record(
+            ["photos": .unavailable], at: t0.addingTimeInterval(7500),
+            policy: policy
+        ), ["photos"])
+        XCTAssertTrue(tracker.markAccepted(for: "photos", firstObserved: t0))
         XCTAssertEqual(tracker.record(
             ["photos": .unavailable], at: t0.addingTimeInterval(36000),
             policy: policy
@@ -124,10 +158,12 @@ final class ConnectionOutageTrackerTests: XCTestCase {
             ["A": .unavailable, "B": .unavailable],
             at: t.addingTimeInterval(3700), policy: p
         ), ["A"])
+        XCTAssertTrue(tracker.markAccepted(for: "A", firstObserved: t))
         XCTAssertEqual(tracker.record(
             ["A": .unavailable, "B": .unavailable],
             at: t.addingTimeInterval(5400), policy: p
         ), ["B"])
+        XCTAssertTrue(tracker.markAccepted(for: "B", firstObserved: t.addingTimeInterval(1800)))
         let data = try JSONEncoder().encode(tracker)
         var recovered = try JSONDecoder().decode(ConnectionOutageTracker.self, from: data)
         XCTAssertEqual(recovered.record(
@@ -139,6 +175,20 @@ final class ConnectionOutageTrackerTests: XCTestCase {
             policy: ConnectionAlertPolicy(enabled: false, afterHours: 1)
         ), [])
         XCTAssertNil(recovered.firstObserved(for: "A"))
+    }
+
+    func testLateAcceptanceDoesNotMarkNewOutage() {
+        let t = Date(timeIntervalSince1970: 1_700_000_000)
+        let p = ConnectionAlertPolicy(enabled: true, afterHours: 1)
+        var tracker = ConnectionOutageTracker()
+        _ = tracker.record(["A": .unavailable], at: t, policy: p)
+        XCTAssertEqual(tracker.record(["A": .unavailable"],
+            at: t.addingTimeInterval(3600), policy: p), ["A"])
+        _ = tracker.record(["A": .ready"], at: t.addingTimeInterval(3700), policy: p)
+        _ = tracker.record(["A": .unavailable"], at: t.addingTimeInterval(3800), policy: p)
+        XCTAssertFalse(tracker.markAccepted(for: "A", firstObserved: t))
+        XCTAssertEqual(tracker.record(["A": .unavailable"],
+            at: t.addingTimeInterval(7400), policy: p), ["A"])
     }
 
     func testNoAlertForUnconfiguredOrUnverifiedFolders() {
