@@ -563,6 +563,7 @@ private struct MacSyncConfigurationView: View {
                                 Text("Sabato").tag(7)
                                 Text("Domenica").tag(1)
                             }
+                            .disabled(copy.active)
                         }
                         DatePicker("Orario", selection: Binding(
                             get: {
@@ -584,6 +585,7 @@ private struct MacSyncConfigurationView: View {
                                 runtime.onScheduleChanged()
                             }
                         ), displayedComponents: .hourAndMinute)
+                        .disabled(copy.active)
                     }
                     Text(settings.schedule.summary)
                         .font(.caption)
@@ -593,7 +595,7 @@ private struct MacSyncConfigurationView: View {
                              + next.formatted(date: .abbreviated, time: .shortened))
                             .font(.caption2).foregroundStyle(.secondary)
                     }
-                    Text("Quando le copie sono attive, prima di ogni ciclo MacSync controlla che la destinazione SMB sia ancora quella configurata. Nessun controllo aggiuntivo fra due cicli.")
+                    Text("Quando le copie sono attive, prima di ogni ciclo MacSync controlla che la destinazione SMB sia ancora quella configurata. Nessun controllo aggiuntivo fra due cicli. Per cambiare la frequenza, ferma prima le copie.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
