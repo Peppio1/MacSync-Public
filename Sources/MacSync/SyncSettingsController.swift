@@ -51,7 +51,7 @@ final class SyncSettingsController: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.alertPolicy.enabled else { return }
                 switch value.authorizationStatus {
-                case .authorized, .provisional, .ephemeral:
+                case .authorized, .provisional:
                     self.notificationPermissionStatus = "Notifiche autorizzate da macOS"
                 case .denied:
                     self.notificationPermissionStatus = "Notifiche bloccate: verifica Impostazioni di Sistema"
@@ -119,8 +119,7 @@ enum MacSyncConnectionNotifier {
             DispatchQueue.main.async {
                 guard shouldSend() else { return }
                 guard settings.authorizationStatus == .authorized ||
-                      settings.authorizationStatus == .provisional ||
-                      settings.authorizationStatus == .ephemeral else {
+                      settings.authorizationStatus == .provisional else {
                     completion(DeliveryError.notAuthorized)
                     return
                 }
