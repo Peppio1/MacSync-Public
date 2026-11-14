@@ -309,6 +309,13 @@ public final class MirrorDeletionWorker {
         }
         let total = try journal.pendingDeleteCount(after: armedAt)
         guard total > 0 else { return result }
+        // A rename may produce an upload for the new path and a deletion
+        // for the old path. Keep the old server copy until uploads drain.
+        guard try journal.pendingUploads(limit: 1).isEmpty else {
+            result.blocked = true
+            result.detail = "Cancellazioni sospese: copie o aggiornamenti ancora in coda"
+            return result
+        }
         // Check mass-delete thresholds for ALL candidate jobs, not only the
         // batch size, to prevent evading the gate by paging.
         let baselineCount = baselines.values.reduce(0) { $0 + $1.baselineCount }
@@ -341,6 +348,11 @@ public final class MirrorDeletionWorker {
         var availableRoots: Set<String> = []
         for job in sorted.prefix(max(1, min(100, maxFiles))) {
             if cancellation.isCancelled { break }
+            if !(try journal.pendingUploads(limit: 1).isEmpty) {
+                result.blocked = true
+                result.detail = "Nuove copie in coda: cancellazioni sospese"
+                break
+            }
             guard let mapping = mappings[job.rootID],
                   let baseline = baselines[job.rootID] else {
                 result.deferred += 1
