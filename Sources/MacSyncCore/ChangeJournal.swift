@@ -53,6 +53,7 @@ public final class ChangeJournal {
                 """)
             try execute("CREATE INDEX IF NOT EXISTS idx_queue_pending ON change_queue(completed, id);")
             try execute("CREATE INDEX IF NOT EXISTS idx_queue_uploads ON change_queue(completed, kind, id);")
+            try execute("CREATE INDEX IF NOT EXISTS idx_queue_current_path ON change_queue(root_id, relative_path, completed, id);")
         } catch {
             sqlite3_close(connection)
             connection = nil
@@ -147,16 +148,30 @@ public final class ChangeJournal {
 
     /// Fetch only pending upserts. Pending deletes must never starve uploads;
     /// deletes remain queued for a future, separately gated mirror phase.
-    public func pendingUploads(limit: Int = 100, afterID: Int64 = 0) throws -> [QueuedChange] {
+    /// Capture a bounded snapshot of pending work. Newly queued events
+    /// receive larger AUTOINCREMENT IDs and wait until the next cycle.
+    public func pendingUploadUpperBound() throws -> Int64? {
+        let stmt = try prepare("""
+            SELECT MAX(id) FROM change_queue WHERE completed=0 AND kind='upsert';
+            """)
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { throw databaseFailure() }
+        return sqlite3_column_type(stmt, 0) == SQLITE_NULL
+            ? nil : sqlite3_column_int64(stmt, 0)
+    }
+
+    public func pendingUploads(limit: Int = 100, afterID: Int64 = 0,
+                               throughID: Int64 = Int64.max) throws -> [QueuedChange] {
         let statement = try prepare("""
             SELECT id, root_id, relative_path, kind, recorded_at
               FROM change_queue
-             WHERE completed = 0 AND kind = 'upsert' AND id > ?
+             WHERE completed = 0 AND kind = 'upsert' AND id > ? AND id <= ?
              ORDER BY id LIMIT ?;
             """)
         defer { sqlite3_finalize(statement) }
         guard sqlite3_bind_int64(statement, 1, max(0, afterID)) == SQLITE_OK,
-              sqlite3_bind_int(statement, 2, Int32(max(1, min(limit, 1000)))) == SQLITE_OK else {
+              sqlite3_bind_int64(statement, 2, throughID) == SQLITE_OK,
+              sqlite3_bind_int(statement, 3, Int32(max(1, min(limit, 1000)))) == SQLITE_OK else {
             throw databaseFailure()
         }
         var result: [QueuedChange] = []
