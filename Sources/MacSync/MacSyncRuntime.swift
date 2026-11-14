@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UserNotifications
 import MacSyncCore
 
 /// Application-lifetime coordinator. Connection status is queried ONLY
@@ -19,8 +20,13 @@ final class MacSyncRuntime: ObservableObject {
     private var suspendedUntilNextLaunch = false
     private var configurationRevision = 0
     private var outages = ConnectionOutageTracker()
+    private var pendingAlerts: [String: UUID] = [:]
+    private let notificationDelegate = MacSyncNotificationDelegate()
 
     init() {
+        if Bundle.main.bundleURL.pathExtension.lowercased() == "app" {
+            UNUserNotificationCenter.current().delegate = notificationDelegate
+        }
         if let data = UserDefaults.standard.data(forKey: "MacSync.connectionOutages"),
            let saved = try? JSONDecoder().decode(
                ConnectionOutageTracker.self, from: data
@@ -69,6 +75,7 @@ final class MacSyncRuntime: ObservableObject {
     func onAlertPolicyChanged(_ enabled: Bool) {
         settings.setAlertEnabled(enabled)
         if !enabled {
+            pendingAlerts.removeAll()
             outages = ConnectionOutageTracker()
             persistOutages()
         }
@@ -84,6 +91,7 @@ final class MacSyncRuntime: ObservableObject {
         autoTimer = nil
         nextAutomaticAttempt = nil
         destinations.configurationChanged()
+        pendingAlerts.removeAll()
         outages = ConnectionOutageTracker()
         persistOutages()
         automaticStatus = "Cartelle modificate: riabilita esplicitamente le copie automatiche dopo averle verificate"
@@ -102,9 +110,44 @@ final class MacSyncRuntime: ObservableObject {
     ) {
         destinations.update(results, checkedAt: date)
         let due = outages.record(results, at: date, policy: settings.alertPolicy)
+        // Recovery, configuration changes or disabling alerts invalidate
+        // pending delivery callbacks from the old incident.
+        for id in Array(pendingAlerts.keys) where outages.firstObserved(for: id) == nil {
+            pendingAlerts.removeValue(forKey: id)
+        }
         persistOutages()
         for id in due {
-            MacSyncConnectionNotifier.send(destinationID: id)
+            guard pendingAlerts[id] == nil,
+                  let episode = outages.firstObserved(for: id) else { continue }
+            let token = UUID()
+            pendingAlerts[id] = token
+            MacSyncConnectionNotifier.send(
+                destinationID: id, firstObserved: episode,
+                shouldSend: { [weak self] in
+                    guard let self else { return false }
+                    return self.settings.alertPolicy.enabled &&
+                        self.pendingAlerts[id] == token &&
+                        self.outages.firstObserved(for: id) == episode
+                }
+            ) { [weak self] error in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.pendingAlerts[id] == token else { return }
+                    self.pendingAlerts.removeValue(forKey: id)
+                    guard self.settings.alertPolicy.enabled,
+                          self.outages.firstObserved(for: id) == episode else { return }
+                    if let error {
+                        // Remains due; no immediate retry timer is created.
+                        self.settings.notificationPermissionStatus =
+                            "Avviso non inviato: " + error.localizedDescription
+                            + ". Nuovo tentativo al prossimo ciclo."
+                    } else {
+                        _ = self.outages.markAccepted(for: id, firstObserved: episode)
+                        self.persistOutages()
+                        self.settings.notificationPermissionStatus =
+                            "Avviso accettato dal sistema notifiche macOS"
+                    }
+                }
+            }
         }
     }
 
