@@ -167,16 +167,22 @@ final class MacSyncRuntime: ObservableObject {
         // If only the SMB target is unavailable, do not run a copy session.
         // The next attempt comes from the SAME selected synchronization plan.
         readinessWorker.async { [weak self] in
-            let decision = AutomaticCopyReadiness.evaluate(
-                enabled: true, monitorRunning: true, copyActive: false,
-                pairs: snapshot
-            )
             var states: [String: DestinationAvailability] = [:]
+            var byPath: [String: DestinationAvailability] = [:]
+            // Exactly one filesystem probe per configured destination for
+            // this scheduled slot; reuse its result for the readiness gate.
             for item in configured {
-                states[item.id] = DestinationProbe.inspect(
+                let value = DestinationProbe.inspect(
                     path: item.destination, expectedVolume: item.expected
                 )
+                states[item.id] = value
+                byPath[item.destination] = value
             }
+            let decision = AutomaticCopyReadiness.evaluate(
+                enabled: true, monitorRunning: true, copyActive: false,
+                pairs: snapshot,
+                probe: { path, _ in byPath[path] ?? .notConfigured }
+            )
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.readinessCheckInProgress = false
