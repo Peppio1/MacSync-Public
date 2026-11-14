@@ -12,6 +12,8 @@ public enum MountedCopyError: Error, LocalizedError, Equatable {
     case copyFailed(Int)
     case insufficientSpace(required: Int64, available: Int64)
     case stagingIncomplete
+    case destinationChanging
+    case sourceRootChanged
 
     public var errorDescription: String? {
         switch self {
@@ -25,6 +27,8 @@ public enum MountedCopyError: Error, LocalizedError, Equatable {
         case .copyFailed(let code): return "Copia non riuscita (codice filesystem: \(code)); operazione mantenuta in coda"
         case .insufficientSpace(let required, let available): return "Spazio insufficiente: richiesti \(required) byte, disponibili \(available) byte"
         case .stagingIncomplete: return "File temporaneo incompleto; operazione mantenuta in coda"
+        case .destinationChanging: return "Destinazione modificata durante la copia; operazione rimandata"
+        case .sourceRootChanged: return "Identità della cartella sorgente cambiata; operazioni bloccate"
         }
     }
 }
@@ -74,6 +78,23 @@ public struct VolumeFingerprint: Equatable, Codable, Sendable {
     }
 }
 
+/// Directory identity, excluding timestamps changed by ordinary file creation.
+fileprivate struct CopyDirectoryIdentity: Equatable, Sendable {
+    let device: UInt64
+    let inode: UInt64
+
+    static func read(_ url: URL) throws -> CopyDirectoryIdentity {
+        var info = stat()
+        guard url.path.withCString({ lstat($0, &info) }) == 0,
+              (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR),
+              url.resolvingSymlinksInPath().path == url.path else {
+            throw MountedCopyError.rootUnavailable
+        }
+        return CopyDirectoryIdentity(device: UInt64(bitPattern: Int64(info.st_dev)),
+                                     inode: UInt64(info.st_ino))
+    }
+}
+
 /// Each selected target is used as-is. Deletion actions are handled only
 /// by the separately confirmed MirrorDeletionWorker.
 public struct MountedFolderMapping: Sendable {
@@ -81,6 +102,7 @@ public struct MountedFolderMapping: Sendable {
     public let source: URL
     public let target: URL
     public let targetVolume: VolumeFingerprint
+    private let sourceIdentity: CopyDirectoryIdentity
 
     public init(
         rootID: String, source: URL, target: URL,
@@ -109,6 +131,8 @@ public struct MountedFolderMapping: Sendable {
         self.source = src
         self.target = dst
         self.targetVolume = found
+        self.sourceIdentity = try CopyDirectoryIdentity.read(src)
+        _ = try CopyDirectoryIdentity.read(dst)
     }
 
     public func verify() throws {
@@ -116,6 +140,10 @@ public struct MountedFolderMapping: Sendable {
               FileManager.default.fileExists(atPath: target.path) else {
             throw MountedCopyError.rootUnavailable
         }
+        guard try CopyDirectoryIdentity.read(source) == sourceIdentity else {
+            throw MountedCopyError.sourceRootChanged
+        }
+        _ = try CopyDirectoryIdentity.read(target)
         let current = try VolumeFingerprint.read(at: target)
         guard current == targetVolume else { throw MountedCopyError.volumeChanged }
     }
@@ -126,7 +154,8 @@ public struct MountedFolderMapping: Sendable {
         guard !comps.isEmpty,
               comps.allSatisfy({
                   !$0.isEmpty && $0 != "." && $0 != ".." &&
-                  !$0.contains("\\") && !$0.contains(":") && !$0.contains("\0")
+                  !$0.contains("\\") && !$0.contains(":") && !$0.contains("\0") &&
+                  !$0.lowercased().hasPrefix(".macsync-")
               }) else { throw MountedCopyError.unsafeFile }
         return root.appendingPathComponent(relativePath)
     }
@@ -156,6 +185,11 @@ public final class MountedFolderCopyWorker {
     private let now: () -> Date
     private let availableCapacity: (URL) throws -> Int64?
     private var nextAfterID: Int64 = 0
+
+    // Internal fault injection for deterministic core tests, never configured
+    // by the application or exposed to users.
+    enum Checkpoint { case beforeStageCopy, afterStageCopy, afterBackup, afterPublish }
+    var checkpoint: ((Checkpoint, URL) throws -> Void)?
 
     public init(
         journal: ChangeJournal, log: SyncActivityLog,
@@ -222,7 +256,8 @@ public final class MountedFolderCopyWorker {
             } catch let error as MountedCopyError {
                 switch error {
                 case .sourceChanging, .sourceMissing, .volumeChanged,
-                     .rootUnavailable, .insufficientSpace:
+                     .rootUnavailable, .insufficientSpace, .destinationChanging,
+                     .sourceRootChanged:
                     summary.deferred += 1
                 default:
                     summary.failed += 1
@@ -254,6 +289,13 @@ public final class MountedFolderCopyWorker {
 
     private func transfer(_ job: QueuedChange, mapping: MountedFolderMapping) throws -> TransferOutcome {
         try mapping.verify()
+        let targetIdentity = try CopyDirectoryIdentity.read(mapping.target)
+        func verifyRoots() throws {
+            try mapping.verify()
+            guard try CopyDirectoryIdentity.read(mapping.target) == targetIdentity else {
+                throw MountedCopyError.volumeChanged
+            }
+        }
         let src = try mapping.fileURL(relativePath: job.relativePath, destination: false)
         let dst = try mapping.fileURL(relativePath: job.relativePath, destination: true)
         try ensureSafeParents(src, under: mapping.source, create: false)
@@ -263,15 +305,17 @@ public final class MountedFolderCopyWorker {
         }
 
         if snapshot.kind == .directory {
+            try verifyRoots()
             try ensureSafeParents(dst, under: mapping.target, create: true)
-            let alreadyPresent = fm.fileExists(atPath: dst.path)
+            try verifyRoots()
+            let alreadyPresent = try optionalSnapshot(dst) != nil
             if alreadyPresent {
                 let existing = try readSnapshot(dst)
                 guard existing.kind == .directory else { throw MountedCopyError.destinationConflict }
             } else {
                 try fm.createDirectory(at: dst, withIntermediateDirectories: false)
             }
-            try mapping.verify()
+            try verifyRoots()
             return TransferOutcome(bytes: 0,
                 kind: alreadyPresent ? .directoryExisting : .directoryCreated)
         }
@@ -279,22 +323,25 @@ public final class MountedFolderCopyWorker {
         guard now().timeIntervalSince1970 - snapshot.mtime >= minimumStableAge else {
             throw MountedCopyError.sourceChanging
         }
+        try verifyRoots()
         try ensureSafeParents(dst, under: mapping.target, create: true)
+        try verifyRoots()
         // Check capacity before creating staging or safety backups. An
         // overwrite temporarily needs space for both old and new copies.
-        var existingBytes: Int64 = 0
-        let targetExisted = fm.fileExists(atPath: dst.path)
-        if targetExisted {
-            let targetSnapshot = try readSnapshot(dst)
-            guard targetSnapshot.kind == .file else { throw MountedCopyError.destinationConflict }
-            existingBytes = targetSnapshot.size
+        let originalTarget = try optionalSnapshot(dst)
+        let targetExisted = originalTarget != nil
+        if let originalTarget, originalTarget.kind != .file {
+            throw MountedCopyError.destinationConflict
         }
+        let existingBytes = originalTarget?.size ?? 0
         try TransferPreflight.requireCapacity(
             available: try availableCapacity(mapping.target),
             incoming: snapshot.size, existing: existingBytes
         )
+        try verifyRoots()
         let stageFolder = mapping.target.appendingPathComponent(".macsync-staging", isDirectory: true)
         try createSafeDirectory(stageFolder, parent: mapping.target)
+        let stageIdentity = try CopyDirectoryIdentity.read(stageFolder)
         let staging = stageFolder.appendingPathComponent(UUID().uuidString + ".partial")
         try log.record(
             level: .info, rootID: job.rootID, action: "start",
@@ -304,7 +351,14 @@ public final class MountedFolderCopyWorker {
         // FileManager.copyItem streams data without buffering full PSD/DNG in
         // app RAM. Failure leaves journal pending and may leave a .partial file.
         do {
+            try checkpoint?(.beforeStageCopy, staging)
+            try verifyRoots()
             try fm.copyItem(at: src, to: staging)
+            try checkpoint?(.afterStageCopy, staging)
+            try verifyRoots()
+            guard try CopyDirectoryIdentity.read(stageFolder) == stageIdentity else {
+                throw MountedCopyError.unsafeFile
+            }
             // Inspect the transferred staging file before publication.
             let staged = try readSnapshot(staging)
             guard staged.kind == .file, staged.size == snapshot.size else {
@@ -313,22 +367,47 @@ public final class MountedFolderCopyWorker {
             guard try readSnapshot(src) == snapshot else {
                 throw MountedCopyError.sourceChanging
             }
-            try mapping.verify()
-            if fm.fileExists(atPath: dst.path) {
-                // Explicitly preserve the prior target BEFORE any overwrite.
-                // Foundation.replaceItemAt's backupItemName is not dependable
-                // across every filesystem; copy to a unique backup path first.
-                // This preview never purges backups or staging objects.
-                let existing = try readSnapshot(dst)
-                guard existing.kind == .file else { throw MountedCopyError.destinationConflict }
+            func verifyPublication() throws {
+                try verifyRoots()
+                try ensureSafeParents(src, under: mapping.source, create: false)
+                try ensureSafeParents(dst, under: mapping.target, create: false)
+                guard try CopyDirectoryIdentity.read(stageFolder) == stageIdentity,
+                      try readSnapshot(staging) == staged else {
+                    throw MountedCopyError.stagingIncomplete
+                }
+                guard try readSnapshot(src) == snapshot else {
+                    throw MountedCopyError.sourceChanging
+                }
+                guard try optionalSnapshot(dst) == originalTarget else {
+                    throw MountedCopyError.destinationChanging
+                }
+            }
+            try verifyPublication()
+            if let originalTarget {
+                // Preserve the exact previous target before publishing. If
+                // another client modifies it during backup, do not overwrite.
                 let backupURL = dst.deletingLastPathComponent()
                     .appendingPathComponent(".macsync-backup-" + UUID().uuidString)
                 try fm.copyItem(at: dst, to: backupURL)
-                // The old content remains in the backup even if publishing fails.
+                try checkpoint?(.afterBackup, backupURL)
+                try verifyPublication()
+                let backup = try readSnapshot(backupURL)
+                guard backup.kind == .file, backup.size == originalTarget.size else {
+                    throw MountedCopyError.stagingIncomplete
+                }
                 _ = try fm.replaceItemAt(dst, withItemAt: staging,
                                          backupItemName: nil, options: [])
             } else {
+                // moveItem refuses an existing target; never overwrite a
+                // newly arrived file after an initially absent destination.
                 try fm.moveItem(at: staging, to: dst)
+            }
+            try checkpoint?(.afterPublish, dst)
+            try verifyRoots()
+            try ensureSafeParents(dst, under: mapping.target, create: false)
+            let published = try readSnapshot(dst)
+            guard published.kind == .file, published.size == snapshot.size else {
+                throw MountedCopyError.stagingIncomplete
             }
             guard try readSnapshot(src) == snapshot else {
                 throw MountedCopyError.sourceChanging
@@ -349,12 +428,25 @@ public final class MountedFolderCopyWorker {
         let size: Int64
         let mtime: TimeInterval
         let inode: UInt64
+        let device: UInt64
+        let ctimeSeconds: Int64
+        let ctimeNanoseconds: Int64
     }
 
     private func readSnapshot(_ url: URL) throws -> Snapshot {
+        guard let value = try optionalSnapshot(url) else {
+            throw MountedCopyError.sourceMissing
+        }
+        return value
+    }
+
+    /// Only ENOENT means absent. Permission/network errors and dangling
+    /// symlinks must not be mistaken for an empty destination.
+    private func optionalSnapshot(_ url: URL) throws -> Snapshot? {
         var info = stat()
         guard url.path.withCString({ lstat($0, &info) }) == 0 else {
-            throw MountedCopyError.sourceMissing
+            if errno == ENOENT { return nil }
+            throw MountedCopyError.rootUnavailable
         }
         let type = info.st_mode & mode_t(S_IFMT)
         let kind: FileKind
@@ -365,7 +457,10 @@ public final class MountedFolderCopyWorker {
             kind: kind, size: Int64(info.st_size),
             mtime: Double(info.st_mtimespec.tv_sec) +
                 Double(info.st_mtimespec.tv_nsec) / 1_000_000_000,
-            inode: UInt64(info.st_ino)
+            inode: UInt64(info.st_ino),
+            device: UInt64(bitPattern: Int64(info.st_dev)),
+            ctimeSeconds: Int64(info.st_ctimespec.tv_sec),
+            ctimeNanoseconds: Int64(info.st_ctimespec.tv_nsec)
         )
     }
 
@@ -379,8 +474,8 @@ public final class MountedFolderCopyWorker {
         var current = root
         for component in rel {
             current.appendPathComponent(String(component))
-            if fm.fileExists(atPath: current.path) {
-                guard try readSnapshot(current).kind == .directory else {
+            if let existing = try optionalSnapshot(current) {
+                guard existing.kind == .directory else {
                     throw MountedCopyError.unsafeFile
                 }
             } else if create {
@@ -395,8 +490,8 @@ public final class MountedFolderCopyWorker {
         guard directory.deletingLastPathComponent().standardizedFileURL == parent else {
             throw MountedCopyError.unsafeFile
         }
-        if fm.fileExists(atPath: directory.path) {
-            guard try readSnapshot(directory).kind == .directory else {
+        if let existing = try optionalSnapshot(directory) {
+            guard existing.kind == .directory else {
                 throw MountedCopyError.unsafeFile
             }
         } else {
