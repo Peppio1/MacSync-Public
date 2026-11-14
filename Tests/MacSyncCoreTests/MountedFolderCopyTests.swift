@@ -59,6 +59,34 @@ final class MountedFolderCopyTests: XCTestCase {
         XCTAssertEqual(outcome.updated, 0)
     }
 
+    func testStoppedSessionLeavesRemainingJobsForNextRun() throws {
+        let fixture = try setup()
+        defer { try? FileManager.default.removeItem(at: fixture.base) }
+        for name in ["first.dng", "second.dng"] {
+            try oldFile(fixture.source.appendingPathComponent(name), data: name)
+        }
+        let journal = try ChangeJournal(path: fixture.db)
+        let log = try SyncActivityLog(path: fixture.db)
+        for name in ["first.dng", "second.dng"] {
+            try journal.enqueue(rootID: "photos", relativePath: name, kind: .upsert)
+        }
+        let mapping = try MountedFolderMapping(
+            rootID: "photos", source: fixture.source, target: fixture.target
+        )
+        let worker = try MountedFolderCopyWorker(
+            journal: journal, log: log, mappings: [mapping]
+        )
+        var allowed = 1
+        let first = try worker.runOnce(enabled: true, shouldContinue: {
+            defer { allowed -= 1 }
+            return allowed > 0
+        })
+        XCTAssertEqual(first.copied, 1)
+        XCTAssertEqual(try journal.pending().count, 1)
+        XCTAssertEqual(try worker.runOnce(enabled: true).copied, 1)
+        XCTAssertTrue(try journal.pending().isEmpty)
+    }
+
     func testMirrorDeletionJobsRemainPending() throws {
         let fixture = try setup()
         defer { try? FileManager.default.removeItem(at: fixture.base) }
