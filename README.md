@@ -1,4 +1,4 @@
-# MacSync — prototipo v0.10.1
+# MacSync — prototipo v0.11.0
 
 Applicazione nativa macOS per la futura sincronizzazione **unidirezionale Sorgente → Destinazione**, con copie selettive a frequenza configurabile, SQLite e FSEvents.
 
@@ -159,6 +159,16 @@ Questa fase distingue due opzioni indipendenti nella sezione **Impostazioni di a
 - **Avvisi:** ConnectionOutageTracker considera inviato l'avviso solo dopo l'accettazione della richiesta da parte di UNUserNotificationCenter; se il sistema rifiuta o non è autorizzato, registra lo stato e ritenta al prossimo slot, senza timer supplementari. Le callback obsolete non possono confermare un nuovo episodio; il consenso e l'episodio vengono verificati prima della richiesta. Identificativo stabile per episodio; stato persistente. Notifica silenziosa anche in primo piano quando macOS lo consente. Disabilitando l'opzione si azzera il tracker.
 - Nessuna modifica a frequenze, soglia 1–168 ore, assenza di rimontaggio automatico/credenziali/VPN gestita dall'app e conferma esplicita per le cancellazioni speculari.
 - Test aggiuntivi: intervalli senza deriva o slot sovrapposti, ritardi giornalieri/settimanali, errore di invio e successivo tentativo, callback tardiva, stop della coda. Il collaudo SMB e la presentazione effettiva delle notifiche richiedono ancora un Mac fisico.
+
+## MacSync v0.11 — resilienza e sicurezza
+
+- Verifica di identità della sorgente per la durata della mappatura e della destinazione per la durata del singolo trasferimento. Controlli di directory, volume, symlink e percorsi riservati `.macsync-*` prima delle scritture.
+- Prima della pubblicazione, verifica di snapshot del sorgente, del file temporaneo e del target originale (dimensioni, inode, device, mtime, ctime). Un target comparso o modificato durante la copia viene rinviato; la copia precedente viene preservata in un backup separato prima della sostituzione. Controllo dimensione del backup e del file pubblicato. Non è una transazione distribuita né una verifica hash completa.
+- ChangeJournal.uploadIsCurrent impedisce la pubblicazione di job sostituiti da eventi più recenti durante lo staging. Se la conferma SQLite non avviene dopo la pubblicazione, il retry rilegge il job e può ripetere la copia. Temporanei e backup non vengono eliminati automaticamente in caso di guasto.
+- MirrorDeletionWorker sospende le cancellazioni finché esistono upload pendenti; anche il ciclo applicativo sospende la retention in tale stato. Conserva il vecchio percorso remoto durante una rinomina se la copia del nuovo fallisce. Una coda bloccata può ritardare altre cancellazioni.
+- LocalScanner distingue ENOENT dagli errori di accesso/I/O e verifica l'identità della radice prima e dopo la scansione. Una scansione fallita non modifica inventario, coda o checkpoint FSEvents.
+- Test deterministici tramite fault injection locale: staging interrotto, retry con nuovo worker/connessione SQLite, modifica concorrente di sorgente e target, target comparso durante staging, root sostituita, spazio esaurito, pubblicazione senza conferma, job superato, symlink, rinomina con upload fallito e subtree inaccessibile.
+- Restano necessari collaudo SMB reale e verifica con file grandi/archivio rappresentativo, atomicità e durabilità su Windows Server 2016, permessi, connessione intermittente e comportamento di macOS. I test non equivalgono a prove di crash del processo o di perdita alimentazione reali. Non utilizzare ancora dati di produzione.
 
 ## Test, limiti e sicurezza
 
