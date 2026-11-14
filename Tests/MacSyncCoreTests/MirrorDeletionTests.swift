@@ -37,8 +37,10 @@ final class MirrorDeletionTests: XCTestCase {
         try LocalInventory(path: database).reconcile(rootID: "photos", root: source)
         // Both sides were seeded with identical fixture data above.
         // Model the completed upload baseline before testing mirror.
-        for job in try journal.pendingUploads() {
-            try journal.markCompleted(id: job.id)
+        while true {
+            let batch = try journal.pendingUploads(limit: 1000)
+            if batch.isEmpty { break }
+            for job in batch { try journal.markCompleted(id: job.id) }
         }
         return Fixture(base: base, source: source, destination: destination,
                        database: database, journal: journal, log: log,
