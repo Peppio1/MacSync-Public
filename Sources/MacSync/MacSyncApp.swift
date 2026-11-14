@@ -385,10 +385,11 @@ private struct MacSyncConfigurationView: View {
     @ObservedObject var model: MacSyncViewModel
     @ObservedObject var copy: MountedCopyController
     @ObservedObject var runtime: MacSyncRuntime
+    @ObservedObject var settings: SyncSettingsController
+    @ObservedObject var destinations: DestinationStatusController
     @State private var showLog = false
     @State private var showSummary = false
     @StateObject private var loginAtStartup = LaunchAtLoginController()
-    @StateObject private var destinations = DestinationStatusController()
 
     private func picker(_ slot: Int, destination: Bool) -> some View {
         FolderDropZone(
@@ -403,7 +404,6 @@ private struct MacSyncConfigurationView: View {
                 if model.folderPath(slot: slot, destination: destination) != previous {
                     runtime.onFolderConfigurationChanged()
                 }
-                destinations.refresh()
             },
             onFolderDropped: { url in
                 guard !copy.seedBusy else { return }
@@ -414,7 +414,6 @@ private struct MacSyncConfigurationView: View {
                 if model.folderPath(slot: slot, destination: destination) != previous {
                     runtime.onFolderConfigurationChanged()
                 }
-                destinations.refresh()
             }
         )
         .disabled(copy.seedBusy)
@@ -501,12 +500,141 @@ private struct MacSyncConfigurationView: View {
                 }
 
                 Divider()
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Frequenza sincronizzazione").font(.headline)
+                    Picker("Ripetizione", selection: Binding(
+                        get: { settings.schedule.frequency },
+                        set: { value in
+                            settings.updateScheduleFrequency(value)
+                            runtime.onScheduleChanged()
+                        }
+                    )) {
+                        Text("Minuti").tag(SyncSchedule.Frequency.minutes)
+                        Text("Ore").tag(SyncSchedule.Frequency.hours)
+                        Text("Ogni giorno").tag(SyncSchedule.Frequency.daily)
+                        Text("Giorno della settimana").tag(SyncSchedule.Frequency.weekly)
+                    }
+                    .disabled(copy.active)
+                    if settings.schedule.frequency == .minutes ||
+                       settings.schedule.frequency == .hours {
+                        HStack {
+                            Text(settings.schedule.frequency == .minutes
+                                 ? "Ogni quanti minuti" : "Ogni quante ore")
+                            Spacer()
+                            Picker("Intervallo", selection: Binding(
+                                get: { settings.schedule.interval },
+                                set: { value in
+                                    var plan = settings.schedule
+                                    plan.interval = value
+                                    settings.schedule = plan
+                                    runtime.onScheduleChanged()
+                                }
+                            )) {
+                                if settings.schedule.frequency == .minutes {
+                                    ForEach(1...45, id: \.self) { value in
+                                        Text("\(value) min").tag(value)
+                                    }
+                                } else {
+                                    ForEach(1...12, id: \.self) { value in
+                                        Text("\(value) h").tag(value)
+                                    }
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 130)
+                        }
+                        .disabled(copy.active)
+                    } else {
+                        if settings.schedule.frequency == .weekly {
+                            Picker("Giorno", selection: Binding(
+                                get: { settings.schedule.weekday },
+                                set: { value in
+                                    var plan = settings.schedule
+                                    plan.weekday = value
+                                    settings.schedule = plan
+                                    runtime.onScheduleChanged()
+                                }
+                            )) {
+                                Text("Lunedì").tag(2)
+                                Text("Martedì").tag(3)
+                                Text("Mercoledì").tag(4)
+                                Text("Giovedì").tag(5)
+                                Text("Venerdì").tag(6)
+                                Text("Sabato").tag(7)
+                                Text("Domenica").tag(1)
+                            }
+                        }
+                        DatePicker("Orario", selection: Binding(
+                            get: {
+                                var parts = Calendar.current.dateComponents(
+                                    [.year, .month, .day], from: Date()
+                                )
+                                parts.hour = settings.schedule.hour
+                                parts.minute = settings.schedule.minute
+                                return Calendar.current.date(from: parts) ?? Date()
+                            },
+                            set: { value in
+                                let time = Calendar.current.dateComponents(
+                                    [.hour, .minute], from: value
+                                )
+                                var plan = settings.schedule
+                                plan.hour = time.hour ?? 9
+                                plan.minute = time.minute ?? 0
+                                settings.schedule = plan
+                                runtime.onScheduleChanged()
+                            }
+                        ), displayedComponents: .hourAndMinute)
+                    }
+                    Text(settings.schedule.summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let next = copy.nextScheduledRun ?? runtime.nextAutomaticAttempt {
+                        Text("Prossimo controllo e sincronizzazione: "
+                             + next.formatted(date: .abbreviated, time: .shortened))
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Text("Quando le copie sono attive, prima di ogni ciclo MacSync controlla che la destinazione SMB sia ancora quella configurata. Nessun controllo aggiuntivo fra due cicli.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Divider()
+                VStack(alignment: .leading, spacing: 9) {
+                    Text("Avviso per destinazione non disponibile").font(.headline)
+                    Toggle("Invia una notifica dopo una disconnessione prolungata",
+                           isOn: Binding(
+                                get: { settings.alertPolicy.enabled },
+                                set: { runtime.onAlertPolicyChanged($0) }
+                           ))
+                    if settings.alertPolicy.enabled {
+                        Stepper(
+                            "Avvisa dopo \(settings.alertPolicy.afterHours) "
+                                + (settings.alertPolicy.afterHours == 1 ? "ora" : "ore"),
+                            value: Binding(
+                                get: { settings.alertPolicy.afterHours },
+                                set: { newValue in
+                                    settings.alertPolicy.afterHours = newValue
+                                }
+                            ), in: 1...168
+                        )
+                        Text(settings.notificationPermissionStatus)
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Text("Disattivato per impostazione predefinita. Il tempo decorre dalla prima indisponibilità rilevata. La notifica viene valutata soltanto al successivo controllo previsto dalla frequenza di sincronizzazione, una sola volta per disconnessione.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+
+                Divider()
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("Disponibilità delle destinazioni").font(.headline)
                         Spacer()
-                        Button("Verifica ora") { destinations.refresh() }
-                            .disabled(destinations.checking)
+                        if let checked = destinations.lastCheckedAt {
+                            Text(checked.formatted(date: .omitted, time: .shortened))
+                                .font(.caption2).foregroundStyle(.secondary)
+                        } else {
+                            Text("In attesa della prima sincronizzazione")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
                     }
                     HStack {
                         Image(systemName: destinations.first.isReady ? "checkmark.circle.fill" : "exclamationmark.circle")
@@ -518,7 +646,7 @@ private struct MacSyncConfigurationView: View {
                             .foregroundStyle(destinations.second.isReady ? .green : .orange)
                         Text("Cartella_2: " + destinations.second.description).font(.caption)
                     }
-                    Text("MacSync controlla le cartelle ogni 30 secondi senza montare condivisioni né gestire la VPN. Le copie in esecuzione vengono ritentate ai cicli successivi se macOS rimonta la stessa destinazione.")
+                    Text("La disponibilità viene controllata immediatamente prima di ciascuna sincronizzazione pianificata, senza verifiche extra. Se macOS rende nuovamente disponibile lo stesso volume, i file in coda vengono ripresi.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -631,7 +759,8 @@ private struct MacSyncConfigurationView: View {
                             // deletion. Keep the unattended coordinator idle
                             // throughout its confirmation dialogue.
                             runtime.stopCopiesForCurrentLaunch()
-                            copy.start(sources: model.configuredPairs())
+                            copy.start(sources: model.configuredPairs(),
+                                       schedule: settings.schedule)
                         }
                     }
                 }
@@ -729,11 +858,9 @@ private struct MacSyncConfigurationView: View {
         .frame(minWidth: 700, minHeight: 580)
         .onAppear {
             loginAtStartup.refresh()
-            destinations.refresh()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             loginAtStartup.refresh()
-            destinations.refresh()
         }
         .sheet(isPresented: $showSummary) {
             SyncSummarySheet(copy: copy)
@@ -822,7 +949,8 @@ struct MacSyncApp: App {
     var body: some Scene {
         Window("MacSync — Configurazione", id: "configuration") {
             MacSyncConfigurationView(
-                model: runtime.model, copy: runtime.copy, runtime: runtime
+                model: runtime.model, copy: runtime.copy, runtime: runtime,
+                settings: runtime.settings, destinations: runtime.destinations
             )
         }
         .defaultSize(width: 840, height: 740)
