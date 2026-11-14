@@ -39,6 +39,27 @@ final class SyncSettingsController: ObservableObject {
         let savedPolicy = defaults.data(forKey: "MacSync.connectionAlertPolicy")
             .flatMap { try? JSONDecoder().decode(ConnectionAlertPolicy.self, from: $0) }
         alertPolicy = savedPolicy?.isValid == true ? savedPolicy! : ConnectionAlertPolicy()
+        refreshNotificationPermission()
+    }
+
+    func refreshNotificationPermission() {
+        guard alertPolicy.enabled else {
+            notificationPermissionStatus = "Avvisi disattivati"
+            return
+        }
+        UNUserNotificationCenter.current().getNotificationSettings { [weak self] value in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.alertPolicy.enabled else { return }
+                switch value.authorizationStatus {
+                case .authorized, .provisional, .ephemeral:
+                    self.notificationPermissionStatus = "Notifiche autorizzate da macOS"
+                case .denied:
+                    self.notificationPermissionStatus = "Notifiche bloccate: verifica Impostazioni di Sistema"
+                default:
+                    self.notificationPermissionStatus = "Notifiche non ancora autorizzate"
+                }
+            }
+        }
     }
 
     func setAlertEnabled(_ enabled: Bool) {
@@ -52,6 +73,7 @@ final class SyncSettingsController: ObservableObject {
             options: [.alert, .badge]
         ) { [weak self] granted, error in
             DispatchQueue.main.async { [weak self] in
+                guard self?.alertPolicy.enabled == true else { return }
                 if granted {
                     self?.notificationPermissionStatus = "Autorizzazione notifiche concessa"
                 } else if let error {
@@ -78,24 +100,51 @@ final class SyncSettingsController: ObservableObject {
     }
 }
 
-/// Native, silent banner (no sound), once per outage episode.
-/// Notification permission and system Focus settings are respected.
+/// Native, silent banner. Use a stable request identifier for the same
+/// outage, and report acceptance/failure instead of silently losing alerts.
 enum MacSyncConnectionNotifier {
-    static func send(destinationID: String) {
-        let notification = UNMutableNotificationContent()
-        notification.title = "MacSync — Destinazione non disponibile"
-        let name: String
-        switch destinationID {
-        case "photo-uploads": name = "Cartella_1"
-        case "photo-editing": name = "Cartella_2"
-        default: name = "Cartella di destinazione"
+    enum DeliveryError: LocalizedError {
+        case notAuthorized
+        var errorDescription: String? {
+            "Notifiche non autorizzate da macOS"
         }
-        notification.body = "\(name): la condivisione non risulta accessibile. Le sincronizzazioni restano sospese fino al ritorno della destinazione."
-        notification.sound = nil
-        let request = UNNotificationRequest(
-            identifier: "MacSync.disconnected.\(destinationID).\(UUID().uuidString)",
-            content: notification, trigger: nil
-        )
-        UNUserNotificationCenter.current().add(request)
+    }
+
+    static func send(destinationID: String, firstObserved: Date,
+                     completion: @escaping (Error?) -> Void) {
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            guard settings.authorizationStatus == .authorized ||
+                  settings.authorizationStatus == .provisional ||
+                  settings.authorizationStatus == .ephemeral else {
+                completion(DeliveryError.notAuthorized)
+                return
+            }
+            let notification = UNMutableNotificationContent()
+            notification.title = "MacSync — Destinazione non disponibile"
+            let name: String
+            switch destinationID {
+            case "photo-uploads": name = "Cartella_1"
+            case "photo-editing": name = "Cartella_2"
+            default: name = "Cartella di destinazione"
+            }
+            notification.body = "\(name): la condivisione non risulta accessibile. Le sincronizzazioni restano sospese fino al ritorno della destinazione."
+            notification.sound = nil
+            let key = "MacSync.disconnected.\(destinationID).\(firstObserved.timeIntervalSince1970)"
+            center.add(UNNotificationRequest(
+                identifier: key, content: notification, trigger: nil
+            ), withCompletionHandler: completion)
+        }
+    }
+}
+
+/// macOS otherwise may suppress presentation while the app is foreground.
+/// No sound, modal windows or permission requests are introduced here.
+final class MacSyncNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .list])
     }
 }
