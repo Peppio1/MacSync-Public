@@ -1,4 +1,4 @@
-# MacSync — Architettura v0.10.0 (prototipo)
+# MacSync — Architettura v0.10.1 (prototipo)
 
 ## Flusso
 Cartella Sorgente macOS → FSEvents → inventario e coda SQLite → worker seriale → cartella Destinazione (locale oppure SMB già montata dal Finder). Nessun componente sul server Windows 2016; macOS gestisce il login SMB esistente.
@@ -76,12 +76,21 @@ Transazioni SQLite e filesystem non formano una transazione distribuita: un cras
 
 ## v0.10 — pianificazione e avviso di disconnessione
 - Core SyncSchedule supporta 1–45 minuti, 1–12 ore, nextDate daily e weekly (giorno dell'anno locale, Calendario.current, DST). I valori invalidi non vengono schedulati. Data codec in UserDefaults di SyncSettingsController, default 5 minuti.
-- MountedCopyController usa DispatchSourceTimer a scatto singolo, ricalcolato dopo il ciclo (evita sovrapposizioni); il primo ciclo manuale rispetta il prossimo orario configurato, il primo ciclo della sessione automatica si esegue subito dopo l'arming che avviene nello slot dell'app runtime. Ogni ciclo verifica tutte le destinazioni con DestinationProbe PRIMA di qualunque azione. Se una risulta offline o diversa dal volume originale, non esegue né copie né cancellazioni e preserva la coda SQLite.
+- MountedCopyController usa DispatchSourceTimer a scatto singolo con wall deadline, ripianificato sul prossimo slot della cadenza originale (evita deriva/sovrapposizioni); il primo ciclo manuale rispetta il prossimo slot configurato, quello automatico conserva lo slot assegnato dal runtime. Ogni ciclo verifica tutte le destinazioni con DestinationProbe PRIMA di qualunque azione. Se una risulta offline o diversa dal volume originale, non esegue né copie né cancellazioni e preserva la coda SQLite.
 - MacSyncRuntime usa il medesimo SyncSchedule per decidere quando verificare la disponibilità delle destinazioni necessaria per armare automaticamente UPSERT. Niente controllo di connessione ogni 30 secondi. Durante una sessione attiva soltanto il worker valuta le destinazioni ai successivi slot. Il timer app/worker è operativo mentre MacSync resta avviata.
 - DestinationStatusController è passive/UI-only e non fa richieste SMB: ultimo stato e lastCheckedAt arrivano dalla callback onConnectionCheck del worker o dalla verifica pre-arming allo slot automatico.
 - ConnectionOutageTracker (Codable, persistito in UserDefaults) tiene firstObserved e alertSent per ID destinazione; valuta soglia di ConnectionAlertPolicy (1..168 ore, OFF default) solo per osservazioni .unavailable/.differentVolume fatte durante un tentativo di sync. Azzeramento al primo .ready. Un solo avviso per episodio; nessun timer supplementare e nessun mount SMB automatico.
 - MacSyncConnectionNotifier usa UserNotifications/UNUserNotificationCenter. Il permesso viene richiesto quando viene attivata la checkbox; titolo/corpo non contengono percorsi completi, IP né segreti, nessun suono. I timer sono eseguiti nell'app, non sono scheduler di sistema capaci di riattivare un Mac spento.
 - La durata disconnessione misurata parte dalla prima osservazione offline. Per sync giornaliera/settimanale, l'avviso non può comparire prima del successivo slot, anche se soglia oraria scade in precedenza. Verificare la compatibilità delle notifiche in primo piano e in background sul Mac fisico.
+
+## MacSync v0.10.1 — correzioni di pianificazione e avvisi
+
+- **Cadenza costante:** SyncSchedule.nextSlot usa l'ultimo slot programmato come riferimento, non la fine del trasferimento. Esempio 10:00 / 10:05 / 10:10; se il primo ciclo termina alle 10:07, lo slot 10:05 viene saltato e il nuovo ciclo è alle 10:10. Nessuna esecuzione parallela e nessuna raffica di slot arretrati.
+- **Unico controllo programmato della connettività:** l'attivazione manuale e automatica non esegue probe SMB. Il runtime automatico attende il monitor locale e passa al worker lo slot originale; il worker può essere armato anche se la destinazione è offline. Solo il worker, allo slot successivo, verifica tutte le destinazioni prima di permettere operazioni. Le verifiche dell'identità del volume, delle sorgenti e dei percorsi durante la creazione delle mappature e i trasferimenti rimangono obbligatorie per sicurezza.
+- **Stop:** prima di ogni nuova copia viene verificato il segnale di cancellazione; un trasferimento già iniziato può terminare. I job rimanenti restano nella coda. Le callback di una sessione fermata non aggiornano la nuova sessione.
+- **Avvisi:** ConnectionOutageTracker considera inviato l'avviso solo dopo l'accettazione della richiesta da parte di UNUserNotificationCenter; se il sistema rifiuta o non è autorizzato, registra lo stato e ritenta al prossimo slot, senza timer supplementari. Le callback obsolete non possono confermare un nuovo episodio; il consenso e l'episodio vengono verificati prima della richiesta. Identificativo stabile per episodio; stato persistente. Notifica silenziosa anche in primo piano quando macOS lo consente. Disabilitando l'opzione si azzera il tracker.
+- Nessuna modifica a frequenze, soglia 1–168 ore, assenza di rimontaggio automatico/credenziali/VPN gestita dall'app e conferma esplicita per le cancellazioni speculari.
+- Test aggiuntivi: intervalli senza deriva o slot sovrapposti, ritardi giornalieri/settimanali, errore di invio e successivo tentativo, callback tardiva, stop della coda. Il collaudo SMB e la presentazione effettiva delle notifiche richiedono ancora un Mac fisico.
 
 ## Rischi non ancora risolti
 - Automatic login SMB e rimontaggio Finder dopo cambio VPN/sospensione/riavvio.
