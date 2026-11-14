@@ -7,7 +7,7 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 - UI con configurazione per entrambe le coppie: Sorgente → Destinazione. Le due cartelle si scelgono con NSOpenPanel o drag & drop dal Finder. I nomi di riferimento sono Cartella_1 e Cartella_2 ma sono configurabili gli effettivi percorsi.
 - Sorgenti locali del Mac (monitor FSEvents); destinazioni locali o SMB già montate; sfruttare le credenziali memorizzate nel sistema operativo. Niente form IP/utente/password/dominio, niente rclone o Keychain proprietario per il trasferimento.
 - SQLite locale per inventario, coda persistente, attività e log esportabili. FSEvents per rilevare modifiche, con scansioni locali mirate e audit periodici.
-- Copie ogni circa 5 minuti quando abilitate; non enumerare ricorsivamente la destinazione a ogni ciclo.
+- Frequenza configurabile: ogni 1–45 minuti, ogni 1–12 ore, ogni giorno a orario HH:mm oppure un giorno specifico della settimana a HH:mm. Il controllo di destinazione SMB avviene solo immediatamente prima di ogni sincronizzazione, non con timer autonomo. Mai enumerare ricorsivamente la destinazione ad ogni ciclo.
 - Obiettivo finale: installo/configuro/dimentico, avvio automatico al login opzionale, verifica del monte SMB e gestione della ripresa senza cancellazioni improprie. La VPN è GIÀ gestita dal router di rete e non è di competenza di MacSync.
 - Gli altri utenti hanno accesso in lettura alla copia server; permessi gestiti da Windows. L'iMac è fonte di verità.
 
@@ -66,7 +66,7 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 ## Stato v0.9.0 — avvio al login e disponibilità destinazione
 - L'utente richiede una checkbox esplicita: Avvia automaticamente MacSync al login macOS. Implementata tramite SMAppService.mainApp (ServiceManagement), senza script, servizi o helper. Lo stato reale viene letto dall'OS, non da UserDefaults; errori di registrazione non mostrano checkbox falsamente attiva. Richiede MacSync.app, collaudo manuale di Elementi login, permessi e riavvio su iMac.
 - La VPN è configurata/gestita nel router di rete, non sul Mac. Collegandosi via Wi-Fi o Ethernet alla rete locale, il traffico VPN è già disponibile. Non introdurre client VPN, certificati VPN, autenticazione VPN, credenziali SMB aggiuntive o gestori esterni di rete.
-- DestinationProbe e DestinationStatusController: controllo read-only dei percorsi destinazione ogni circa 30 secondi e su richiesta, confronto obbligatorio con fingerprint del volume salvato, blocco se non disponibile, diverso o non verificato. Nessuna enumerazione remota dei file e nessuna scrittura.
+- DestinationProbe e DestinationStatusController: dalla v0.10 il controllo dei percorsi destinazione è effettuato SOLO immediatamente prima di ogni ciclo programmato della sincronizzazione. Niente timer indipendente da 30 secondi, niente controllo extra all'apertura della finestra. Confronto con fingerprint SMB atteso, blocco se diverso/non montato, nessuna enumerazione remota.
 - Se macOS rimonta automaticamente la condivisione SMB nello stesso percorso, il controllo torna READY e un worker di copia GIÀ attivo potrà ritentare al ciclo successivo (300s). MacSync non forza automaticamente il rimontaggio di un volume SMB smontato; senza URL SMB non sarebbe affidabile né sicuro.
 - Avvio al login dell'app NON concede consenso a nuove copie o eliminazioni. In v0.9.1 la seconda checkbox, approvata separatamente, consente COPY/UPDATE automatici; la cancellazione mirror resta esclusivamente manuale per sessione. Nessuna cancellazione automatica al login.
 - Test CI macOS per probe di destinazioni disponibili, non disponibili, volume errato e symlink. La registrazione reale ServiceManagement e la continuità Wi-Fi/Ethernet/SMB vanno collaudate su Mac fisico.
@@ -79,6 +79,15 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 - Se destinazione assente, worker rimanda il job e mai crea cartelle sostitutive; quando macOS rimonta il volume corrispondente, l'app ritenta. Nessun client VPN: il router di rete gestisce la VPN sulla connessione LAN Wi-Fi/Ethernet.
 - Stop manuale delle copie sospende auto-copy fino al successivo login o riavvio app (oppure nuova approvazione della checkbox). Cambio Sorgente/Destinazione disarma auto-copy. L'avvio al login da solo non abilita l'attività automatica.
 - Test macOS CI coprono decisioni automatiche offline/online, profili legacy, false identità, upload pendenti dopo disconnessione e uno scenario di riattivazione senza mai consumare DELETE. Restano necessari test con SMB reale, permessi e SMAppService su iMac.
+
+## Stato v0.10.0 — frequenza e avvisi opzionali
+- Nuovo SyncSchedule (core): Frequency minutes (1–45), hours (1–12), daily (HH:mm), weekly (weekday 1–7 e HH:mm). Calendar.nextDate e fuso locale, con tutela per DST. SyncSettingsController persiste JSON e consente modifica solo fuori sessione attiva.
+- MountedCopyController usa timer one-shot reschedulato DOPO ogni ciclo, mai un repeating timer fisso da 300s. Ad ogni scadenza verifica DestinationProbe per TUTTE le coppie, segnala stato, e se anche una non è pronta salta ogni scrittura/rimozione e mantiene la coda.
+- MacSyncRuntime avvia le copie automatiche solo al successivo slot configurato; se non attive, effettua il controllo disponibilità soltanto a quello slot per decidere se avviare. Niente polling di connessione every 30s; DestinationStatusController riceve esclusivamente i risultati dei controlli di sincronizzazione.
+- Avviso facoltativo OFF di default. ConnectionAlertPolicy afterHours 1–168; ConnectionOutageTracker stato per cartella e prima osservazione offline, notifica una sola volta quando soglia superata al ciclo successivo; reset alla prima verifica READY. UserNotifications chiede permesso SOLO se l'utente abilita gli avvisi. Nessun suono, nessuna richiesta di credenziali o autorimontaggio.
+- La durata offline è misurata dal primo controllo che la rileva, NON dalla vera caduta della rete. Se lo slot successivo è giornaliero/settimanale, la notifica può arrivare ben oltre la soglia oraria; non attivare controlli extra per anticiparla.
+- Per cambiare frequenza durante una sessione occorre fermare prima le copie. Gli slot mancati per sleep/ciclo lungo non vengono recuperati in massa. La cancellazione automatica al login continua ad essere vietata.
+- Test CI core dedicati a validità limiti, orari locali e DST, weekday, policy notification, una sola notifica per episodio e persistenza tracker. UI e interazione notifiche vanno collaudate su iMac reale.
 
 ## Prossime fasi
 1. Confermare CI completo versione 0.8.1, testare in Finder drag & drop e sostituzione su Mac locale.
