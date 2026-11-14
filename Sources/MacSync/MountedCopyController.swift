@@ -306,13 +306,21 @@ final class MountedCopyController: ObservableObject {
                                 ? "Mirror di prova attivato con recupero" : "Mirror di prova attivato senza recupero"
                         )
                     }
-                    let summary = try worker.runOnce(
-                        enabled: true, maxJobs: 50,
-                        shouldContinue: { !cancellation.isCancelled }
+                    let summary = try worker.runCycle(
+                        enabled: true, pageSize: 100,
+                        shouldContinue: { !cancellation.isCancelled },
+                        onProgress: { progress in
+                            DispatchQueue.main.async { [weak self] in
+                                guard !cancellation.isCancelled else { return }
+                                self?.status = "Sincronizzazione in corso: "
+                                    + "\(progress.copied) completati, "
+                                    + "\(progress.deferred) rimandati, \(progress.failed) errori"
+                            }
+                        }
                     )
                     var mirrorSummary = MirrorDeletionSummary()
                     var expired = 0
-                    if let mirrorWorker, !cancellation.isCancelled {
+                    if let mirrorWorker, !cancellation.isCancelled, !summary.interrupted {
                         // A rename is currently represented as upload + delete.
                         // Never remove the old server file before pending
                         // uploads have been completed, including after failure.
@@ -344,7 +352,8 @@ final class MountedCopyController: ObservableObject {
                     // Only the SQLite activity table is pruned, never file
                     // inventory, queue, photographs, backups or staging.
                     try? log.prune(retainNewest: 20_000, maxAgeDays: 90)
-                    let result = "Ultimo ciclo: \(summary.copied) copie, "
+                    let result = (summary.interrupted
+                        ? "Ciclo interrotto: " : "Ultimo ciclo: ") + "\(summary.copied) copie, "
                         + "\(summary.deferred) rimandate, \(summary.failed) errori, "
                         + "\(ByteCountFormatter.string(fromByteCount: summary.bytes, countStyle: .file)) trasferiti."
                     DispatchQueue.main.async { [weak self] in
