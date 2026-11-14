@@ -61,7 +61,7 @@ public struct SyncSchedule: Codable, Equatable, Sendable {
             return calendar.nextDate(
                 after: now,
                 matching: DateComponents(
-                    weekday: weekday, hour: hour, minute: minute, second: 0
+                    hour: hour, minute: minute, second: 0, weekday: weekday
                 ),
                 matchingPolicy: .nextTime, repeatedTimePolicy: .first,
                 direction: .forward
