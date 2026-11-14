@@ -175,7 +175,8 @@ public final class MountedFolderCopyWorker {
         self.availableCapacity = availableCapacity
     }
 
-    public func runOnce(enabled: Bool = false, maxJobs: Int = 50) throws -> MountedCopySummary {
+    public func runOnce(enabled: Bool = false, maxJobs: Int = 50,
+                        shouldContinue: () -> Bool = { true }) throws -> MountedCopySummary {
         var summary = MountedCopySummary()
         guard enabled else {
             summary.disabled = true
@@ -187,6 +188,7 @@ public final class MountedFolderCopyWorker {
             jobs = try journal.pendingUploads(limit: maxJobs)
         }
         for job in jobs {
+            guard shouldContinue() else { break }
             nextAfterID = job.id
             let started = Date()
             guard let mapping = mappings[job.rootID] else {
