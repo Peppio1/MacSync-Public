@@ -313,8 +313,16 @@ final class MountedCopyController: ObservableObject {
                     var mirrorSummary = MirrorDeletionSummary()
                     var expired = 0
                     if let mirrorWorker, !cancellation.isCancelled {
-                        mirrorSummary = try mirrorWorker.runOnce(maxFiles: 25)
-                        expired = try mirrorWorker.pruneExpiredRecovery()
+                        // A rename is currently represented as upload + delete.
+                        // Never remove the old server file before pending
+                        // uploads have been completed, including after failure.
+                        if try journal.pendingUploads(limit: 1).isEmpty {
+                            mirrorSummary = try mirrorWorker.runOnce(maxFiles: 25)
+                            expired = try mirrorWorker.pruneExpiredRecovery()
+                        } else {
+                            mirrorSummary.blocked = true
+                            mirrorSummary.detail = "Cancellazioni sospese: copie o aggiornamenti ancora in coda"
+                        }
                     }
                     let dashboard = SyncDashboardStats(
                         copy: summary, mirror: mirrorSummary, expiredRecovery: expired
