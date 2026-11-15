@@ -1,4 +1,4 @@
-# MacSync — prototipo v0.12.1
+# MacSync — prototipo v0.12.2
 
 Applicazione nativa macOS per la futura sincronizzazione **unidirezionale Sorgente → Destinazione**, con copie selettive a frequenza configurabile, SQLite e FSEvents.
 
@@ -188,6 +188,14 @@ Questa fase distingue due opzioni indipendenti nella sezione **Impostazioni di a
 - Dopo crash/disconnessione, backup precedenti e residui non identificati con certezza non vengono puliti automaticamente, neanche dopo un retry riuscito. Possono richiedere manutenzione manuale. Non è un sistema di versioning, non garantisce durabilità dopo perdita di alimentazione e le verifiche correnti non sono una rilettura hash completa del file remoto. Collaudo reale SMB indispensabile per atomicità, permessi e comportamento in caso di guasto; nessuna rivendicazione di sicurezza assoluta in presenza di modifiche concorrenti tra controllo e unlink.
 - Rinviata a sviluppi futuri la sostituzione con backup nativo (senza copia integrale) previa prova SMB. Nessun risparmio di traffico VPN garantito per la copia di sicurezza; riduce l'accumulo delle copie di sicurezza delle operazioni confermate.
 - Punti 2/4 definiti; punto 3 ripresa parziale, punti 5/6/7 cancellazioni, punto 8 statistiche restano da concordare. Riconoscimento rinomine rinviato, nessuna correlazione tra coppie.
+
+## v0.12.2 — ripartenza da zero e temporanei (punto 3 approvato)
+
+- Confermato: dopo un'interruzione ripartire da zero soltanto per il singolo file non confermato; la coda SQLite resta persistente, i lavori già confermati non vengono ripetuti. Nuovo UUID staging per ogni tentativo, nessuna ripresa a offset o riuso di file parziali.
+- Prima della pubblicazione, se un tentativo fallisce, verifica puntualmente la radice, il volume atteso, l'identità della cartella staging e il temporaneo del tentativo corrente (percorso UUID inizialmente assente, tipo file, snapshot invariato durante il controllo). Verifica anche che il sorgente sia ancora disponibile e invariato. Solo se tutti i controlli riescono elimina il temporaneo tramite unlink, senza toccare foto definitive, backup o altri temporanei. Nessuna scansione aggiuntiva SMB.
+- Se la connessione è realmente assente, il sorgente cambia, le identità non corrispondono, o è già stata tentata la pubblicazione, conserva eventuali residui e registra staging_retained; non tenta pulizia indiscriminata dopo il riavvio. La manutenzione manuale preesistente resta disponibile con anteprima e conferma esplicita (soglia 7 giorni basata su mtime), non avviata automaticamente; riservare la cartella .macsync-staging a MacSync. Una caduta di rete o crash può ancora lasciare temporanei da rimuovere manualmente quando è sicuro. Nessuna garanzia assoluta contro modifiche concorrenti tra controllo e unlink.
+- Test aggiuntivi: tentativi falliti ripetuti senza accumulo se la share è accessibile, temporanei storici inalterati, file e cartella staging sostituiti prima della pulizia, pubblicazione incerta. Test locali e fault injection, non prove di disconnessione SMB reale. 
+- Ripresa parziale rinviata a possibile sviluppo futuro solo se le misure reali evidenzieranno necessità e beneficio netto; verificare contenuto già trasferito, identità del file, sorgente invariato e durabilità. Nessuna modifica a backup v0.12.1, mirror o interfaccia. Punti 5, 6, 7 e 8 ancora da concordare.
 
 ## Test, limiti e sicurezza
 
