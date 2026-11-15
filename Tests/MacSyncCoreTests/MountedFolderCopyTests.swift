@@ -216,7 +216,7 @@ final class MountedFolderCopyTests: XCTestCase {
         XCTAssertEqual(pending[0].kind, .upsert)
         XCTAssertEqual(pending[0].relativePath, "photo.jpg")
     }
-    func testReplacingExistingFileKeepsOldBackup() throws {
+    func testReplacingExistingFileRemovesOnlyConfirmedTemporaryBackup() throws {
         let fixture = try setup()
         defer { try? FileManager.default.removeItem(at: fixture.base) }
         let source = fixture.source.appendingPathComponent("same-name.psd")
@@ -236,7 +236,9 @@ final class MountedFolderCopyTests: XCTestCase {
         XCTAssertEqual(outcome.updated, 1)
         XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "new version")
         let names = try FileManager.default.contentsOfDirectory(atPath: fixture.target.path)
-        XCTAssertTrue(names.contains(where: { $0.hasPrefix(".macsync-backup-") }))
+        XCTAssertFalse(names.contains(where: { $0.hasPrefix(".macsync-backup-") }))
+        XCTAssertTrue(try journal.pending().isEmpty)
+        XCTAssertTrue(try log.recent().contains { $0.action == "backup_cleanup" })
     }
 
     func testReadOnlyMountedBaselineDoesNotAlterFilesOrQueue() throws {
