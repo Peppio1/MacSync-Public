@@ -83,6 +83,8 @@ final class MacSyncRuntime: ObservableObject {
 
     func onFolderConfigurationChanged() {
         configurationRevision += 1
+        copy.stop()
+        copy.revokeMirrorAuthorization()
         if copy.automaticCopiesEnabled {
             copy.setAutomaticCopiesEnabled(false)
         }
@@ -210,7 +212,7 @@ final class MacSyncRuntime: ObservableObject {
             sources: pairs, schedule: settings.schedule, firstSlot: slot
         )
         automaticStatus = copy.active
-            ? "Copie automatiche pianificate (senza cancellazioni)"
+            ? (copy.mirrorEnabled ? "Sincronizzazione automatica pianificata con cancellazioni autorizzate" : "Copie automatiche pianificate (senza cancellazioni)")
             : "Attivazione rinviata: verifica configurazione e registro"
         if !copy.active { scheduleNextAutomaticAttempt(afterSlot: slot) }
     }
