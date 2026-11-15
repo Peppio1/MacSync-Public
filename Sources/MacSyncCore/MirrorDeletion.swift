@@ -74,13 +74,110 @@ public struct MirrorDeletionSummary {
     public init() {}
 }
 
-private struct MirrorRootIdentity {
+fileprivate struct MirrorRootIdentity: Codable, Equatable, Sendable {
     let device: UInt64
     let inode: UInt64
     let volume: VolumeFingerprint
     let targetDevice: UInt64
     let targetInode: UInt64
     let baselineCount: Int
+}
+
+/// Three independent, optional anti-error protections. Technical
+/// validation is performed regardless of these settings.
+public struct MirrorProtectionSettings: Codable, Equatable, Sendable {
+    public var absoluteEnabled = false
+    public var absoluteLimit = 1000
+    public var fractionEnabled = false
+    public var percentLimit = 50
+    public var emptyEnabled = false
+    public var windowHours = 24
+
+    public init() {}
+    public var isValid: Bool {
+        (1...1_000_000).contains(absoluteLimit) && (1...100).contains(percentLimit)
+            && (1...48).contains(windowHours)
+    }
+    public var anyEnabled: Bool { absoluteEnabled || fractionEnabled || emptyEnabled }
+}
+
+/// Only created following explicit user consent. The DB identity prevents
+/// replaying an old authorization against a newly created database.
+public struct MirrorAuthorization: Codable, Equatable, Sendable {
+    fileprivate struct Root: Codable, Equatable, Sendable {
+        let sourcePath: String
+        let targetPath: String
+        let targetVolume: VolumeFingerprint
+        let identity: MirrorRootIdentity
+    }
+    fileprivate let roots: [String: Root]
+    fileprivate let databaseID: String
+    fileprivate let cutoff: Int64
+
+    public static func capture(journal: ChangeJournal, mappings: [MountedFolderMapping]) throws -> MirrorAuthorization {
+        guard !mappings.isEmpty, Set(mappings.map(\.rootID)).count == mappings.count else {
+            throw MirrorDeletionFailure.noBaseline
+        }
+        // No overlapping pairs; otherwise the same folder could be
+        // indirectly modified by a different independent synchronization.
+        let paths = mappings.flatMap { [$0.source.path.lowercased(), $0.target.path.lowercased()] }
+        for i in paths.indices {
+            for j in paths.indices where j > i {
+                guard paths[i] != paths[j], !paths[i].hasPrefix(paths[j] + "/"),
+                      !paths[j].hasPrefix(paths[i] + "/") else { throw MountedCopyError.invalidMapping }
+            }
+        }
+        var roots: [String: Root] = [:]
+        for map in mappings {
+            let before = try captureIdentity(map, journal: journal, count: 0)
+            let inventory = try LocalScanner.scan(root: map.source)
+            let after = try captureIdentity(map, journal: journal, count: 0)
+            guard before == after else { throw MirrorDeletionFailure.sourceChanged }
+            let identity = MirrorRootIdentity(device: after.device, inode: after.inode,
+                volume: after.volume, targetDevice: after.targetDevice,
+                targetInode: after.targetInode, baselineCount: inventory.count)
+            roots[map.rootID] = Root(sourcePath: map.source.path, targetPath: map.target.path,
+                targetVolume: map.targetVolume, identity: identity)
+        }
+        return MirrorAuthorization(roots: roots, databaseID: try journal.databaseIdentity(),
+            cutoff: try journal.queueSequence())
+    }
+
+    fileprivate static func captureIdentity(_ map: MountedFolderMapping, journal: ChangeJournal,
+                                            count: Int) throws -> MirrorRootIdentity {
+        try map.verify()
+        guard try journal.watchedRootPath(rootID: map.rootID) == map.source.path else {
+            throw MirrorDeletionFailure.noBaseline
+        }
+        var src = stat(), dst = stat()
+        guard map.source.path.withCString({ lstat($0, &src) }) == 0,
+              map.target.path.withCString({ lstat($0, &dst) }) == 0,
+              src.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
+              dst.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
+            throw MirrorDeletionFailure.sourceChanged
+        }
+        return MirrorRootIdentity(device: UInt64(bitPattern: Int64(src.st_dev)), inode: UInt64(src.st_ino),
+            volume: try VolumeFingerprint.read(at: map.source),
+            targetDevice: UInt64(bitPattern: Int64(dst.st_dev)), targetInode: UInt64(dst.st_ino),
+            baselineCount: count)
+    }
+
+    fileprivate func validated(journal: ChangeJournal, mappings: [MountedFolderMapping]) throws -> [String: MirrorRootIdentity] {
+        guard try journal.databaseIdentity() == databaseID,
+              try journal.queueSequence() >= cutoff,
+              roots.count == mappings.count else { throw MirrorDeletionFailure.noBaseline }
+        var result: [String: MirrorRootIdentity] = [:]
+        for map in mappings {
+            guard let root = roots[map.rootID], root.sourcePath == map.source.path,
+                  root.targetPath == map.target.path, root.targetVolume == map.targetVolume else {
+                throw MirrorDeletionFailure.volumeChanged
+            }
+            let current = try Self.captureIdentity(map, journal: journal, count: root.identity.baselineCount)
+            guard current == root.identity else { throw MirrorDeletionFailure.sourceChanged }
+            result[map.rootID] = root.identity
+        }
+        return result
+    }
 }
 
 private struct RecoveredRecord {
@@ -254,11 +351,15 @@ public final class MirrorDeletionWorker {
     private let armedAt: Date
     private let cancellation: MirrorDeletionCancellation
     private var appliedDuringSession = 0
+    private let authorization: MirrorAuthorization?
+    private let protections: MirrorProtectionSettings
 
     public init(
         journal: ChangeJournal, manifest: RecoveryManifest, log: SyncActivityLog,
         mappings: [MountedFolderMapping], policy: MirrorDeletionPolicy,
-        cancellation: MirrorDeletionCancellation = MirrorDeletionCancellation()
+        cancellation: MirrorDeletionCancellation = MirrorDeletionCancellation(),
+        authorization: MirrorAuthorization? = nil,
+        protections: MirrorProtectionSettings = MirrorProtectionSettings()
     ) throws {
         guard policy.enabled, !mappings.isEmpty,
               Set(mappings.map(\.rootID)).count == mappings.count else {
@@ -269,8 +370,18 @@ public final class MirrorDeletionWorker {
         self.log = log
         self.policy = policy
         self.cancellation = cancellation
+        self.authorization = authorization
+        self.protections = protections
+        guard protections.isValid else { throw MirrorDeletionFailure.noBaseline }
         self.mappings = Dictionary(uniqueKeysWithValues: mappings.map { ($0.rootID, $0) })
 
+        if let authorization {
+            self.baselines = try authorization.validated(journal: journal, mappings: mappings)
+            self.armedAt = Date()
+            return
+        }
+        // Compatibility for explicit legacy session-only core callers.
+        // The application requires a persisted authorization instead.
         var captured: [String: MirrorRootIdentity] = [:]
         for mapping in mappings {
             try mapping.verify()
@@ -287,9 +398,9 @@ public final class MirrorDeletionWorker {
             guard Self.isDirectory(rootStamp), Self.isDirectory(targetStamp)
             else { throw MirrorDeletionFailure.noBaseline }
             captured[mapping.rootID] = MirrorRootIdentity(
-                device: UInt64(rootStamp.st_dev), inode: UInt64(rootStamp.st_ino),
+                device: UInt64(bitPattern: Int64(rootStamp.st_dev)), inode: UInt64(rootStamp.st_ino),
                 volume: try VolumeFingerprint.read(at: mapping.source),
-                targetDevice: UInt64(targetStamp.st_dev),
+                targetDevice: UInt64(bitPattern: Int64(targetStamp.st_dev)),
                 targetInode: UInt64(targetStamp.st_ino),
                 baselineCount: inventory.count
             )
@@ -343,15 +454,101 @@ public final class MirrorDeletionWorker {
             }
             return $0.relativePath.count > $1.relativePath.count
         }
-        // One complete LOCAL check per affected source, never one scan per
-        // job and NEVER a recursive scan of the SMB destination.
         var availableRoots: Set<String> = []
-        for job in sorted.prefix(max(1, min(100, maxFiles))) {
+        try process(Array(sorted.prefix(max(1, min(100, maxFiles)))), result: &result, availableRoots: &availableRoots)
+        return result
+    }
+
+    /// Called before any upload and again before mirror/retention. A safety
+    /// latch is persistent even if the operator disables a protection.
+    public func verifyBeforeSynchronization(now: Date = Date()) throws {
+        guard let authorization else { return }
+        if let reason = try journal.mirrorBlockReason() {
+            throw MirrorDeletionFailure.bulkDeletion(reason)
+        }
+        for (id, mapping) in mappings {
+            guard let baseline = baselines[id] else { throw MirrorDeletionFailure.noBaseline }
+            try verifyRoots(mapping, baseline)
+        }
+        try evaluateProtection(authorization: authorization, now: now, verifyEmpty: true)
+    }
+
+    private func evaluateProtection(authorization: MirrorAuthorization, now: Date,
+                                    verifyEmpty: Bool) throws {
+        if let reason = try journal.mirrorBlockReason() {
+            throw MirrorDeletionFailure.bulkDeletion(reason)
+        }
+        guard protections.anyEnabled else { return }
+        let since = now.addingTimeInterval(-Double(protections.windowHours) * 3600)
+        for (id, mapping) in mappings {
+            let counts = try journal.deletionWindow(rootID: id, afterID: authorization.cutoff, since: since)
+            guard counts.pending > 0 else { continue }
+            let denominator = Double(counts.inventory) + Double(counts.total)
+            let fraction = denominator > 0 ? Double(counts.total) * 100 / denominator : 0
+            var reason: String?
+            if protections.absoluteEnabled && counts.total >= protections.absoluteLimit {
+                reason = "Limite numerico: \(counts.total) elementi"
+            } else if protections.fractionEnabled && fraction >= Double(protections.percentLimit) {
+                reason = "Limite percentuale: \(Int(fraction))%"
+            } else if protections.emptyEnabled && counts.inventory == 0 {
+                if !verifyEmpty || (try LocalScanner.scan(root: mapping.source)).isEmpty {
+                    reason = "Sorgente completamente vuota"
+                }
+            }
+            if let reason {
+                let detail = id + ": " + reason
+                try journal.latchMirrorBlock(detail)
+                try? log.record(level: .warning, rootID: id, action: "mirror_blocked", message: detail)
+                throw MirrorDeletionFailure.bulkDeletion(detail)
+            }
+        }
+    }
+
+    /// Entire eligible snapshot, ordered deepest/longest paths first.
+    /// Every job is attempted once, even if older jobs are deferred.
+    public func runCycle(pageSize: Int = 100) throws -> MirrorDeletionSummary {
+        guard let authorization else { return try runOnce(maxFiles: 100) }
+        var result = MirrorDeletionSummary()
+        try verifyBeforeSynchronization()
+        guard !cancellation.isCancelled else { return result }
+        guard try journal.pendingUploads(limit: 1).isEmpty else {
+            result.blocked = true
+            result.detail = "Cancellazioni sospese: copie o aggiornamenti ancora in coda"
+            return result
+        }
+        guard let upper = try journal.pendingDeleteUpperBound(afterID: authorization.cutoff) else { return result }
+        var length = Int64.max
+        var lastID: Int64 = 0
+        var availableRoots: Set<String> = []
+        while !cancellation.isCancelled {
+            try evaluateProtection(authorization: authorization, now: Date(), verifyEmpty: false)
+            let page = try journal.pendingDeletePage(afterID: authorization.cutoff, throughID: upper,
+                previousLength: length, previousID: lastID, limit: pageSize)
+            guard let last = page.last else { break }
+            length = Int64(last.relativePath.unicodeScalars.count)
+            lastID = last.id
+            try process(page, result: &result, availableRoots: &availableRoots)
+            if result.blocked { break }
+        }
+        // Keep history for the longest configurable window, regardless of
+        // current settings. Pending jobs remain in the original queue.
+        try journal.pruneMirrorAttempts(before: Date().addingTimeInterval(-48 * 3600))
+        return result
+    }
+
+    private func process(_ jobs: [QueuedChange], result: inout MirrorDeletionSummary,
+                         availableRoots: inout Set<String>) throws {
+        for job in jobs {
             if cancellation.isCancelled { break }
             if !(try journal.pendingUploads(limit: 1).isEmpty) {
                 result.blocked = true
                 result.detail = "Nuove copie in coda: cancellazioni sospese"
                 break
+            }
+            if let authorization {
+                // Recheck local counters before each action, so new events
+                // cannot evade the window by arriving mid-page.
+                try evaluateProtection(authorization: authorization, now: Date(), verifyEmpty: false)
             }
             guard let mapping = mappings[job.rootID],
                   let baseline = baselines[job.rootID] else {
@@ -395,10 +592,19 @@ public final class MirrorDeletionWorker {
                       latest.st_dev == target.st_dev,
                       latest.st_ino == target.st_ino,
                       latest.st_mode == target.st_mode,
-                      latest.st_size == target.st_size else {
+                      latest.st_size == target.st_size,
+                      latest.st_mtimespec.tv_sec == target.st_mtimespec.tv_sec,
+                      latest.st_mtimespec.tv_nsec == target.st_mtimespec.tv_nsec,
+                      latest.st_ctimespec.tv_sec == target.st_ctimespec.tv_sec,
+                      latest.st_ctimespec.tv_nsec == target.st_ctimespec.tv_nsec else {
                     throw MirrorDeletionFailure.destinationChanged
                 }
                 if cancellation.isCancelled { break }
+                if authorization != nil {
+                    try journal.recordMirrorAttempt(job)
+                    // The reservation is durable before touching the share.
+                    if cancellation.isCancelled { break }
+                }
                 if Self.isRegularFile(target) {
                     // Never execute destructive operations on symlinks or
                     // directories with content.
@@ -443,7 +649,6 @@ public final class MirrorDeletionWorker {
                 )
             }
         }
-        return result
     }
 
     /// Automatic expiry only for manifest-owned, unchanged recovery files.
@@ -452,6 +657,8 @@ public final class MirrorDeletionWorker {
     @discardableResult
     public func pruneExpiredRecovery(now: Date = Date()) throws -> Int {
         guard policy.enabled, !cancellation.isCancelled else { return 0 }
+        if authorization != nil { try verifyBeforeSynchronization() }
+        guard try journal.pendingUploads(limit: 1).isEmpty else { return 0 }
         var removed = 0
         for item in try manifest.expired(before: now) {
             if cancellation.isCancelled { break }
@@ -515,12 +722,12 @@ public final class MirrorDeletionWorker {
         let source = try Self.statFile(mapping.source)
         let target = try Self.statFile(mapping.target)
         guard Self.isDirectory(source),
-              UInt64(source.st_dev) == baseline.device,
+              UInt64(bitPattern: Int64(source.st_dev)) == baseline.device,
               UInt64(source.st_ino) == baseline.inode,
               try VolumeFingerprint.read(at: mapping.source) == baseline.volume
         else { throw MirrorDeletionFailure.sourceChanged }
         guard Self.isDirectory(target),
-              UInt64(target.st_dev) == baseline.targetDevice,
+              UInt64(bitPattern: Int64(target.st_dev)) == baseline.targetDevice,
               UInt64(target.st_ino) == baseline.targetInode
         else { throw MirrorDeletionFailure.volumeChanged }
     }
@@ -542,9 +749,7 @@ public final class MirrorDeletionWorker {
               segments.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." &&
                   !$0.contains("\\") && !$0.contains(":") && !$0.contains("\0") }),
               recovery || segments.allSatisfy({
-                  !$0.hasPrefix(".macsync-staging") &&
-                  !$0.hasPrefix(".macsync-recovery") &&
-                  !$0.hasPrefix(".macsync-backup-")
+                  !$0.lowercased().hasPrefix(".macsync-")
               }) else { throw MirrorDeletionFailure.unsafePath }
         let url = root.appendingPathComponent(relative)
         var current = root
