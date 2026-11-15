@@ -360,6 +360,31 @@ public final class ChangeJournal {
         return sqlite3_changes(connection) == 1
     }
 
+    /// Confirm precisely the upsert that was published. A replaced or
+    /// superseded event cannot authorize destruction of its safety copy.
+    @discardableResult
+    public func acknowledgeUpload(_ job: QueuedChange) throws -> Bool {
+        let stmt = try prepare("""
+            UPDATE change_queue SET completed=1
+            WHERE id=? AND root_id=? AND relative_path=? AND kind='upsert'
+              AND completed=0
+              AND NOT EXISTS (
+                  SELECT 1 FROM change_queue n
+                  WHERE n.root_id=change_queue.root_id
+                    AND n.relative_path=change_queue.relative_path
+                    AND n.completed=0 AND n.id>change_queue.id
+              );
+            """)
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_bind_int64(stmt, 1, job.id) == SQLITE_OK else {
+            throw databaseFailure()
+        }
+        try bind(job.rootID, at: 2, in: stmt)
+        try bind(job.relativePath, at: 3, in: stmt)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseFailure() }
+        return sqlite3_changes(connection) == 1
+    }
+
     public func markCompleted(id: Int64) throws {
         let statement = try prepare("UPDATE change_queue SET completed = 1 WHERE id = ?;")
         defer { sqlite3_finalize(statement) }
