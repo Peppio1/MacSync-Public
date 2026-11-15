@@ -107,10 +107,11 @@ public final class SeededArchiveVerifier {
         var deferred = 0
         var bytesRead: Int64 = 0
         var lastByteProgress: Int64 = 0
+        let upper = try journal.pendingUploadUpperBound() ?? 0
 
         while true {
             if cancellation.isCancelled { throw SeedVerificationError.cancelled }
-            let jobs = try journal.pendingUploads(limit: 250, afterID: cursor)
+            let jobs = try journal.pendingUploads(limit: 250, afterID: cursor, throughID: upper)
             if jobs.isEmpty { break }
             for job in jobs {
                 if cancellation.isCancelled { throw SeedVerificationError.cancelled }
@@ -268,7 +269,7 @@ public final class SeededArchiveVerifier {
             throw SeedVerificationError.unsafeEntry
         }
         return SeedFileFingerprint(
-            device: UInt64(st.st_dev), inode: UInt64(st.st_ino),
+            device: UInt64(bitPattern:Int64(st.st_dev)), inode: UInt64(st.st_ino),
             size: Int64(st.st_size),
             mtimeSeconds: Int64(st.st_mtimespec.tv_sec),
             mtimeNanos: Int64(st.st_mtimespec.tv_nsec),
