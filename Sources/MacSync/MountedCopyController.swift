@@ -27,9 +27,17 @@ final class MountedCopyController: ObservableObject {
     private var mirrorConfigurationRevision = 0
     @Published private(set) var mirrorEnabled = MountedCopyController.loadAuthorization() != nil
     @Published var mirrorProtections: MirrorProtectionSettings = {
-        guard let data = UserDefaults.standard.data(forKey: "MacSync.mirrorProtections.v1"),
-              let settings = try? JSONDecoder().decode(MirrorProtectionSettings.self, from: data),
-              settings.isValid else { return MirrorProtectionSettings() }
+        guard let data = UserDefaults.standard.data(forKey: "MacSync.mirrorProtections.v1") else {
+            return MirrorProtectionSettings()
+        }
+        guard let settings = try? JSONDecoder().decode(MirrorProtectionSettings.self, from: data),
+              settings.isValid else {
+            // A damaged settings record must not silently remove protection.
+            var invalid = MirrorProtectionSettings()
+            invalid.absoluteEnabled = true
+            invalid.absoluteLimit = 0
+            return invalid
+        }
         return settings
     }() {
         didSet {
@@ -197,9 +205,7 @@ final class MountedCopyController: ObservableObject {
 
         let warning = NSAlert()
         warning.alertStyle = .warning
-        warning.messageText = policy.enabled
-            ? "Attivare copie e cancellazioni speculari DI PROVA?"
-            : "Abilitare le copie di prova?"
+        warning.messageText = "Avviare la sincronizzazione di prova?"
         let deleteWarning: String
         if !policy.enabled {
             deleteWarning = "La cancellazione speculare è DISABILITATA."
@@ -220,9 +226,7 @@ final class MountedCopyController: ObservableObject {
         Le protezioni tecniche restano obbligatorie; i limiti quantitativi sono facoltativi.
         Avviare questa sessione non modifica l'autorizzazione alle cancellazioni.
         """
-        warning.addButton(withTitle: policy.enabled
-            ? "Conferma copia e cancellazione di prova"
-            : "Attiva copie di prova")
+        warning.addButton(withTitle: "Avvia sincronizzazione di prova")
         warning.addButton(withTitle: "Annulla")
         guard warning.runModal() == .alertFirstButtonReturn else {
             status = "Copie non attivate"
@@ -232,8 +236,8 @@ final class MountedCopyController: ObservableObject {
                      schedule: schedule)
     }
 
-    /// Explicit persistent opt-in: future app launches may copy or update,
-    /// but they must NEVER mirror DELETE jobs without separate confirmation.
+    /// Explicit persistent opt-in for scheduled automatic synchronization.
+    /// Mirror work requires the independently saved settings authorization.
     func setAutomaticCopiesEnabled(_ enabled: Bool) {
         if enabled {
             let alert = NSAlert()
@@ -256,9 +260,8 @@ final class MountedCopyController: ObservableObject {
         if !enabled && automaticSession { stop() }
     }
 
-    /// Called solely by the app-level coordinator after a user has previously
-    /// approved unattended COPY/UPDATE operations. No remote DELETE worker
-    /// is instantiated, regardless of the persisted mirror preference.
+    /// Called solely by the app-level coordinator after explicit opt-in.
+    /// Mirror work is allowed only with a validated persisted authorization.
     func startAutomaticSafeCopies(
         sources: [(id: String, path: String, destination: String, expected: VolumeFingerprint?)],
         schedule: SyncSchedule,
