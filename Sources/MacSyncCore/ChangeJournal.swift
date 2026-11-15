@@ -331,6 +331,26 @@ public final class ChangeJournal {
         return sqlite3_column_int64(stmt, 0)
     }
 
+    /// Do not authorize a newly selected/replaced source against stale
+    /// inventory paths. Contents and timestamps are irrelevant to deletion
+    /// consent, but every tracked path and object kind must agree.
+    public func inventoryPathsMatch(rootID: String, scanned: [TrackedItem]) throws -> Bool {
+        var expected: [String: String] = [:]
+        for item in scanned {
+            guard expected.updateValue(item.kind, forKey: item.relativePath) == nil else { return false }
+        }
+        let stmt = try prepare("SELECT relative_path,kind FROM file_inventory WHERE root_id=?;")
+        defer { sqlite3_finalize(stmt) }
+        try bind(rootID,at:1,in:stmt)
+        while true {
+            let rc = sqlite3_step(stmt)
+            if rc == SQLITE_DONE { return expected.isEmpty }
+            guard rc == SQLITE_ROW else { throw databaseFailure() }
+            guard expected.removeValue(forKey: columnText(stmt,at:0)) == columnText(stmt,at:1)
+            else { return false }
+        }
+    }
+
     public func databaseIdentity() throws -> String {
         try execute("CREATE TABLE IF NOT EXISTS macsync_identity(id TEXT NOT NULL);")
         try execute("INSERT INTO macsync_identity(id) SELECT lower(hex(randomblob(16))) WHERE NOT EXISTS (SELECT 1 FROM macsync_identity);")
