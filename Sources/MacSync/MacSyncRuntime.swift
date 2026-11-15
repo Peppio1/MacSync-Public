@@ -17,6 +17,9 @@ final class MacSyncRuntime: ObservableObject {
     @Published private(set) var nextAutomaticAttempt: Date?
 
     private var autoTimer: Timer?
+    private var auditTimer: Timer?
+    @Published private(set) var nextAuditAt: Date?
+    private var auditRevision = 0
     private var suspendedUntilNextLaunch = false
     private var configurationRevision = 0
     private var outages = ConnectionOutageTracker()
@@ -39,9 +42,32 @@ final class MacSyncRuntime: ObservableObject {
         // The inventory/FSEvents scan starts asynchronously, while the next
         // automatic attempt is scheduled according to the chosen frequency.
         scheduleNextAutomaticAttempt()
+        scheduleArchiveAudit()
     }
 
-    deinit { autoTimer?.invalidate() }
+    deinit { autoTimer?.invalidate(); auditTimer?.invalidate() }
+
+    func scheduleArchiveAudit() {
+        auditRevision += 1
+        auditTimer?.invalidate()
+        auditTimer = nil
+        nextAuditAt = nil
+        let policy = copy.auditSettings
+        guard policy.enabled, let next = policy.next(after:Date()) else { return }
+        nextAuditAt = next
+        let revision = auditRevision
+        let timer = Timer(fire:next,interval:0,repeats:false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.auditRevision == revision, self.copy.auditSettings.enabled else { return }
+                if self.model.monitoring {
+                    self.copy.startArchiveAudit(sources:self.model.configuredPairs(),interactive:false)
+                }
+                self.scheduleArchiveAudit()
+            }
+        }
+        RunLoop.main.add(timer,forMode:.common)
+        auditTimer = timer
+    }
 
     func stopCopiesForCurrentLaunch() {
         configurationRevision += 1
@@ -85,6 +111,10 @@ final class MacSyncRuntime: ObservableObject {
         configurationRevision += 1
         copy.stop()
         copy.revokeMirrorAuthorization()
+        // A new destination must not silently inherit opt-in repairs.
+        copy.auditSettings.repair = false
+        copy.auditSettings.enabled = false
+        scheduleArchiveAudit()
         if copy.automaticCopiesEnabled {
             copy.setAutomaticCopiesEnabled(false)
         }
