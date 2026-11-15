@@ -108,6 +108,10 @@ public enum LocalScanner {
                 throw JournalError.database("Unexpected path outside root")
             }
             let relative = String(effectivePath.dropFirst(prefix.count))
+            if excludeManaged && kind == "file" &&
+                (metadata.fileSize == nil || metadata.contentModificationDate == nil) {
+                throw JournalError.database("Metadati non disponibili durante la verifica completa")
+            }
             let item = TrackedItem(
                 relativePath: relative,
                 kind: kind,
