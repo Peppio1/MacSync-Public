@@ -61,6 +61,26 @@ final class MountedCopyController: ObservableObject {
     private(set) var historySessionID = UUID().uuidString
 
     func historyPath() throws -> String { try Self.databaseURL().path }
+    func loadLastCycle() {
+        guard !active, liveProgress == nil, lastRecordedCycle == nil else { return }
+        guard let path = try? historyPath(), FileManager.default.fileExists(atPath:path) else { return }
+        let session = historySessionID
+        DispatchQueue.global(qos:.utility).async { [weak self] in
+            do {
+                let history = try SyncCycleHistory(path:path)
+                let cycle = try history.cycles(limit:1).first
+                let stats = try cycle.map { try history.totals(cycleID:$0.id).stats } ?? SyncDashboardStats()
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.historySessionID==session, !self.active else { return }
+                    self.lastRecordedCycle = cycle
+                    self.lastCycleStats = stats
+                    self.lastCycleAt = cycle?.ended
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in self?.historyWarning = "Storico non disponibile: " + error.localizedDescription }
+            }
+        }
+    }
     @Published var sessionStats = SyncDashboardStats()
     @Published var lastCycleAt: Date?
     @Published var completedCycles = 0
@@ -819,6 +839,8 @@ final class MountedCopyController: ObservableObject {
                                 self?.seedInspectedCount = p.inspected
                                 self?.seedVerifiedCount = p.verified
                                 self?.seedReadBytes = p.bytesRead
+                                self?.seedTotalJobs = p.planned
+                                self?.seedCurrentPath = p.currentPath
                                 self?.seedStatus = "Verificati \(p.inspected) job, "
                                     + "\(p.verified) file identici, "
                                     + "\(p.missingOrDifferent) diversi, \(p.deferred) da rivedere"
