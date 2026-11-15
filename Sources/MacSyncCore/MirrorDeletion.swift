@@ -352,6 +352,17 @@ public final class MirrorDeletionWorker {
     private let armedAt: Date
     private let cancellation: MirrorDeletionCancellation
     private var appliedDuringSession = 0
+    public var onEvent: ((SyncCycleEvent) -> Void)?
+    public var onJobStarted: ((QueuedChange) -> Void)?
+    public var onPlan: ((Int) -> Void)?
+    public func plannedCount() throws -> Int {
+        guard let authorization else { return try journal.pendingDeleteCount(after: armedAt) }
+        return try journal.plannedDeleteCount(afterID: authorization.cutoff)
+    }
+    private func emit(_ kind: SyncEventKind, job: QueuedChange, mapping: MountedFolderMapping?,
+                      bytes: Int64? = nil, recoveryPath: String? = nil, detail: String = "") {
+        onEvent?(SyncCycleEvent(kind:kind,job:job,mapping:mapping,bytes:bytes,recoveryPath:recoveryPath,detail:detail))
+    }
     private let authorization: MirrorAuthorization?
     private let protections: MirrorProtectionSettings
 
@@ -524,7 +535,8 @@ public final class MirrorDeletionWorker {
             result.detail = "Cancellazioni sospese: copie o aggiornamenti ancora in coda"
             return result
         }
-        guard let upper = try journal.pendingDeleteUpperBound(afterID: authorization.cutoff) else { return result }
+        guard let upper = try journal.pendingDeleteUpperBound(afterID: authorization.cutoff) else { onPlan?(0); return result }
+        onPlan?(try journal.plannedDeleteCount(afterID: authorization.cutoff, throughID: upper))
         var length = Int64.max
         var lastID: Int64 = 0
         var availableRoots: Set<String> = []
@@ -558,9 +570,11 @@ public final class MirrorDeletionWorker {
                 // cannot evade the window by arriving mid-page.
                 try evaluateProtection(authorization: authorization, now: Date(), verifyEmpty: false)
             }
+            onJobStarted?(job)
             guard let mapping = mappings[job.rootID],
                   let baseline = baselines[job.rootID] else {
                 result.deferred += 1
+                emit(.deferred,job:job,mapping:nil,detail:"Coppia non configurata")
                 continue
             }
             do {
@@ -591,6 +605,7 @@ public final class MirrorDeletionWorker {
                         result.missing += 1
                         appliedDuringSession += 1
                     }
+                    emit(.missing,job:job,mapping:mapping)
                     continue
                 }
                 try verifyRoots(mapping, baseline)
@@ -626,9 +641,10 @@ public final class MirrorDeletionWorker {
                     // Never execute destructive operations on symlinks or
                     // directories with content.
                     if policy.recoveryEnabled {
-                        try moveToRecovery(destination, job: job, mapping: mapping,
+                        let recovered = try moveToRecovery(destination, job: job, mapping: mapping,
                             baseline: baseline, source: source, original: target)
                         result.recovered += 1
+                        emit(.recovered,job:job,mapping:mapping,bytes:Int64(target.st_size),recoveryPath:recovered)
                         try? log.record(level: .success, rootID: job.rootID,
                                         action: "mirror_recovered",
                                         relativePath: job.relativePath,
@@ -638,6 +654,7 @@ public final class MirrorDeletionWorker {
                         // automatic way to restore this file in MacSync.
                         try Self.unlinkLeaf(destination)
                         result.removed += 1
+                        emit(.deleted,job:job,mapping:mapping,bytes:Int64(target.st_size))
                         try? log.record(level: .success, rootID: job.rootID,
                                         action: "mirror_permanent",
                                         relativePath: job.relativePath,
@@ -650,6 +667,7 @@ public final class MirrorDeletionWorker {
                     else { throw MirrorDeletionFailure.destinationChanged }
                     try Self.removeEmptyDirectory(destination)
                     result.directories += 1
+                    emit(.directoryRemoved,job:job,mapping:mapping)
                 } else {
                     throw MirrorDeletionFailure.unsupportedObject
                 }
@@ -662,6 +680,7 @@ public final class MirrorDeletionWorker {
                     throw MirrorDeletionFailure.bulkDeletion(reason)
                 }
                 result.deferred += 1
+                emit(.deferred,job:job,mapping:mapping,detail:error.localizedDescription)
                 try? log.record(
                     level: .warning, rootID: job.rootID, action: "mirror_deferred",
                     relativePath: job.relativePath,
@@ -714,7 +733,7 @@ public final class MirrorDeletionWorker {
     private func moveToRecovery(
         _ destination: URL, job: QueuedChange, mapping: MountedFolderMapping,
         baseline: MirrorRootIdentity, source: URL, original: stat
-    ) throws {
+    ) throws -> String {
         let uuid = UUID().uuidString
         // Store original relative path inside a unique UUID namespace.
         // Hidden folder is inside target, always on the SAME mounted volume.
@@ -747,6 +766,7 @@ public final class MirrorDeletionWorker {
             mtime: Self.modificationTime(after),
             retentionDays: policy.retentionDays
         )
+        return recovered.path
     }
 
     private func verifyRoots(_ mapping: MountedFolderMapping, _ baseline: MirrorRootIdentity) throws {
