@@ -41,7 +41,10 @@ public enum LocalScanner {
 
     /// Validate the root identity again before accepting an enumeration.
     /// A vanished or replaced root must never be interpreted as empty.
-    public static func scan(root: URL, subtree: URL? = nil) throws -> [TrackedItem] {
+    public static func scan(root: URL, subtree: URL? = nil,
+                            excludeManaged: Bool = false,
+                            shouldContinue: () -> Bool = { true },
+                            onItem: (TrackedItem) -> Void = { _ in }) throws -> [TrackedItem] {
         let root = root.standardizedFileURL.resolvingSymlinksInPath()
         let target = (subtree ?? root).standardizedFileURL.resolvingSymlinksInPath()
         guard root.isFileURL, target.isFileURL,
@@ -105,12 +108,14 @@ public enum LocalScanner {
                 throw JournalError.database("Unexpected path outside root")
             }
             let relative = String(effectivePath.dropFirst(prefix.count))
-            found.append(TrackedItem(
+            let item = TrackedItem(
                 relativePath: relative,
                 kind: kind,
                 size: Int64(metadata.fileSize ?? 0),
                 modifiedAt: metadata.contentModificationDate?.timeIntervalSince1970 ?? 0
-            ))
+            )
+            found.append(item)
+            onItem(item)
             return kind
         }
 
@@ -135,6 +140,11 @@ public enum LocalScanner {
         }
         for case let file as URL in enumerator {
             if enumerationError != nil { break }
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            if excludeManaged && file.lastPathComponent.lowercased().hasPrefix(".macsync-") {
+                enumerator.skipDescendants()
+                continue
+            }
             do {
                 let kind = try record(file)
                 // DirectoryEnumerator already treats ordinary files as
@@ -318,12 +328,13 @@ public final class LocalInventory {
         rootID: String,
         root: URL,
         subtree: URL? = nil,
-        eventID: UInt64? = nil
+        eventID: UInt64? = nil,
+        onItem: (TrackedItem) -> Void = { _ in }
     ) throws -> ReconciliationResult {
         guard !rootID.isEmpty else { throw JournalError.database("Missing root identifier") }
         let root = root.standardizedFileURL.resolvingSymlinksInPath()
         let target = (subtree ?? root).standardizedFileURL.resolvingSymlinksInPath()
-        let rows = try LocalScanner.scan(root: root, subtree: subtree)
+        let rows = try LocalScanner.scan(root: root, subtree: subtree,onItem:onItem)
         let fullScan = target.path == root.path
         let scope = fullScan ? "" : String(target.path.dropFirst(root.path.count + 1))
 
