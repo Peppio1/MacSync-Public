@@ -189,7 +189,7 @@ public final class MountedFolderCopyWorker {
 
     // Internal fault injection for deterministic core tests, never configured
     // by the application or exposed to users.
-    enum Checkpoint: Equatable { case beforeStageCopy, afterStageCopy, afterBackup, afterPublish, beforeBackupCleanup }
+    enum Checkpoint: Equatable { case beforeStageCopy, afterStageCopy, afterBackup, afterPublish, beforeBackupCleanup, beforeFailedStageCleanup }
     var checkpoint: ((Checkpoint, URL) throws -> Void)?
 
     public init(
@@ -479,12 +479,22 @@ public final class MountedFolderCopyWorker {
             relativePath: job.relativePath, bytes: snapshot.size,
             message: "Inizio copia in staging"
         )
-        // FileManager.copyItem streams data without buffering full PSD/DNG in
-        // app RAM. Failure leaves journal pending and may leave a .partial file.
+        // Each attempt owns a fresh UUID path; never reuse a previous partial.
+        // Only discard an identifiable pre-publication temporary. When the
+        // share is offline or publication may have run, retain recovery data.
+        var stageAttempted = false
+        var publicationAttempted = false
+        var observedStage: Snapshot?
         do {
-            try checkpoint?(.beforeStageCopy, staging)
             try verifyRoots()
+            guard try CopyDirectoryIdentity.read(stageFolder) == stageIdentity,
+                  try optionalSnapshot(staging) == nil else {
+                throw MountedCopyError.unsafeFile
+            }
+            stageAttempted = true
+            try checkpoint?(.beforeStageCopy, staging)
             try fm.copyItem(at: src, to: staging)
+            observedStage = try readSnapshot(staging)
             try checkpoint?(.afterStageCopy, staging)
             try verifyRoots()
             guard try CopyDirectoryIdentity.read(stageFolder) == stageIdentity else {
@@ -492,7 +502,8 @@ public final class MountedFolderCopyWorker {
             }
             // Inspect the transferred staging file before publication.
             let staged = try readSnapshot(staging)
-            guard staged.kind == .file, staged.size == snapshot.size else {
+            guard staged.kind == .file, staged.size == snapshot.size,
+                  staged == observedStage else {
                 throw MountedCopyError.stagingIncomplete
             }
             guard try readSnapshot(src) == snapshot else {
@@ -537,12 +548,14 @@ public final class MountedFolderCopyWorker {
                       try CopyDirectoryIdentity.read(dst.deletingLastPathComponent()) == parent else {
                     throw MountedCopyError.stagingIncomplete
                 }
+                publicationAttempted = true
                 _ = try fm.replaceItemAt(dst, withItemAt: staging,
                                          backupItemName: nil, options: [])
                 backupForCleanup = (backupURL, backup, parent)
             } else {
                 // moveItem refuses an existing target; never overwrite a
                 // newly arrived file after an initially absent destination.
+                publicationAttempted = true
                 try fm.moveItem(at: staging, to: dst)
             }
             try checkpoint?(.afterPublish, dst)
@@ -564,8 +577,44 @@ public final class MountedFolderCopyWorker {
             return TransferOutcome(bytes: snapshot.size,
                 kind: targetExisted ? .updated : .created, backup: confirmedBackup)
         } catch {
-            // NEVER delete anything in the shared destination on failure;
-            // interrupted stage objects remain for future safe GC.
+            // Never touch destination photos or backups on failure. Only
+            // the current attempt's unpublished UUID partial can be removed.
+            if stageAttempted && !publicationAttempted {
+                do {
+                    try verifyRoots()
+                    guard try CopyDirectoryIdentity.read(stageFolder) == stageIdentity else {
+                        throw MountedCopyError.unsafeFile
+                    }
+                    if let failedStage = try optionalSnapshot(staging) {
+                        guard failedStage.kind == .file,
+                              observedStage == nil || observedStage == failedStage else {
+                            throw MountedCopyError.unsafeFile
+                        }
+                        try checkpoint?(.beforeFailedStageCleanup, staging)
+                        try verifyRoots()
+                        try ensureSafeParents(src, under: mapping.source, create: false)
+                        guard try readSnapshot(src) == snapshot,
+                              try CopyDirectoryIdentity.read(stageFolder) == stageIdentity,
+                              try optionalSnapshot(staging) == failedStage else {
+                            throw MountedCopyError.destinationChanging
+                        }
+                        guard staging.path.withCString({ Darwin.unlink($0) }) == 0 else {
+                            throw MountedCopyError.copyFailed(Int(errno))
+                        }
+                        try? log.record(level: .info, rootID: job.rootID, action: "staging_cleanup",
+                            relativePath: job.relativePath,
+                            message: "Temporaneo del tentativo fallito eliminato; nuovo tentativo da zero")
+                    }
+                } catch {
+                    try? log.record(level: .warning, rootID: job.rootID, action: "staging_retained",
+                        relativePath: job.relativePath,
+                        message: "Temporaneo non verificabile; controllare manualmente: " + staging.lastPathComponent)
+                }
+            } else if publicationAttempted {
+                try? log.record(level: .warning, rootID: job.rootID, action: "staging_retained",
+                    relativePath: job.relativePath,
+                    message: "Esito pubblicazione incerto; eventuale temporaneo non rimosso: " + staging.lastPathComponent)
+            }
             if let m = error as? MountedCopyError { throw m }
             throw MountedCopyError.copyFailed((error as NSError).code)
         }
