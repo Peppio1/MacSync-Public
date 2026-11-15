@@ -854,7 +854,7 @@ private struct MacSyncConfigurationView: View {
             settings.refreshNotificationPermission()
         }
         .sheet(isPresented: $showSummary) {
-            SyncHistorySheet(copy:copy,initialMetric:initialMetric)
+            SyncHistorySheet(copy:copy,model:model,initialMetric:initialMetric)
         }
         .sheet(isPresented: $showLog) {
             VStack(alignment: .leading, spacing: 12) {
