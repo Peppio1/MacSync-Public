@@ -118,11 +118,20 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 - Rinomine: rimane la procedura prudente upload prima, eventuale cancellazione dopo e solo in sessione mirror esplicitamente autorizzata. Non si interpreta una coincidenza di dimensione/data come prova di identità. Rinomina server-side e rimozione/riduzione dei backup restano da validare con SMB reale; nessuna ottimizzazione distruttiva introdotta. Nessun trasferimento di recupero parziale a offset implementato.
 - Il bootstrap di archivio preseeded continua a supportare verifica SHA-256 esplicita, che legge anche i dati attraverso SMB: non dichiarare gratuito in banda. Test sintetici non dimostrano prestazioni per 100 GB, affidabilità SMB, o sicurezza di un ambiente produttivo.
 
+## Decisione del 15/11/2026 — rinomine e separazione delle coppie
+
+- Per la v1.0 mantenere il motore semplice: una rinomina o uno spostamento genera un UPSERT del nuovo percorso e un DELETE del vecchio. Prima completare la copia, poi l'eventuale cancellazione secondo le impostazioni mirror e tutte le protezioni esistenti.
+- Nessun riconoscimento intelligente delle rinomine, nessun catalogo hash/inode dedicato alle rinomine, nessuna rinomina diretta lato server in questa fase. Non alterare la verifica SHA-256 già prevista per il bootstrap.
+- Le due coppie sorgente/destinazione restano separate: mai correlare file o eventi tra coppie, né spostare direttamente file sul server da una destinazione all'altra. Uno spostamento tra sorgenti comporta una nuova copia dall'iMac e l'eventuale eliminazione del vecchio percorso.
+- Backlog futuro facoltativo, solo su esplicita richiesta dell'utente: valutare il riconoscimento di rinomine/spostamenti esclusivamente all'interno della stessa coppia, distinguendo contenuto invariato da modificato. Richiede verifica dell'identità/contenuto, assenza di conflitti, consenso mirror, recupero dopo interruzione e collaudo SMB reale. In caso di incertezza, conservare la procedura copia prima/cancellazione dopo. Non è un requisito della v1.0.
+- Prima della v0.13 valutare separatamente con l'utente gli altri punti della v0.12.1: backup delle versioni sostituite, ripresa parziale, conservazione backup, limite cancellazioni per ciclo, protezioni contro cancellazioni massive, ripresa cancellazioni dopo riavvio, statistiche del traffico. Nessuna modifica funzionale senza accordo.
+
 ## Prossime fasi
-1. v0.13: organizzazione UI, impostazioni, dashboard, log e chiarezza degli stati (senza cambiare il motore).
-2. v0.14: distribuzione e aggiornamenti, rollback e conservazione dati locali.
-3. v1.0 RC: revisione e checklist di collaudo reale macOS/SMB, nessuna dichiarazione di produzione prima delle prove.
-4. Collaudo reale: Finder, permessi, login, notifiche, interruzioni, archivi sintetici grandi, prestazioni VPN, rinomina server-side, bootstrap e gestione dei temporanei/backup.
+1. v0.12.1: valutare e concordare i miglioramenti residui del motore (escluse le rinomine).
+2. v0.13: organizzazione UI, impostazioni, dashboard, log e chiarezza degli stati (senza cambiare il motore).
+3. v0.14: distribuzione e aggiornamenti, rollback e conservazione dati locali.
+4. v1.0 RC: revisione e checklist di collaudo reale macOS/SMB, nessuna dichiarazione di produzione prima delle prove.
+5. Collaudo reale: Finder, permessi, login, notifiche, interruzioni, archivi sintetici grandi, prestazioni VPN, bootstrap e gestione dei temporanei/backup.
 
 ## Definition of done
 Sincronizzazione automatica per molte settimane con ripresa da errori VPN, nessuna perdita di dati, nessun software aggiuntivo sul server, performance misurate e manuale essenziale. V0.12.0 è solo prototipo, non produzione.
