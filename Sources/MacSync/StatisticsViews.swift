@@ -160,7 +160,18 @@ enum HistoryMetric: String, Identifiable, CaseIterable {
 /// arbitrary path outside the stored archive. The current filesystem may
 /// no longer contain the version recorded by the cycle.
 @MainActor
-private func openArchivePath(root:String,relative:String,showFile:Bool) -> String? {
+private func openArchivePath(root:String,relative:String,showFile:Bool,
+                             rootID:String, destination:Bool, model:MacSyncViewModel) -> String? {
+    guard let pair=model.configuredPairs().first(where:{$0.id==rootID}),
+          (destination ? pair.destination:pair.path) == root else {
+        return "La coppia di cartelle è cambiata rispetto alla registrazione"
+    }
+    if destination {
+        guard let expected=pair.expected,expected.isStrongIdentity,
+              let actual=try? VolumeFingerprint.read(at:URL(fileURLWithPath:root)),actual==expected else {
+            return "Destinazione non montata o non corrispondente"
+        }
+    }
     guard !root.isEmpty,root.hasPrefix("/"),!relative.isEmpty,
           relative.split(separator:"/",omittingEmptySubsequences:false).allSatisfy({
               !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("\\") && !$0.contains("\0")
@@ -184,6 +195,7 @@ private func openArchivePath(root:String,relative:String,showFile:Bool) -> Strin
 
 struct SyncHistorySheet: View {
     @ObservedObject var copy: MountedCopyController
+    @ObservedObject var model: MacSyncViewModel
     @Environment(\.dismiss) private var dismiss
     let initialMetric:HistoryMetric?
     @State private var selected = "session"
@@ -267,7 +279,7 @@ struct SyncHistorySheet: View {
         .onAppear { loadCycles(reset:true); if let initialMetric { metric=initialMetric } }
         .onChange(of:selected) { _ in loadTotals() }
         .sheet(item:$metric) { item in
-            HistoryDetailsSheet(copy:copy,metric:item,cycleID:cycleID,sessionID:sessionID,roots:totals.byRoot.keys.sorted())
+            HistoryDetailsSheet(copy:copy,model:model,metric:item,cycleID:cycleID,sessionID:sessionID,roots:Array(Set(totals.byRoot.keys).union(model.configuredPairs().map(\.id))).sorted())
         }
     }
     private func loadCycles(reset:Bool) {
@@ -283,6 +295,9 @@ struct SyncHistorySheet: View {
                         if reset { cycles=values } else { cycles += values }
                         cycleOffset=offset+values.count; moreCycles=values.count==100
                         if selected != "session" && !cycles.contains(where:{$0.id==selected}) { selected="session" }
+                        if reset && initialMetric == nil && selected == "session", let last=cycles.first {
+                            selected=last.id
+                        }
                         busy=false; loadTotals()
                     }
                 } catch { DispatchQueue.main.async { busy=false; message=error.localizedDescription } }
@@ -305,6 +320,7 @@ struct SyncHistorySheet: View {
 
 private struct HistoryDetailsSheet:View {
     @ObservedObject var copy:MountedCopyController
+    @ObservedObject var model:MacSyncViewModel
     let metric:HistoryMetric
     let cycleID:String?
     let sessionID:String?
@@ -370,10 +386,10 @@ private struct HistoryDetailsSheet:View {
         let e=row.event
         if show && !canView(e) { return }
         if e.kind == .recovered,let path=e.recoveryPath,path.hasPrefix(e.targetRoot+"/.macsync-recovery/") {
-            message=openArchivePath(root:e.targetRoot,relative:String(path.dropFirst(e.targetRoot.count+1)),showFile:show) ?? ""
+            message=openArchivePath(root:e.targetRoot,relative:String(path.dropFirst(e.targetRoot.count+1)),showFile:show,rootID:e.rootID,destination:true,model:model) ?? ""
         } else {
             let useSource=(e.kind == .deferred || e.kind == .failed) && !e.isDeleteJob
-            message=openArchivePath(root:useSource ? e.sourceRoot:e.targetRoot,relative:e.relativePath,showFile:show) ?? ""
+            message=openArchivePath(root:useSource ? e.sourceRoot:e.targetRoot,relative:e.relativePath,showFile:show,rootID:e.rootID,destination:!useSource,model:model) ?? ""
         }
     }
     private func load(reset:Bool) {
@@ -457,11 +473,12 @@ struct ArchiveAuditPanel:View {
         }
         .onChange(of:copy.auditSettings){_ in runtime.scheduleArchiveAudit()}
         .sheet(isPresented:$showFindings){
-            if let report=copy.auditReport { AuditResultSheet(report:report,kind:selectedFinding) }
+            if let report=copy.auditReport { AuditResultSheet(model:model,report:report,kind:selectedFinding) }
         }
     }
 }
 private struct AuditResultSheet:View {
+    @ObservedObject var model:MacSyncViewModel
     let report:ArchiveAuditReport
     let kind:AuditFindingKind?
     @State private var search=""
@@ -503,7 +520,8 @@ private struct AuditResultSheet:View {
     }
     private func open(_ show:Bool) {
         guard let f=report.findings.first(where:{$0.id==selected}) else{return}
-        let root=f.kind == .extra || f.kind == .matching ? f.targetRoot:f.sourceRoot
-        message=openArchivePath(root:root,relative:f.relativePath,showFile:show) ?? ""
+        let destination=f.kind == .extra || f.kind == .matching
+        let root=destination ? f.targetRoot:f.sourceRoot
+        message=openArchivePath(root:root,relative:f.relativePath,showFile:show,rootID:f.rootID,destination:destination,model:model) ?? ""
     }
 }
