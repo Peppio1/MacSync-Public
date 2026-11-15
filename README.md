@@ -1,4 +1,4 @@
-# MacSync — prototipo v0.12.0
+# MacSync — prototipo v0.12.1
 
 Applicazione nativa macOS per la futura sincronizzazione **unidirezionale Sorgente → Destinazione**, con copie selettive a frequenza configurabile, SQLite e FSEvents.
 
@@ -179,6 +179,15 @@ Questa fase distingue due opzioni indipendenti nella sezione **Impostazioni di a
 - Test: ampio ciclo con 235 file locali, coda sintetica da 20.000 record, eventi concorrenti, retry, interruzione/ripartenza, destinazione indisponibile e file sintetico di 64 MiB con controllo SHA-256 nel test. Non misurano banda reale o RAM durante uso SMB.
 - Rinomine: rimane la procedura prudente upload prima, eventuale cancellazione dopo e solo in sessione mirror esplicitamente autorizzata. Non si interpreta una coincidenza di dimensione/data come prova di identità. Rinomina server-side e rimozione/riduzione dei backup restano da validare con SMB reale; nessuna ottimizzazione distruttiva introdotta. Nessun trasferimento di recupero parziale a offset implementato.
 - Il bootstrap di archivio preseeded continua a supportare verifica SHA-256 esplicita, che legge anche i dati attraverso SMB: non dichiarare gratuito in banda. Test sintetici non dimostrano prestazioni per 100 GB, affidabilità SMB, o sicurezza di un ambiente produttivo.
+
+## v0.12.1 — backup temporanei (punti 2 e 4 approvati)
+
+- Mantiene copia in staging, copia separata della vecchia versione e FileManager.replaceItemAt: nessuna nuova strategia atomica o rinomina remota. Non cambia le impostazioni mirror, la cartella recupero o le coppie di cartelle.
+- Il worker conferma in SQLite lo specifico job UPSERT con acknowledgeUpload: solo se il record è tuttora pendente e non superato da un evento più recente. Una conferma mancata conserva il backup.
+- Solo dopo conferma riuscita tenta una pulizia puntuale del backup creato nella stessa operazione. Verifica volume, identità della radice e della directory padre, percorsi sicuri e snapshot di sorgente, pubblicazione e backup. Nessuna enumerazione della share, nessuna eliminazione ricorsiva o per pattern. Se esito dubbio, lascia il backup; un fallimento di pulizia non riaccoda una copia già confermata. Log backup_start, backup_cleanup, backup_retained con riferimento al file e al nome del backup nelle segnalazioni. Il log è soggetto alla retention ordinaria.
+- Dopo crash/disconnessione, backup precedenti e residui non identificati con certezza non vengono puliti automaticamente, neanche dopo un retry riuscito. Possono richiedere manutenzione manuale. Non è un sistema di versioning, non garantisce durabilità dopo perdita di alimentazione e le verifiche correnti non sono una rilettura hash completa del file remoto. Collaudo reale SMB indispensabile per atomicità, permessi e comportamento in caso di guasto; nessuna rivendicazione di sicurezza assoluta in presenza di modifiche concorrenti tra controllo e unlink.
+- Rinviata a sviluppi futuri la sostituzione con backup nativo (senza copia integrale) previa prova SMB. Nessun risparmio di traffico VPN garantito per la copia di sicurezza; riduce l'accumulo delle copie di sicurezza delle operazioni confermate.
+- Punti 2/4 definiti; punto 3 ripresa parziale, punti 5/6/7 cancellazioni, punto 8 statistiche restano da concordare. Riconoscimento rinomine rinviato, nessuna correlazione tra coppie.
 
 ## Test, limiti e sicurezza
 
