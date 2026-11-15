@@ -412,6 +412,7 @@ public final class MirrorDeletionWorker {
     }
 
     public func runOnce(maxFiles: Int = 25) throws -> MirrorDeletionSummary {
+        if authorization != nil { return try runCycle(pageSize: maxFiles) }
         var result = MirrorDeletionSummary()
         guard !cancellation.isCancelled else {
             result.blocked = true
@@ -490,8 +491,14 @@ public final class MirrorDeletionWorker {
                 reason = "Limite numerico: \(counts.total) elementi"
             } else if protections.fractionEnabled && fraction >= Double(protections.percentLimit) {
                 reason = "Limite percentuale: \(Int(fraction))%"
-            } else if protections.emptyEnabled && counts.inventory == 0 {
-                if !verifyEmpty || (try LocalScanner.scan(root: mapping.source)).isEmpty {
+            } else if protections.emptyEnabled {
+                if verifyEmpty {
+                    if try LocalScanner.scan(root: mapping.source).isEmpty {
+                        reason = "Sorgente completamente vuota"
+                    }
+                } else if counts.inventory == 0 {
+                    // The persistent inventory has detected an empty source.
+                    // Conservatively latch even if a concurrent scan is pending.
                     reason = "Sorgente completamente vuota"
                 }
             }
@@ -558,7 +565,12 @@ public final class MirrorDeletionWorker {
             do {
                 try self.verifyRoots(mapping, baseline)
                 if !availableRoots.contains(job.rootID) {
-                    _ = try LocalScanner.scan(root: mapping.source)
+                    let currentInventory = try LocalScanner.scan(root: mapping.source)
+                    if authorization != nil && protections.emptyEnabled && currentInventory.isEmpty {
+                        let reason = job.rootID + ": Sorgente completamente vuota"
+                        try journal.latchMirrorBlock(reason)
+                        throw MirrorDeletionFailure.bulkDeletion(reason)
+                    }
                     availableRoots.insert(job.rootID)
                 }
                 guard try journal.deletionIsCurrent(
@@ -600,10 +612,14 @@ public final class MirrorDeletionWorker {
                     throw MirrorDeletionFailure.destinationChanged
                 }
                 if cancellation.isCancelled { break }
-                if authorization != nil {
+                if let authorization {
+                    try evaluateProtection(authorization: authorization, now: Date(), verifyEmpty: false)
                     try journal.recordMirrorAttempt(job)
                     // The reservation is durable before touching the share.
                     if cancellation.isCancelled { break }
+                    guard try journal.pendingUploads(limit: 1).isEmpty,
+                          try journal.deletionIsCurrent(id: job.id, rootID: job.rootID, relativePath: job.relativePath)
+                    else { throw MirrorDeletionFailure.pendingTransfer }
                 }
                 if Self.isRegularFile(target) {
                     // Never execute destructive operations on symlinks or
@@ -640,6 +656,9 @@ public final class MirrorDeletionWorker {
                     id: job.id, rootID: job.rootID, relativePath: job.relativePath
                 )
             } catch {
+                if let reason = try journal.mirrorBlockReason(), authorization != nil {
+                    throw MirrorDeletionFailure.bulkDeletion(reason)
+                }
                 result.deferred += 1
                 try? log.record(
                     level: .warning, rootID: job.rootID, action: "mirror_deferred",
