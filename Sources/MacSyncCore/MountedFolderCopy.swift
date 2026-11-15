@@ -413,7 +413,7 @@ public final class MountedFolderCopyWorker {
             // leaves a backup for manual inspection, never a blind deletion.
             try? log.record(level: .warning, rootID: job.rootID, action: "backup_retained",
                 relativePath: job.relativePath,
-                message: "Pulizia backup non confermata; verificare manualmente")
+                message: "Pulizia backup non confermata; verificare manualmente: " + backup.url.lastPathComponent)
         }
     }
 
@@ -522,6 +522,12 @@ public final class MountedFolderCopyWorker {
                 let backupURL = dst.deletingLastPathComponent()
                     .appendingPathComponent(".macsync-backup-" + UUID().uuidString)
                 let parent = try CopyDirectoryIdentity.read(dst.deletingLastPathComponent())
+                // Record the opaque backup name with the original relative
+                // path before creating it, so interrupted copies can be
+                // identified in the activity log without scanning the share.
+                try log.record(level: .info, rootID: job.rootID, action: "backup_start",
+                    relativePath: job.relativePath, bytes: originalTarget.size,
+                    message: "Backup temporaneo: " + backupURL.lastPathComponent)
                 try fm.copyItem(at: dst, to: backupURL)
                 let backup = try readSnapshot(backupURL)
                 try checkpoint?(.afterBackup, backupURL)
