@@ -61,6 +61,8 @@ final class MacSyncRuntime: ObservableObject {
                 guard let self, self.auditRevision == revision, self.copy.auditSettings.enabled else { return }
                 if self.model.monitoring {
                     self.copy.startArchiveAudit(sources:self.model.configuredPairs(),interactive:false)
+                } else {
+                    self.copy.noteAuditSkipped("monitoraggio locale non pronto; prossimo slot programmato")
                 }
                 self.scheduleArchiveAudit()
             }
