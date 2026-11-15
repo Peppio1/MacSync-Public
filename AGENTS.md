@@ -126,6 +126,15 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 - Backlog futuro facoltativo, solo su esplicita richiesta dell'utente: valutare il riconoscimento di rinomine/spostamenti esclusivamente all'interno della stessa coppia, distinguendo contenuto invariato da modificato. Richiede verifica dell'identità/contenuto, assenza di conflitti, consenso mirror, recupero dopo interruzione e collaudo SMB reale. In caso di incertezza, conservare la procedura copia prima/cancellazione dopo. Non è un requisito della v1.0.
 - Prima della v0.13 valutare separatamente con l'utente gli altri punti della v0.12.1: backup delle versioni sostituite, ripresa parziale, conservazione backup, limite cancellazioni per ciclo, protezioni contro cancellazioni massive, ripresa cancellazioni dopo riavvio, statistiche del traffico. Nessuna modifica funzionale senza accordo.
 
+## v0.12.1 — backup temporanei (punti 2 e 4 approvati)
+
+- Mantiene copia in staging, copia separata della vecchia versione e FileManager.replaceItemAt: nessuna nuova strategia atomica o rinomina remota. Non cambia le impostazioni mirror, la cartella recupero o le coppie di cartelle.
+- Il worker conferma in SQLite lo specifico job UPSERT con acknowledgeUpload: solo se il record è tuttora pendente e non superato da un evento più recente. Una conferma mancata conserva il backup.
+- Solo dopo conferma riuscita tenta una pulizia puntuale del backup creato nella stessa operazione. Verifica volume, identità della radice e della directory padre, percorsi sicuri e snapshot di sorgente, pubblicazione e backup. Nessuna enumerazione della share, nessuna eliminazione ricorsiva o per pattern. Se esito dubbio, lascia il backup; un fallimento di pulizia non riaccoda una copia già confermata. Log backup_start, backup_cleanup, backup_retained con riferimento al file e al nome del backup nelle segnalazioni. Il log è soggetto alla retention ordinaria.
+- Dopo crash/disconnessione, backup precedenti e residui non identificati con certezza non vengono puliti automaticamente, neanche dopo un retry riuscito. Possono richiedere manutenzione manuale. Non è un sistema di versioning, non garantisce durabilità dopo perdita di alimentazione e le verifiche correnti non sono una rilettura hash completa del file remoto. Collaudo reale SMB indispensabile per atomicità, permessi e comportamento in caso di guasto; nessuna rivendicazione di sicurezza assoluta in presenza di modifiche concorrenti tra controllo e unlink.
+- Rinviata a sviluppi futuri la sostituzione con backup nativo (senza copia integrale) previa prova SMB. Nessun risparmio di traffico VPN garantito per la copia di sicurezza; riduce l'accumulo delle copie di sicurezza delle operazioni confermate.
+- Punti 2/4 definiti; punto 3 ripresa parziale, punti 5/6/7 cancellazioni, punto 8 statistiche restano da concordare. Riconoscimento rinomine rinviato, nessuna correlazione tra coppie.
+
 ## Prossime fasi
 1. v0.12.1: valutare e concordare i miglioramenti residui del motore (escluse le rinomine).
 2. v0.13: organizzazione UI, impostazioni, dashboard, log e chiarezza degli stati (senza cambiare il motore).
@@ -134,4 +143,4 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 5. Collaudo reale: Finder, permessi, login, notifiche, interruzioni, archivi sintetici grandi, prestazioni VPN, bootstrap e gestione dei temporanei/backup.
 
 ## Definition of done
-Sincronizzazione automatica per molte settimane con ripresa da errori VPN, nessuna perdita di dati, nessun software aggiuntivo sul server, performance misurate e manuale essenziale. V0.12.0 è solo prototipo, non produzione.
+Sincronizzazione automatica per molte settimane con ripresa da errori VPN, nessuna perdita di dati, nessun software aggiuntivo sul server, performance misurate e manuale essenziale. V0.12.1 è solo prototipo, non produzione.
