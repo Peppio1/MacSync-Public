@@ -55,6 +55,12 @@ final class MountedCopyController: ObservableObject {
     }
     @Published var mirrorStatus = "Cancellazioni speculari non attive"
     @Published var lastCycleStats = SyncDashboardStats()
+    @Published private(set) var liveProgress: SyncLiveProgress?
+    @Published private(set) var lastRecordedCycle: SyncCycleRecord?
+    @Published private(set) var historyWarning = ""
+    private(set) var historySessionID = UUID().uuidString
+
+    func historyPath() throws -> String { try Self.databaseURL().path }
     @Published var sessionStats = SyncDashboardStats()
     @Published var lastCycleAt: Date?
     @Published var completedCycles = 0
@@ -317,6 +323,8 @@ final class MountedCopyController: ObservableObject {
             }
             let journal = try ChangeJournal(path: database.path)
             let log = try SyncActivityLog(path: database.path)
+            let sessionID = UUID().uuidString
+            historySessionID = sessionID
             // These workers are initialized only at the first healthy
             // scheduled slot, on the serial utility queue.
             var maps: [MountedFolderMapping] = []
@@ -345,7 +353,71 @@ final class MountedCopyController: ObservableObject {
             )
             timer.setEventHandler { [weak self] in
                 guard !cancellation.isCancelled else { return }
+                let cycleID = UUID().uuidString
+                let startedAt = Date()
+                let startUptime = ProcessInfo.processInfo.systemUptime
+                var progress = SyncLiveProgress(started: startedAt)
+                progress.phase = "Controllo connessione"
+                var totals = SyncHistoryTotals()
+                var historyError = ""
+                var history: SyncCycleHistory?
+                var outcomeState = "suspended"
+                var lastUpdate: TimeInterval = 0
+                do {
+                    let store = try SyncCycleHistory(path:database.path)
+                    try store.markInterrupted(exceptSession:sessionID)
+                    try store.begin(id:cycleID,sessionID:sessionID,at:startedAt)
+                    history = store
+                } catch { historyError = "Storico non disponibile: " + error.localizedDescription }
+                func publish(force: Bool = false) {
+                    let now = ProcessInfo.processInfo.systemUptime
+                    guard force || now-lastUpdate >= 0.2 else { return }
+                    lastUpdate = now
+                    let snapshot = progress
+                    DispatchQueue.main.async { [weak self] in
+                        guard !cancellation.isCancelled else { return }
+                        self?.liveProgress = snapshot
+                    }
+                }
+                func observe(_ event: SyncCycleEvent) {
+                    totals.add(event)
+                    progress.observe(event)
+                    do { try history?.append(cycleID:cycleID,event:event) }
+                    catch { historyError = "Storico incompleto: " + error.localizedDescription }
+                    publish()
+                }
+                func jobStarted(_ job: QueuedChange) {
+                    progress.currentFile = job.rootID + " / " + job.relativePath
+                    publish()
+                }
+                publish(force:true)
                 defer {
+                    worker?.onEvent = nil
+                    worker?.onJobStarted = nil
+                    worker?.onPhase = nil
+                    mirrorWorker?.onEvent = nil
+                    mirrorWorker?.onJobStarted = nil
+                    if cancellation.isCancelled { outcomeState = "interrupted" }
+                    if !historyError.isEmpty { outcomeState += "_history_incomplete" }
+                    let endedAt = Date()
+                    do {
+                        try history?.finish(id:cycleID,at:endedAt,seconds:ProcessInfo.processInfo.systemUptime-startUptime,state:outcomeState)
+                        try history?.prune(before:endedAt.addingTimeInterval(-365*86400))
+                    } catch { historyError = "Storico incompleto: " + error.localizedDescription }
+                    let saved = try? history?.cycles(limit:1).first
+                    let finalStats = totals.stats
+                    let warning = historyError
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.historySessionID == sessionID else { return }
+                        self.liveProgress = nil
+                        self.historyWarning = warning
+                        self.lastRecordedCycle = saved ?? nil
+                        self.lastCycleStats = finalStats
+                        self.sessionStats.accumulate(finalStats)
+                        self.completedCycles += 1
+                        self.lastCycleAt = endedAt
+                        self.refresh()
+                    }
                     // Keep the cadence anchored to its scheduled slot.
                     // If a long copy crosses a slot, skip that slot.
                     if !cancellation.isCancelled,
@@ -388,8 +460,9 @@ final class MountedCopyController: ObservableObject {
                     return
                 }
                 do {
-                    let startedAt = Date()
                     guard !cancellation.isCancelled else { return }
+                    progress.phase = "Analisi dei file"
+                    publish(force:true)
                     // A persistent safety latch blocks the ENTIRE cycle,
                     // even when mirror has subsequently been disabled.
                     if let reason = try journal.mirrorBlockReason() {
@@ -431,8 +504,21 @@ final class MountedCopyController: ObservableObject {
                         )
                     }
                     try mirrorWorker?.verifyBeforeSynchronization()
+                    let highWater = try journal.queueSequence()
+                    progress.planned = try journal.plannedUploadCount(throughID:highWater)
+                    progress.planned += try mirrorWorker?.plannedCount(throughID:highWater) ?? 0
+                    worker.onEvent = observe
+                    worker.onJobStarted = jobStarted
+                    worker.onPhase = { phase in
+                        progress.phase = phase
+                        publish()
+                    }
+                    mirrorWorker?.onEvent = observe
+                    mirrorWorker?.onJobStarted = jobStarted
+                    progress.phase = "Trasferimento"
+                    publish(force:true)
                     let summary = try worker.runCycle(
-                        enabled: true, pageSize: 100,
+                        enabled: true, pageSize: 100, throughID: highWater,
                         shouldContinue: { !cancellation.isCancelled },
                         onProgress: { progress in
                             DispatchQueue.main.async { [weak self] in
@@ -452,16 +538,24 @@ final class MountedCopyController: ObservableObject {
                         // Never remove the old server file before pending
                         // uploads have been completed, including after failure.
                         if try journal.pendingUploads(limit: 1).isEmpty {
-                            mirrorSummary = try mirrorWorker.runCycle(pageSize: 100)
+                            progress.phase = "Cancellazioni"
+                            publish(force:true)
+                            mirrorSummary = try mirrorWorker.runCycle(pageSize: 100, throughID:highWater)
+                            progress.phase = "Finalizzazione"
+                            publish(force:true)
                             expired = try mirrorWorker.pruneExpiredRecovery()
                         } else {
                             mirrorSummary.blocked = true
                             mirrorSummary.detail = "Cancellazioni sospese: copie o aggiornamenti ancora in coda"
                         }
                     }
-                    let dashboard = SyncDashboardStats(
-                        copy: summary, mirror: mirrorSummary, expiredRecovery: expired
-                    )
+                    progress.phase = "Finalizzazione"
+                    progress.currentFile = ""
+                    publish(force:true)
+                    totals.stats.deletionsBlocked = mirrorSummary.blocked
+                    outcomeState = summary.interrupted ? "interrupted" :
+                        (mirrorSummary.blocked ? "suspended" :
+                         ((summary.failed + summary.deferred + mirrorSummary.deferred > 0) ? "partial" : "completed"))
                     let mirrorDetails = !policy.enabled ? "" :
                         " Specchio: \(mirrorSummary.removed) eliminati, "
                         + "\(mirrorSummary.recovered) recuperabili, "
@@ -487,13 +581,11 @@ final class MountedCopyController: ObservableObject {
                         guard !cancellation.isCancelled else { return }
                         self?.status = result
                         self?.mirrorStatus = policy.enabled ? mirrorDetails : "Cancellazioni speculari disattivate"
-                        self?.lastCycleStats = dashboard
-                        self?.sessionStats.accumulate(dashboard)
-                        self?.completedCycles += 1
-                        self?.lastCycleAt = Date()
-                        self?.refresh()
+                        // History and totals are finalized even for interrupted cycles.
                     }
                 } catch {
+                    outcomeState = "suspended"
+                    totals.stats.deletionsBlocked = policy.enabled
                     try? log.record(
                         level: .error, rootID: "app", action: "cycle",
                         message: "Errore generale durante il ciclo di copia"
@@ -502,18 +594,15 @@ final class MountedCopyController: ObservableObject {
                         guard !cancellation.isCancelled else { return }
                         self?.status = "Sincronizzazione sospesa: " + error.localizedDescription
                         self?.mirrorStatus = error.localizedDescription
-                        let failed = SyncDashboardStats(failed: 1)
-                        self?.lastCycleStats = failed
-                        self?.sessionStats.accumulate(failed)
-                        self?.completedCycles += 1
-                        self?.lastCycleAt = Date()
-                        self?.refresh()
+                        // The durable history keeps already completed operations.
                     }
                 }
             }
             self.timer = timer
             nextScheduledRun = firstRun
             lastCycleStats = SyncDashboardStats()
+            lastRecordedCycle = nil
+            liveProgress = nil
             sessionStats = SyncDashboardStats()
             lastCycleAt = nil
             completedCycles = 0
