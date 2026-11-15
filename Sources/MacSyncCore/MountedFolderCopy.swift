@@ -186,6 +186,13 @@ public final class MountedFolderCopyWorker {
     private let now: () -> Date
     private let availableCapacity: (URL) throws -> Int64?
     private var nextAfterID: Int64 = 0
+    public var onEvent: ((SyncCycleEvent) -> Void)?
+    public var onJobStarted: ((QueuedChange) -> Void)?
+    public var onPlan: ((Int) -> Void)?
+    private func emit(_ kind: SyncEventKind, job: QueuedChange, mapping: MountedFolderMapping?,
+                      bytes: Int64? = nil, seconds: Double = 0, detail: String = "") {
+        onEvent?(SyncCycleEvent(kind:kind,job:job,mapping:mapping,bytes:bytes,seconds:seconds,detail:detail))
+    }
 
     // Internal fault injection for deterministic core tests, never configured
     // by the application or exposed to users.
@@ -237,7 +244,8 @@ public final class MountedFolderCopyWorker {
             summary.disabled = true
             return summary
         }
-        guard let upper = try journal.pendingUploadUpperBound() else { return summary }
+        guard let upper = try journal.pendingUploadUpperBound() else { onPlan?(0); return summary }
+        onPlan?(try journal.plannedUploadCount(throughID: upper))
         let size = max(1, min(pageSize, 1000))
         nextAfterID = 0
         while shouldContinue() {
@@ -264,13 +272,16 @@ public final class MountedFolderCopyWorker {
             }
             nextAfterID = job.id
             let started = Date()
+            onJobStarted?(job)
             guard let mapping = mappings[job.rootID] else {
                 summary.failed += 1
+                emit(.failed,job:job,mapping:nil,detail:"Coppia non configurata")
                 continue
             }
             do {
                 guard try journal.uploadIsCurrent(job) else {
                     summary.deferred += 1
+                    emit(.deferred,job:job,mapping:mapping,detail:"Evento non più corrente")
                     continue
                 }
                 let outcome = try transfer(job, mapping: mapping)
@@ -278,6 +289,7 @@ public final class MountedFolderCopyWorker {
                     // The published version may have been superseded while
                     // completing the job. Keep its backup for manual recovery.
                     summary.deferred += 1
+                    emit(.deferred,job:job,mapping:mapping,detail:"Conferma non acquisita")
                     try? log.record(level: .warning, rootID: job.rootID, action: "retry",
                         relativePath: job.relativePath,
                         message: "Conferma non acquisita; eventuale backup conservato")
@@ -298,6 +310,14 @@ public final class MountedFolderCopyWorker {
                 case .directoryCreated: summary.directoriesCreated += 1
                 case .directoryExisting: break
                 }
+                let eventKind: SyncEventKind
+                switch outcome.kind {
+                case .created: eventKind = .newFile
+                case .updated: eventKind = .updatedFile
+                case .directoryCreated: eventKind = .directoryCreated
+                case .directoryExisting: eventKind = .noChange
+                }
+                emit(eventKind,job:job,mapping:mapping,bytes:outcome.bytes,seconds:Date().timeIntervalSince(started))
                 let detail: String
                 switch outcome.kind {
                 case .created: detail = "Nuovo file copiato"
@@ -312,14 +332,16 @@ public final class MountedFolderCopyWorker {
                     message: detail
                 )
             } catch let error as MountedCopyError {
+                let eventKind: SyncEventKind
                 switch error {
                 case .sourceChanging, .sourceMissing, .volumeChanged,
                      .rootUnavailable, .insufficientSpace, .destinationChanging,
                      .sourceRootChanged:
-                    summary.deferred += 1
+                    summary.deferred += 1; eventKind = .deferred
                 default:
-                    summary.failed += 1
+                    summary.failed += 1; eventKind = .failed
                 }
+                emit(eventKind,job:job,mapping:mapping,seconds:Date().timeIntervalSince(started),detail:error.localizedDescription)
                 try log.record(
                     level: .warning, rootID: job.rootID, action: "retry",
                     relativePath: job.relativePath,
@@ -346,6 +368,7 @@ public final class MountedFolderCopyWorker {
                 }
             } catch {
                 summary.failed += 1
+                emit(.failed,job:job,mapping:mapping,seconds:Date().timeIntervalSince(started),detail:"Errore trasferimento")
                 try log.record(
                     level: .error, rootID: job.rootID, action: "retry",
                     relativePath: job.relativePath,
@@ -493,8 +516,13 @@ public final class MountedFolderCopyWorker {
             }
             stageAttempted = true
             try checkpoint?(.beforeStageCopy, staging)
+            let transferStart = ProcessInfo.processInfo.systemUptime
             try fm.copyItem(at: src, to: staging)
             observedStage = try readSnapshot(staging)
+            if let observedStage, observedStage.kind == .file {
+                emit(.stageCopy,job:job,mapping:mapping,bytes:observedStage.size,
+                     seconds:ProcessInfo.processInfo.systemUptime-transferStart)
+            }
             try checkpoint?(.afterStageCopy, staging)
             try verifyRoots()
             guard try CopyDirectoryIdentity.read(stageFolder) == stageIdentity else {
@@ -539,8 +567,13 @@ public final class MountedFolderCopyWorker {
                 try log.record(level: .info, rootID: job.rootID, action: "backup_start",
                     relativePath: job.relativePath, bytes: originalTarget.size,
                     message: "Backup temporaneo: " + backupURL.lastPathComponent)
+                let backupStart = ProcessInfo.processInfo.systemUptime
                 try fm.copyItem(at: dst, to: backupURL)
                 let backup = try readSnapshot(backupURL)
+                if backup.kind == .file {
+                    emit(.backupCopy,job:job,mapping:mapping,bytes:backup.size,
+                         seconds:ProcessInfo.processInfo.systemUptime-backupStart)
+                }
                 try checkpoint?(.afterBackup, backupURL)
                 try verifyPublication()
                 guard backup.kind == .file, backup.size == originalTarget.size,
