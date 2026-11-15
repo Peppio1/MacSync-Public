@@ -355,9 +355,9 @@ public final class MirrorDeletionWorker {
     public var onEvent: ((SyncCycleEvent) -> Void)?
     public var onJobStarted: ((QueuedChange) -> Void)?
     public var onPlan: ((Int) -> Void)?
-    public func plannedCount() throws -> Int {
+    public func plannedCount(throughID: Int64 = Int64.max) throws -> Int {
         guard let authorization else { return try journal.pendingDeleteCount(after: armedAt) }
-        return try journal.plannedDeleteCount(afterID: authorization.cutoff)
+        return try journal.plannedDeleteCount(afterID: authorization.cutoff, throughID: throughID)
     }
     private func emit(_ kind: SyncEventKind, job: QueuedChange, mapping: MountedFolderMapping?,
                       bytes: Int64? = nil, recoveryPath: String? = nil, detail: String = "") {
@@ -525,7 +525,7 @@ public final class MirrorDeletionWorker {
 
     /// Entire eligible snapshot, ordered deepest/longest paths first.
     /// Every job is attempted once, even if older jobs are deferred.
-    public func runCycle(pageSize: Int = 100) throws -> MirrorDeletionSummary {
+    public func runCycle(pageSize: Int = 100, throughID: Int64? = nil) throws -> MirrorDeletionSummary {
         guard let authorization else { return try runOnce(maxFiles: 100) }
         var result = MirrorDeletionSummary()
         try verifyBeforeSynchronization()
@@ -535,7 +535,8 @@ public final class MirrorDeletionWorker {
             result.detail = "Cancellazioni sospese: copie o aggiornamenti ancora in coda"
             return result
         }
-        guard let upper = try journal.pendingDeleteUpperBound(afterID: authorization.cutoff) else { onPlan?(0); return result }
+        guard let pendingUpper = try journal.pendingDeleteUpperBound(afterID: authorization.cutoff) else { onPlan?(0); return result }
+        let upper = min(pendingUpper, throughID ?? Int64.max)
         onPlan?(try journal.plannedDeleteCount(afterID: authorization.cutoff, throughID: upper))
         var length = Int64.max
         var lastID: Int64 = 0
@@ -577,6 +578,7 @@ public final class MirrorDeletionWorker {
                 emit(.deferred,job:job,mapping:nil,detail:"Coppia non configurata")
                 continue
             }
+            var recordedRemoval = false
             do {
                 try self.verifyRoots(mapping, baseline)
                 if !availableRoots.contains(job.rootID) {
@@ -644,6 +646,7 @@ public final class MirrorDeletionWorker {
                         let recovered = try moveToRecovery(destination, job: job, mapping: mapping,
                             baseline: baseline, source: source, original: target)
                         result.recovered += 1
+                        recordedRemoval = true
                         emit(.recovered,job:job,mapping:mapping,bytes:Int64(target.st_size),recoveryPath:recovered)
                         try? log.record(level: .success, rootID: job.rootID,
                                         action: "mirror_recovered",
@@ -654,6 +657,7 @@ public final class MirrorDeletionWorker {
                         // automatic way to restore this file in MacSync.
                         try Self.unlinkLeaf(destination)
                         result.removed += 1
+                        recordedRemoval = true
                         emit(.deleted,job:job,mapping:mapping,bytes:Int64(target.st_size))
                         try? log.record(level: .success, rootID: job.rootID,
                                         action: "mirror_permanent",
@@ -667,6 +671,7 @@ public final class MirrorDeletionWorker {
                     else { throw MirrorDeletionFailure.destinationChanged }
                     try Self.removeEmptyDirectory(destination)
                     result.directories += 1
+                    recordedRemoval = true
                     emit(.directoryRemoved,job:job,mapping:mapping)
                 } else {
                     throw MirrorDeletionFailure.unsupportedObject
@@ -680,7 +685,7 @@ public final class MirrorDeletionWorker {
                     throw MirrorDeletionFailure.bulkDeletion(reason)
                 }
                 result.deferred += 1
-                emit(.deferred,job:job,mapping:mapping,detail:error.localizedDescription)
+                if !recordedRemoval { emit(.deferred,job:job,mapping:mapping,detail:error.localizedDescription) }
                 try? log.record(
                     level: .warning, rootID: job.rootID, action: "mirror_deferred",
                     relativePath: job.relativePath,
@@ -719,6 +724,8 @@ public final class MirrorDeletionWorker {
                 try Self.unlinkLeaf(safe)
                 try manifest.forget(id: item.id)
                 removed += 1
+                let job = QueuedChange(id:0,rootID:item.rootID,relativePath:item.managedRelativePath,kind:.delete,recordedAt:now)
+                emit(.recoveryExpired,job:job,mapping:mapping,bytes:item.size)
                 try? log.record(level: .info, rootID: item.rootID, action: "recovery_expired",
                                 message: "Elemento di recupero scaduto e rimosso")
             } catch {
