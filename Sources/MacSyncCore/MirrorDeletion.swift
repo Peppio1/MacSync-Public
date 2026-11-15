@@ -132,7 +132,8 @@ public struct MirrorAuthorization: Codable, Equatable, Sendable {
             let before = try captureIdentity(map, journal: journal, count: 0)
             let inventory = try LocalScanner.scan(root: map.source)
             let after = try captureIdentity(map, journal: journal, count: 0)
-            guard before == after else { throw MirrorDeletionFailure.sourceChanged }
+            guard before == after, try journal.inventoryPathsMatch(rootID: map.rootID, scanned: inventory)
+            else { throw MirrorDeletionFailure.noBaseline }
             let identity = MirrorRootIdentity(device: after.device, inode: after.inode,
                 volume: after.volume, targetDevice: after.targetDevice,
                 targetInode: after.targetInode, baselineCount: inventory.count)
@@ -625,7 +626,8 @@ public final class MirrorDeletionWorker {
                     // Never execute destructive operations on symlinks or
                     // directories with content.
                     if policy.recoveryEnabled {
-                        try moveToRecovery(destination, job: job, mapping: mapping)
+                        try moveToRecovery(destination, job: job, mapping: mapping,
+                            baseline: baseline, source: source, original: target)
                         result.recovered += 1
                         try? log.record(level: .success, rootID: job.rootID,
                                         action: "mirror_recovered",
@@ -710,7 +712,8 @@ public final class MirrorDeletionWorker {
     }
 
     private func moveToRecovery(
-        _ destination: URL, job: QueuedChange, mapping: MountedFolderMapping
+        _ destination: URL, job: QueuedChange, mapping: MountedFolderMapping,
+        baseline: MirrorRootIdentity, source: URL, original: stat
     ) throws {
         let uuid = UUID().uuidString
         // Store original relative path inside a unique UUID namespace.
@@ -720,7 +723,19 @@ public final class MirrorDeletionWorker {
         guard try Self.statIfPresent(recovered) == nil else {
             throw MirrorDeletionFailure.destinationChanged
         }
-        try mapping.verify()
+        try verifyRoots(mapping, baseline)
+        guard !cancellation.isCancelled,
+              try journal.pendingUploads(limit: 1).isEmpty,
+              try journal.deletionIsCurrent(id: job.id, rootID: job.rootID, relativePath: job.relativePath),
+              try Self.statIfPresent(source) == nil,
+              let latest = try Self.statIfPresent(destination),
+              latest.st_dev == original.st_dev, latest.st_ino == original.st_ino,
+              latest.st_mode == original.st_mode, latest.st_size == original.st_size,
+              latest.st_mtimespec.tv_sec == original.st_mtimespec.tv_sec,
+              latest.st_mtimespec.tv_nsec == original.st_mtimespec.tv_nsec,
+              latest.st_ctimespec.tv_sec == original.st_ctimespec.tv_sec,
+              latest.st_ctimespec.tv_nsec == original.st_ctimespec.tv_nsec
+        else { throw MirrorDeletionFailure.destinationChanged }
         try FileManager.default.moveItem(at: destination, to: recovered)
         guard let after = try Self.statIfPresent(recovered), Self.isRegularFile(after) else {
             throw MirrorDeletionFailure.destinationChanged
