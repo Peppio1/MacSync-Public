@@ -362,6 +362,24 @@ public final class ChangeJournal {
         return identity
     }
 
+    public func plannedUploadCount(throughID: Int64 = Int64.max) throws -> Int {
+        try plannedCount(kind: .upsert, afterID: 0, throughID: throughID)
+    }
+
+    public func plannedDeleteCount(afterID: Int64, throughID: Int64 = Int64.max) throws -> Int {
+        try plannedCount(kind: .delete, afterID: afterID, throughID: throughID)
+    }
+
+    private func plannedCount(kind: ChangeKind, afterID: Int64, throughID: Int64) throws -> Int {
+        let stmt = try prepare("SELECT COUNT(*) FROM change_queue WHERE completed=0 AND kind=? AND id>? AND id<=?;")
+        defer { sqlite3_finalize(stmt) }
+        try bind(kind.rawValue, at: 1, in: stmt)
+        guard sqlite3_bind_int64(stmt, 2, afterID) == SQLITE_OK,
+              sqlite3_bind_int64(stmt, 3, throughID) == SQLITE_OK,
+              sqlite3_step(stmt) == SQLITE_ROW else { throw databaseFailure() }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
     public func pendingDeleteUpperBound(afterID: Int64) throws -> Int64? {
         let stmt = try prepare("SELECT MAX(id) FROM change_queue WHERE completed=0 AND kind='delete' AND id>?;")
         defer { sqlite3_finalize(stmt) }
