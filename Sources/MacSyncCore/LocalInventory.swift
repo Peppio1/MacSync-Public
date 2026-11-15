@@ -142,7 +142,9 @@ public enum LocalScanner {
             if enumerationError != nil { break }
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             if excludeManaged && file.lastPathComponent.lowercased().hasPrefix(".macsync-") {
-                enumerator.skipDescendants()
+                if try file.resourceValues(forKeys: [.isDirectoryKey,.isSymbolicLinkKey]).isDirectory == true {
+                    enumerator.skipDescendants()
+                }
                 continue
             }
             do {
