@@ -76,6 +76,111 @@ final class MountedCopyController: ObservableObject {
     @Published var seedVerifiedCount = 0
     @Published var seedInspectedCount = 0
     @Published var seedReadBytes: Int64 = 0
+    @Published var seedTotalJobs = 0
+    @Published var seedStartedAt: Date?
+    @Published var seedCurrentPath = ""
+    @Published var auditSettings: ArchiveAuditSettings = {
+        guard let data = UserDefaults.standard.data(forKey:"MacSync.archiveAuditSettings"),
+              let value = try? JSONDecoder().decode(ArchiveAuditSettings.self,from:data),
+              value.next(after:Date()) != nil else { return ArchiveAuditSettings() }
+        return value
+    }() {
+        didSet {
+            if let data = try? JSONEncoder().encode(auditSettings) {
+                UserDefaults.standard.set(data,forKey:"MacSync.archiveAuditSettings")
+            }
+        }
+    }
+    @Published private(set) var auditBusy = false
+    @Published private(set) var auditProgress: ArchiveAuditProgress?
+    @Published private(set) var auditReport: ArchiveAuditReport?
+    @Published private(set) var auditStatus = "Verifica completa non eseguita"
+    private var auditCancel: SeedVerificationCancellation?
+
+    func loadLastAudit() {
+        guard auditReport == nil, !auditBusy else { return }
+        if let url = try? Self.databaseURL().deletingLastPathComponent().appendingPathComponent("last-audit.json"),
+           let bytes = try? Data(contentsOf:url),
+           let report = try? JSONDecoder().decode(ArchiveAuditReport.self,from:bytes) {
+            auditReport = report
+            auditStatus = "Ultima verifica: " + report.ended.formatted(date:.abbreviated,time:.standard)
+        }
+    }
+
+    /// Both scheduled audit and ordinary copy use the SAME serial queue.
+    /// A request during an active cycle waits for that cycle to finish.
+    func startArchiveAudit(sources: [(id:String,path:String,destination:String,expected:VolumeFingerprint?)],
+                           interactive: Bool) {
+        guard !auditBusy && !maintaining && !seedBusy else { return }
+        let settings = auditSettings
+        let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
+        guard !configured.isEmpty,
+              configured.allSatisfy({ !$0.path.isEmpty && !$0.destination.isEmpty && $0.expected?.isStrongIdentity == true })
+        else { auditStatus = "Configura prima le coppie e i volumi"; return }
+        if interactive {
+            let alert = NSAlert()
+            alert.messageText = "Avviare verifica completa?"
+            alert.informativeText = (settings.mode == .deep
+                ? "La verifica SHA-256 legge integralmente i file confrontabili, anche via VPN. "
+                : "La verifica rapida enumera entrambe le cartelle e confronta i metadati. ")
+                + (settings.repair ? "Le differenze sicure verranno accodate come copie/aggiornamenti." : "Modalità solo diagnostica.")
+                + " Nessun file presente soltanto sul server verrà cancellato."
+            alert.addButton(withTitle:"Avvia verifica"); alert.addButton(withTitle:"Annulla")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        let db: URL
+        do { db = try Self.databaseURL() }
+        catch { auditStatus = error.localizedDescription; return }
+        let cancel = SeedVerificationCancellation()
+        auditCancel = cancel
+        auditBusy = true
+        maintaining = true
+        invalidateSeedReport()
+        auditStatus = "Verifica in attesa della coda di lavoro"
+        queue.async { [weak self] in
+            do {
+                if cancel.isCancelled { throw SeedVerificationError.cancelled }
+                let journal = try ChangeJournal(path:db.path)
+                let maps = try configured.map {
+                    try MountedFolderMapping(rootID:$0.id,source:URL(fileURLWithPath:$0.path),
+                        target:URL(fileURLWithPath:$0.destination),expectedTargetVolume:$0.expected)
+                }
+                let report = try ArchiveAudit(journal:journal,mappings:maps).run(mode:settings.mode,repair:settings.repair,
+                    cancellation:cancel,progress:{ snapshot in
+                        DispatchQueue.main.async { [weak self] in
+                            self?.auditProgress = snapshot
+                            self?.auditStatus = snapshot.phase
+                        }
+                    })
+                var storageWarning = ""
+                do {
+                    let data = try JSONEncoder().encode(report)
+                    try data.write(to:db.deletingLastPathComponent().appendingPathComponent("last-audit.json"),options:.atomic)
+                } catch { storageWarning = " — impossibile salvare lo storico della verifica" }
+                let warning = storageWarning
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.auditReport = report
+                    self.auditStatus = "Verifica conclusa: " + String(report.queuedRepairs) + " riparazioni accodate" + warning
+                    self.auditProgress = nil
+                    self.auditBusy = false
+                    self.maintaining = false
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    self?.auditStatus = cancel.isCancelled ? "Verifica annullata" : "Verifica non riuscita: " + error.localizedDescription
+                    self?.auditProgress = nil
+                    self?.auditBusy = false
+                    self?.maintaining = false
+                }
+            }
+        }
+    }
+
+    func cancelArchiveAudit() {
+        auditCancel?.cancel()
+        auditStatus = "Annullamento richiesto"
+    }
     private var seedReport: SeedVerificationReport?
     private var seedVerifier: SeededArchiveVerifier?
     private var seedCancel: SeedVerificationCancellation?
@@ -700,6 +805,9 @@ final class MountedCopyController: ObservableObject {
             seedVerifiedCount = 0
             seedInspectedCount = 0
             seedReadBytes = 0
+            seedTotalJobs = try journal.plannedUploadCount()
+            seedStartedAt = Date()
+            seedCurrentPath = ""
             seedStatus = "Analisi SHA-256 in corso (lettura locale e SMB)…"
 
             queue.async { [weak self] in
@@ -832,7 +940,7 @@ final class MountedCopyController: ObservableObject {
     func preview(sources: [(
         id: String, path: String, destination: String, expected: VolumeFingerprint?
     )]) {
-        guard !active else {
+        guard !active && !maintaining && !seedBusy else {
             previewStatus = "Ferma le copie di prova prima dell'anteprima"
             return
         }
@@ -1027,6 +1135,7 @@ final class MountedCopyController: ObservableObject {
     }
 
     func stop() {
+        auditCancel?.cancel()
         sessionCancellation?.cancel()
         sessionCancellation = nil
         nextScheduledRun = nil
