@@ -61,11 +61,99 @@ final class MountedCopyResilienceTests: XCTestCase {
         XCTAssertEqual(try read(target), "old original")
         XCTAssertEqual(try pending(f).count, 1)
         let stage = f.dst.appendingPathComponent(".macsync-staging")
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: stage.path).count, 1)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: stage.path).count, 0)
         // A fresh worker + fresh SQLite connection emulate restart.
         XCTAssertEqual(try worker(f).runOnce(enabled: true).updated, 1)
         XCTAssertEqual(try read(target), "new image content")
         XCTAssertTrue(try pending(f).isEmpty)
+    }
+
+    func testRepeatedInterruptedCopiesDoNotAccumulateCurrentAttemptPartials() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let target = f.dst.appendingPathComponent("photo.psd")
+        try write("old original", to: target)
+        let stage = f.dst.appendingPathComponent(".macsync-staging")
+        try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false)
+        let unrelated = stage.appendingPathComponent(UUID().uuidString + ".partial")
+        try write("historical temporary", to: unrelated)
+        for _ in 0..<3 {
+            let w = try worker(f)
+            w.checkpoint = { phase, url in
+                if phase == .beforeStageCopy {
+                    try Data("incomplete".utf8).write(to: url)
+                    throw SimulatedFailure.connectionLost
+                }
+            }
+            XCTAssertEqual(try w.runCycle(enabled: true).failed, 1)
+            XCTAssertEqual(try pending(f).count, 1)
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: stage.path), [unrelated.lastPathComponent])
+            XCTAssertEqual(try read(target), "old original")
+        }
+        XCTAssertEqual(try worker(f).runCycle(enabled: true).updated, 1)
+        XCTAssertTrue(try pending(f).isEmpty)
+        XCTAssertEqual(try read(target), "new image content")
+        XCTAssertEqual(try read(unrelated), "historical temporary")
+    }
+
+    func testStageChangedBeforeFailedCleanupIsRetained() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let w = try worker(f)
+        var partial: URL?
+        w.checkpoint = { phase, url in
+            if phase == .beforeStageCopy {
+                partial = url
+                try Data("incomplete".utf8).write(to: url)
+                throw SimulatedFailure.connectionLost
+            }
+            if phase == .beforeFailedStageCleanup {
+                try self.write("externally changed temporary", to: url)
+            }
+        }
+        XCTAssertEqual(try w.runCycle(enabled: true).failed, 1)
+        XCTAssertEqual(try read(XCTUnwrap(partial)), "externally changed temporary")
+        XCTAssertEqual(try pending(f).count, 1)
+        XCTAssertTrue(try SyncActivityLog(path: f.db).recent().contains { $0.action == "staging_retained" })
+    }
+
+    func testStageDirectoryReplacedBeforeCleanupIsNotTouched() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let stage = f.dst.appendingPathComponent(".macsync-staging")
+        let detached = f.base.appendingPathComponent("detached")
+        let w = try worker(f)
+        var name: String?
+        w.checkpoint = { phase, url in
+            if phase == .beforeStageCopy {
+                name = url.lastPathComponent
+                try Data("incomplete".utf8).write(to: url)
+                throw SimulatedFailure.connectionLost
+            }
+            if phase == .beforeFailedStageCleanup {
+                try FileManager.default.moveItem(at: stage, to: detached)
+                try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false)
+                try self.write("unrelated replacement", to: stage.appendingPathComponent(url.lastPathComponent))
+            }
+        }
+        XCTAssertEqual(try w.runCycle(enabled: true).failed, 1)
+        let expected = try XCTUnwrap(name)
+        XCTAssertEqual(try read(stage.appendingPathComponent(expected)), "unrelated replacement")
+        XCTAssertEqual(try read(detached.appendingPathComponent(expected)), "incomplete")
+        XCTAssertEqual(try pending(f).count, 1)
+    }
+
+    func testUncertainPublicationDoesNotAttemptStageCleanup() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let w = try worker(f)
+        w.checkpoint = { phase, _ in
+            if phase == .afterPublish { throw SimulatedFailure.connectionLost }
+            if phase == .beforeFailedStageCleanup { XCTFail("Publication was already attempted") }
+        }
+        XCTAssertEqual(try w.runCycle(enabled: true).failed, 1)
+        XCTAssertEqual(try pending(f).count, 1)
+        XCTAssertEqual(try read(f.dst.appendingPathComponent("photo.psd")), "new image content")
     }
 
     func testSourceChangesAfterStageAreNeverPublished() throws {
