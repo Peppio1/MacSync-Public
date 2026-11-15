@@ -67,6 +67,8 @@ public struct SeedVerificationProgress {
     public let missingOrDifferent: Int
     public let deferred: Int
     public let bytesRead: Int64
+    public let planned: Int
+    public let currentPath: String
 }
 
 public struct SeedVerificationReport {
@@ -106,9 +108,19 @@ public final class SeededArchiveVerifier {
         var differences = 0
         var deferred = 0
         var bytesRead: Int64 = 0
-        var lastByteProgress: Int64 = 0
+        var lastProgress: Double = 0
         let upper = try journal.pendingUploadUpperBound() ?? 0
-
+        let planned = try journal.plannedUploadCount(throughID:upper)
+        var currentPath = ""
+        func publish(force:Bool = false) {
+            let now = ProcessInfo.processInfo.systemUptime
+            guard force || now-lastProgress >= 0.25 else { return }
+            lastProgress = now
+            progress?(SeedVerificationProgress(inspected:inspected,verified:matches.count,
+                missingOrDifferent:differences,deferred:deferred,bytesRead:bytesRead,
+                planned:planned,currentPath:currentPath))
+        }
+        publish(force:true)
         while true {
             if cancellation.isCancelled { throw SeedVerificationError.cancelled }
             let jobs = try journal.pendingUploads(limit: 250, afterID: cursor, throughID: upper)
@@ -116,9 +128,12 @@ public final class SeededArchiveVerifier {
             for job in jobs {
                 if cancellation.isCancelled { throw SeedVerificationError.cancelled }
                 cursor = job.id
-                inspected += 1
+                currentPath = job.rootID + " / " + job.relativePath
+                publish()
                 guard let mapping = mappings[job.rootID] else {
                     deferred += 1
+                    inspected += 1
+                    publish()
                     continue
                 }
                 do {
@@ -127,14 +142,7 @@ public final class SeededArchiveVerifier {
                         onBytesRead: { chunkSize in
                             let (sum, overflow) = bytesRead.addingReportingOverflow(chunkSize)
                             bytesRead = overflow ? Int64.max : sum
-                            if bytesRead - lastByteProgress >= 64 * 1024 * 1024 {
-                                lastByteProgress = bytesRead
-                                progress?(SeedVerificationProgress(
-                                    inspected: inspected, verified: matches.count,
-                                    missingOrDifferent: differences, deferred: deferred,
-                                    bytesRead: bytesRead
-                                ))
-                            }
+                            publish()
                         }
                     )
                     if let verified { matches.append(verified) }
@@ -147,20 +155,12 @@ public final class SeededArchiveVerifier {
                     // as synced on the basis of metadata alone.
                     deferred += 1
                 }
-                if inspected % 25 == 0 {
-                    progress?(SeedVerificationProgress(
-                        inspected: inspected, verified: matches.count,
-                        missingOrDifferent: differences, deferred: deferred,
-                        bytesRead: bytesRead
-                    ))
-                }
+                inspected += 1
+                publish()
             }
         }
-        progress?(SeedVerificationProgress(
-            inspected: inspected, verified: matches.count,
-            missingOrDifferent: differences, deferred: deferred,
-            bytesRead: bytesRead
-        ))
+        currentPath = ""
+        publish(force:true)
         return SeedVerificationReport(
             matches: matches, inspected: inspected,
             missingOrDifferent: differences, deferred: deferred,
