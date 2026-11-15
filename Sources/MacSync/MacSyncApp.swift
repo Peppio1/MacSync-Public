@@ -783,6 +783,13 @@ private struct MacSyncConfigurationView: View {
                             }
                             Text("Tempo: " + elapsedText(elapsed) + " · Lettura media locale + SMB: " +
                                 SyncLiveProgress.formatRate(Double(copy.seedReadBytes)/elapsed))
+                            if !copy.seedCurrentPath.isEmpty {
+                                Text(copy.seedCurrentPath).lineLimit(1).truncationMode(.middle)
+                            }
+                            if copy.seedInspectedCount > 0 && copy.seedTotalJobs > copy.seedInspectedCount {
+                                let remaining = elapsed * Double(copy.seedTotalJobs-copy.seedInspectedCount) / Double(copy.seedInspectedCount)
+                                Text("Tempo rimanente indicativo: " + elapsedText(remaining))
+                            }
                         }.font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -838,6 +845,7 @@ private struct MacSyncConfigurationView: View {
         .frame(minWidth: 700, minHeight: 580)
         .onAppear {
             copy.loadLastAudit()
+            copy.loadLastCycle()
             loginAtStartup.refresh()
             settings.refreshNotificationPermission()
         }
