@@ -189,7 +189,7 @@ public final class MountedFolderCopyWorker {
 
     // Internal fault injection for deterministic core tests, never configured
     // by the application or exposed to users.
-    enum Checkpoint: Equatable { case beforeStageCopy, afterStageCopy, afterBackup, afterPublish }
+    enum Checkpoint: Equatable { case beforeStageCopy, afterStageCopy, afterBackup, afterPublish, beforeBackupCleanup }
     var checkpoint: ((Checkpoint, URL) throws -> Void)?
 
     public init(
@@ -274,7 +274,21 @@ public final class MountedFolderCopyWorker {
                     continue
                 }
                 let outcome = try transfer(job, mapping: mapping)
-                try journal.markCompleted(id: job.id)
+                guard try journal.acknowledgeUpload(job) else {
+                    // The published version may have been superseded while
+                    // completing the job. Keep its backup for manual recovery.
+                    summary.deferred += 1
+                    try? log.record(level: .warning, rootID: job.rootID, action: "retry",
+                        relativePath: job.relativePath,
+                        message: "Conferma non acquisita; eventuale backup conservato")
+                    continue
+                }
+                // Cleanup is strictly post-acknowledgment, never part of the
+                // replacement transaction. Failure cannot turn a confirmed
+                // copy into another upload or authorize a second cleanup.
+                if let backup = outcome.backup {
+                    cleanupConfirmedBackup(backup, mapping: mapping, job: job)
+                }
                 summary.copied += 1
                 let (totalBytes, overflow) = summary.bytes.addingReportingOverflow(outcome.bytes)
                 summary.bytes = overflow ? Int64.max : totalBytes
@@ -291,7 +305,7 @@ public final class MountedFolderCopyWorker {
                 case .directoryCreated: detail = "Cartella creata"
                 case .directoryExisting: detail = "Cartella già presente"
                 }
-                try log.record(
+                try? log.record(
                     level: .success, rootID: job.rootID, action: "copy",
                     relativePath: job.relativePath, bytes: outcome.bytes,
                     durationSeconds: Date().timeIntervalSince(started),
@@ -347,6 +361,60 @@ public final class MountedFolderCopyWorker {
     private struct TransferOutcome {
         let bytes: Int64
         let kind: TransferKind
+        let backup: ConfirmedBackup?
+
+        init(bytes: Int64, kind: TransferKind, backup: ConfirmedBackup? = nil) {
+            self.bytes = bytes
+            self.kind = kind
+            self.backup = backup
+        }
+    }
+
+    // A capability scoped to this successful transfer only. Never find
+    // backups by filename pattern or automatically clean older artifacts.
+    private struct ConfirmedBackup {
+        let url: URL
+        let snapshot: Snapshot
+        let targetRoot: CopyDirectoryIdentity
+        let parent: CopyDirectoryIdentity
+        let sourceURL: URL
+        let sourceSnapshot: Snapshot
+        let publishedURL: URL
+        let publishedSnapshot: Snapshot
+    }
+
+    private func cleanupConfirmedBackup(_ backup: ConfirmedBackup,
+                                        mapping: MountedFolderMapping,
+                                        job: QueuedChange) {
+        do {
+            try checkpoint?(.beforeBackupCleanup, backup.url)
+            try mapping.verify()
+            guard try CopyDirectoryIdentity.read(mapping.target) == backup.targetRoot else {
+                throw MountedCopyError.volumeChanged
+            }
+            try ensureSafeParents(backup.url, under: mapping.target, create: false)
+            try ensureSafeParents(backup.sourceURL, under: mapping.source, create: false)
+            guard backup.url.deletingLastPathComponent() == backup.publishedURL.deletingLastPathComponent(),
+                  try CopyDirectoryIdentity.read(backup.url.deletingLastPathComponent()) == backup.parent,
+                  try readSnapshot(backup.sourceURL) == backup.sourceSnapshot,
+                  try readSnapshot(backup.publishedURL) == backup.publishedSnapshot,
+                  try readSnapshot(backup.url) == backup.snapshot else {
+                throw MountedCopyError.destinationChanging
+            }
+            // unlink refuses directories and does not follow leaf symlinks.
+            // There is no recursive removal or directory enumeration.
+            guard backup.url.path.withCString({ Darwin.unlink($0) }) == 0 else {
+                throw MountedCopyError.copyFailed(Int(errno))
+            }
+            try? log.record(level: .success, rootID: job.rootID, action: "backup_cleanup",
+                relativePath: job.relativePath, message: "Backup temporaneo eliminato dopo conferma")
+        } catch {
+            // No automatic retry: a disconnect, identity change or crash
+            // leaves a backup for manual inspection, never a blind deletion.
+            try? log.record(level: .warning, rootID: job.rootID, action: "backup_retained",
+                relativePath: job.relativePath,
+                message: "Pulizia backup non confermata; verificare manualmente")
+        }
     }
 
     private func transfer(_ job: QueuedChange, mapping: MountedFolderMapping) throws -> TransferOutcome {
@@ -447,20 +515,25 @@ public final class MountedFolderCopyWorker {
                 }
             }
             try verifyPublication()
+            var backupForCleanup: (url: URL, snapshot: Snapshot, parent: CopyDirectoryIdentity)?
             if let originalTarget {
                 // Preserve the exact previous target before publishing. If
                 // another client modifies it during backup, do not overwrite.
                 let backupURL = dst.deletingLastPathComponent()
                     .appendingPathComponent(".macsync-backup-" + UUID().uuidString)
+                let parent = try CopyDirectoryIdentity.read(dst.deletingLastPathComponent())
                 try fm.copyItem(at: dst, to: backupURL)
+                let backup = try readSnapshot(backupURL)
                 try checkpoint?(.afterBackup, backupURL)
                 try verifyPublication()
-                let backup = try readSnapshot(backupURL)
-                guard backup.kind == .file, backup.size == originalTarget.size else {
+                guard backup.kind == .file, backup.size == originalTarget.size,
+                      try readSnapshot(backupURL) == backup,
+                      try CopyDirectoryIdentity.read(dst.deletingLastPathComponent()) == parent else {
                     throw MountedCopyError.stagingIncomplete
                 }
                 _ = try fm.replaceItemAt(dst, withItemAt: staging,
                                          backupItemName: nil, options: [])
+                backupForCleanup = (backupURL, backup, parent)
             } else {
                 // moveItem refuses an existing target; never overwrite a
                 // newly arrived file after an initially absent destination.
@@ -476,8 +549,14 @@ public final class MountedFolderCopyWorker {
             guard try readSnapshot(src) == snapshot else {
                 throw MountedCopyError.sourceChanging
             }
+            let confirmedBackup = backupForCleanup.map {
+                ConfirmedBackup(url: $0.url, snapshot: $0.snapshot,
+                    targetRoot: targetIdentity, parent: $0.parent,
+                    sourceURL: src, sourceSnapshot: snapshot,
+                    publishedURL: dst, publishedSnapshot: published)
+            }
             return TransferOutcome(bytes: snapshot.size,
-                kind: targetExisted ? .updated : .created)
+                kind: targetExisted ? .updated : .created, backup: confirmedBackup)
         } catch {
             // NEVER delete anything in the shared destination on failure;
             // interrupted stage objects remain for future safe GC.
