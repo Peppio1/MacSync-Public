@@ -362,6 +362,48 @@ public final class ChangeJournal {
         return identity
     }
 
+    /// Explicit audit repair: only UPSERTs, never replace a live queue job
+    /// or rebind a source. A concurrent monitor event wins.
+    public func enqueueAuditRepairs(_ items: [(rootID:String, sourcePath:String, item:TrackedItem)],
+                                    shouldContinue: () -> Bool = { true }) throws -> Int {
+        guard !items.isEmpty else { return 0 }
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            let stmt = try prepare("""
+                INSERT INTO change_queue(root_id,relative_path,kind,recorded_at)
+                SELECT ?1,?2,'upsert',?3
+                WHERE EXISTS(SELECT 1 FROM watched_roots WHERE root_id=?1 AND absolute_path=?4)
+                  AND NOT EXISTS(SELECT 1 FROM change_queue WHERE root_id=?1 AND relative_path=?2 AND completed=0)
+                  AND NOT EXISTS(SELECT 1 FROM file_inventory WHERE root_id=?1 AND relative_path=?2
+                     AND (kind<>?5 OR (kind='file' AND (file_size<>?6 OR ABS(modified_at-?7)>0.002))));
+                """)
+            defer { sqlite3_finalize(stmt) }
+            var count = 0
+            for entry in items {
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                let item = entry.item
+                guard item.kind == "file" || item.kind == "directory",
+                      !item.relativePath.isEmpty,
+                      item.relativePath.split(separator:"/",omittingEmptySubsequences:false).allSatisfy({
+                        !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("\\") && !$0.contains(":") &&
+                        !$0.lowercased().hasPrefix(".macsync-")
+                      }) else { continue }
+                sqlite3_reset(stmt); sqlite3_clear_bindings(stmt)
+                try bind(entry.rootID,at:1,in:stmt)
+                try bind(item.relativePath,at:2,in:stmt)
+                guard sqlite3_bind_double(stmt,3,Date().timeIntervalSince1970) == SQLITE_OK else { throw databaseFailure() }
+                try bind(entry.sourcePath,at:4,in:stmt); try bind(item.kind,at:5,in:stmt)
+                guard sqlite3_bind_int64(stmt,6,item.size) == SQLITE_OK,
+                      sqlite3_bind_double(stmt,7,item.modifiedAt) == SQLITE_OK,
+                      sqlite3_step(stmt) == SQLITE_DONE else { throw databaseFailure() }
+                count += Int(sqlite3_changes(connection))
+            }
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            try execute("COMMIT;")
+            return count
+        } catch { try? execute("ROLLBACK;"); throw error }
+    }
+
     public func plannedUploadCount(throughID: Int64 = Int64.max) throws -> Int {
         try plannedCount(kind: .upsert, afterID: 0, throughID: throughID)
     }
