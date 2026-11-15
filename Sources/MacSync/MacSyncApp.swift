@@ -15,12 +15,14 @@ final class MacSyncViewModel: ObservableObject {
     @Published var message = "Monitoraggio non configurato"
     @Published var monitoring = false
     @Published var pendingCount = 0
+    @Published var scanProgress: ArchiveAuditProgress?
 
     private lazy var service = LocalMonitorService { [weak self] update in
         DispatchQueue.main.async { [weak self] in
             self?.message = update.message
             self?.monitoring = update.monitoring
             self?.pendingCount = update.pendingChanges
+            self?.scanProgress = update.scanProgress
         }
     }
 
@@ -299,88 +301,6 @@ private struct SyncSummaryMetric: View {
     }
 }
 
-/// A dedicated readable view; no source/target paths are displayed here.
-private struct SyncSummarySheet: View {
-    @ObservedObject var copy: MountedCopyController
-    @Environment(\.dismiss) private var dismiss
-    @State private var selectedScope = "session"
-
-    private var data: SyncDashboardStats {
-        selectedScope == "session" ? copy.sessionStats : copy.lastCycleStats
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Label("Riepilogo sincronizzazione", systemImage: "chart.bar.xaxis")
-                    .font(.title2.bold())
-                Spacer()
-                Button("Chiudi") { dismiss() }
-            }
-            Picker("Periodo", selection: $selectedScope) {
-                Text("Sessione corrente").tag("session")
-                Text("Ultimo ciclo").tag("last")
-            }
-            .pickerStyle(.segmented)
-            .frame(maxWidth: 340)
-
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
-                SyncSummaryMetric(title: "Nuovi file", count: data.newFiles, symbol: "doc.badge.plus")
-                SyncSummaryMetric(title: "File aggiornati", count: data.updatedFiles, symbol: "arrow.triangle.2.circlepath")
-                SyncSummaryMetric(title: "Eliminati definitivamente", count: data.permanentlyDeleted, symbol: "trash")
-                SyncSummaryMetric(title: "Spostati nel recupero", count: data.movedToRecovery, symbol: "archivebox")
-                SyncSummaryMetric(title: "Errori", count: data.failed, symbol: "exclamationmark.triangle")
-                SyncSummaryMetric(title: "Rimandati", count: data.deferred, symbol: "clock")
-            }
-            Divider()
-            HStack {
-                Text("Dati trasferiti")
-                Spacer()
-                Text(ByteCountFormatter.string(fromByteCount: data.bytesTransferred, countStyle: .file))
-                    .monospacedDigit()
-            }
-            HStack {
-                Text("Cartelle create / rimosse")
-                Spacer()
-                Text("\(data.createdDirectories) / \(data.removedDirectories)")
-                    .monospacedDigit()
-            }
-            HStack {
-                Text("Recuperi scaduti eliminati")
-                Spacer()
-                Text(data.expiredRecovery.formatted()).monospacedDigit()
-            }
-            HStack {
-                Text("Cicli completati nella sessione")
-                Spacer()
-                Text(copy.completedCycles.formatted()).monospacedDigit()
-            }
-            HStack {
-                Text("Ultimo controllo")
-                Spacer()
-                if let when = copy.lastCycleAt {
-                    Text(when.formatted(date: .abbreviated, time: .standard))
-                } else {
-                    Text("Non ancora eseguito").foregroundStyle(.secondary)
-                }
-            }
-            if data.deletionsBlocked {
-                Label("Una protezione ha bloccato le cancellazioni. Consulta il registro.",
-                      systemImage: "hand.raised.fill")
-                    .foregroundStyle(.orange)
-                    .font(.callout)
-            }
-            Spacer(minLength: 0)
-            Text("I contatori sono relativi alla sessione di prova corrente; il registro SQLite conserva lo storico delle attività. I file in coda non sono conteggiati come completati.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(22)
-        .frame(width: 690, height: 620)
-    }
-}
-
 private struct MacSyncConfigurationView: View {
     @ObservedObject var model: MacSyncViewModel
     @ObservedObject var copy: MountedCopyController
@@ -389,6 +309,7 @@ private struct MacSyncConfigurationView: View {
     @ObservedObject var destinations: DestinationStatusController
     @State private var showLog = false
     @State private var showSummary = false
+    @State private var initialMetric: HistoryMetric?
     @StateObject private var loginAtStartup = LaunchAtLoginController()
 
     private func picker(_ slot: Int, destination: Bool) -> some View {
@@ -396,7 +317,7 @@ private struct MacSyncConfigurationView: View {
             title: destination ? "Destinazione" : "Sorgente",
             path: model.folderPath(slot: slot, destination: destination),
             choose: {
-                guard !copy.seedBusy else { return }
+                guard !copy.seedBusy && !copy.maintaining else { return }
                 runtime.stopCopiesForCurrentLaunch()
                 copy.invalidateSeedReport()
                 let previous = model.folderPath(slot: slot, destination: destination)
@@ -406,7 +327,7 @@ private struct MacSyncConfigurationView: View {
                 }
             },
             onFolderDropped: { url in
-                guard !copy.seedBusy else { return }
+                guard !copy.seedBusy && !copy.maintaining else { return }
                 runtime.stopCopiesForCurrentLaunch()
                 copy.invalidateSeedReport()
                 let previous = model.folderPath(slot: slot, destination: destination)
@@ -416,7 +337,7 @@ private struct MacSyncConfigurationView: View {
                 }
             }
         )
-        .disabled(copy.seedBusy)
+        .disabled(copy.seedBusy || copy.maintaining)
     }
 
     private func pair(_ slot: Int, title: String) -> some View {
@@ -668,27 +589,30 @@ private struct MacSyncConfigurationView: View {
 
                 Divider()
                 VStack(alignment: .leading, spacing: 9) {
+                    if let scan = model.scanProgress {
+                        AuditProgressView(progress:scan)
+                    }
+                    LiveSyncPanel(copy:copy)
                     HStack {
                         Text("Riepilogo sincronizzazione").font(.headline)
                         Spacer()
-                        Button("Apri riepilogo…") { showSummary = true }
+                        Button("Apri riepilogo…") { initialMetric = nil; showSummary = true }
                     }
                     HStack(spacing: 8) {
-                        SyncSummaryMetric(title: "Nuovi", count: copy.sessionStats.newFiles,
-                                          symbol: "doc.badge.plus")
-                        SyncSummaryMetric(title: "Aggiornati", count: copy.sessionStats.updatedFiles,
-                                          symbol: "arrow.triangle.2.circlepath")
-                        SyncSummaryMetric(title: "Eliminati", count: copy.sessionStats.permanentlyDeleted,
-                                          symbol: "trash")
-                        SyncSummaryMetric(title: "Recuperati", count: copy.sessionStats.movedToRecovery,
-                                          symbol: "archivebox")
-                        SyncSummaryMetric(title: "Errori", count: copy.sessionStats.failed,
-                                          symbol: "exclamationmark.triangle")
+                        ForEach(HistoryMetric.dashboard) { metric in
+                            Button {
+                                initialMetric = metric; showSummary = true
+                            } label: {
+                                SyncSummaryMetric(title:metric.title,count:metric.count(copy.sessionStats),symbol:metric.symbol)
+                            }.buttonStyle(.plain)
+                        }
                     }
                     Text("Totali della sessione; apri il riepilogo per ultimi cicli, file rimandati e dimensioni trasferite.")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
 
+                Divider()
+                ArchiveAuditPanel(copy:copy,runtime:runtime,model:model)
                 Divider()
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Cancellazioni speculari")
@@ -849,6 +773,19 @@ private struct MacSyncConfigurationView: View {
                     Spacer()
                 }
 
+                if copy.seedBusy, let start = copy.seedStartedAt {
+                    TimelineView(.periodic(from:start,by:1)) { ctx in
+                        let elapsed = max(0.001,ctx.date.timeIntervalSince(start))
+                        VStack(alignment:.leading,spacing:6) {
+                            if copy.seedTotalJobs > 0 {
+                                ProgressView(value:min(0.99,Double(copy.seedInspectedCount)/Double(copy.seedTotalJobs)))
+                                Text("Job analizzati: \(copy.seedInspectedCount) / \(copy.seedTotalJobs)")
+                            }
+                            Text("Tempo: " + elapsedText(elapsed) + " · Lettura media locale + SMB: " +
+                                SyncLiveProgress.formatRate(Double(copy.seedReadBytes)/elapsed))
+                        }.font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 Text(copy.seedStatus)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -900,6 +837,7 @@ private struct MacSyncConfigurationView: View {
         }
         .frame(minWidth: 700, minHeight: 580)
         .onAppear {
+            copy.loadLastAudit()
             loginAtStartup.refresh()
             settings.refreshNotificationPermission()
         }
@@ -908,7 +846,7 @@ private struct MacSyncConfigurationView: View {
             settings.refreshNotificationPermission()
         }
         .sheet(isPresented: $showSummary) {
-            SyncSummarySheet(copy: copy)
+            SyncHistorySheet(copy:copy,initialMetric:initialMetric)
         }
         .sheet(isPresented: $showLog) {
             VStack(alignment: .leading, spacing: 12) {
