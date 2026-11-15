@@ -694,8 +694,10 @@ private struct MacSyncConfigurationView: View {
                     Text("Cancellazioni speculari")
                         .font(.headline)
                     Toggle(
-                        "Abilita cancellazione speculare (solo dopo conferma all'avvio)",
-                        isOn: $copy.mirrorEnabled
+                        "Abilita cancellazioni speculari (autorizzazione persistente)",
+                        isOn: Binding(get: { copy.mirrorEnabled }, set: {
+                            copy.setMirrorEnabled($0, sources: model.configuredPairs())
+                        })
                     )
                     .disabled(copy.active || copy.seedBusy || copy.maintaining)
 
@@ -733,6 +735,45 @@ private struct MacSyncConfigurationView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Protezioni facoltative — disattivate di default").font(.headline)
+                        Toggle("Limite numerico", isOn: $copy.mirrorProtections.absoluteEnabled)
+                        if copy.mirrorProtections.absoluteEnabled {
+                            HStack {
+                                Text("Numero massimo di elementi")
+                                Spacer()
+                                TextField("Limite", value: $copy.mirrorProtections.absoluteLimit, format: .number)
+                                    .frame(width: 100)
+                            }
+                        }
+                        Toggle("Limite percentuale", isOn: $copy.mirrorProtections.fractionEnabled)
+                        if copy.mirrorProtections.fractionEnabled {
+                            HStack {
+                                Text("Percentuale massima")
+                                Spacer()
+                                TextField("Percentuale", value: $copy.mirrorProtections.percentLimit, format: .number)
+                                    .frame(width: 70)
+                                Text("%")
+                            }
+                        }
+                        if copy.mirrorProtections.absoluteEnabled || copy.mirrorProtections.fractionEnabled {
+                            Picker("Finestra mobile", selection: $copy.mirrorProtections.windowHours) {
+                                ForEach([1, 6, 12, 24, 48], id: \.self) { hours in
+                                    Text("\(hours) h").tag(hours)
+                                }
+                            }
+                        }
+                        Toggle("Protezione sorgente completamente vuota", isOn: $copy.mirrorProtections.emptyEnabled)
+                        if !copy.mirrorProtections.isValid {
+                            Text("Valori consentiti: 1–1.000.000 elementi, 1–100%.").foregroundStyle(.orange)
+                        }
+                        Text("Le soglie sono valutate per ciascuna coppia. Un'anomalia blocca tutta la sincronizzazione fino alla verifica manuale. Le protezioni tecniche non sono disattivabili.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                        Button("Esamina e rimuovi blocco di sicurezza…") {
+                            copy.clearMirrorSafetyBlock()
+                        }
+                    }
+                    .disabled(copy.active || copy.seedBusy || copy.maintaining)
                     Text(copy.mirrorStatus)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
