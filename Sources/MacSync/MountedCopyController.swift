@@ -17,10 +17,26 @@ final class MountedCopyController: ObservableObject {
     }
     @Published private(set) var automaticSession = false
 
-    // Preferences describe the desired policy only. Actual destructive work
-    // remains OFF until explicit activation of the current test session.
-    @Published var mirrorEnabled = UserDefaults.standard.bool(forKey: "MacSync.mirrorEnabled") {
-        didSet { UserDefaults.standard.set(mirrorEnabled, forKey: "MacSync.mirrorEnabled") }
+    // A legacy Boolean is deliberately NOT a persisted deletion consent.
+    private static let authorizationKey = "MacSync.mirrorAuthorization.v1"
+    private static func loadAuthorization() -> MirrorAuthorization? {
+        guard let data = UserDefaults.standard.data(forKey: authorizationKey) else { return nil }
+        return try? JSONDecoder().decode(MirrorAuthorization.self, from: data)
+    }
+    private var mirrorAuthorization = MountedCopyController.loadAuthorization()
+    private var mirrorConfigurationRevision = 0
+    @Published private(set) var mirrorEnabled = MountedCopyController.loadAuthorization() != nil
+    @Published var mirrorProtections: MirrorProtectionSettings = {
+        guard let data = UserDefaults.standard.data(forKey: "MacSync.mirrorProtections.v1"),
+              let settings = try? JSONDecoder().decode(MirrorProtectionSettings.self, from: data),
+              settings.isValid else { return MirrorProtectionSettings() }
+        return settings
+    }() {
+        didSet {
+            if mirrorProtections.isValid, let data = try? JSONEncoder().encode(mirrorProtections) {
+                UserDefaults.standard.set(data, forKey: "MacSync.mirrorProtections.v1")
+            }
+        }
     }
     @Published var mirrorRecovery = (UserDefaults.standard.object(forKey: "MacSync.mirrorRecovery") as? Bool) ?? true {
         didSet { UserDefaults.standard.set(mirrorRecovery, forKey: "MacSync.mirrorRecovery") }
@@ -63,6 +79,98 @@ final class MountedCopyController: ObservableObject {
         ).appendingPathComponent("MacSync", isDirectory: true)
         try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
         return support.appendingPathComponent("inventory.sqlite")
+    }
+
+    /// Explicit setting action only; verification runs on the existing serial
+    /// worker queue and never opens an additional recurring SMB probe.
+    func setMirrorEnabled(_ enabled: Bool, sources: [(id: String, path: String, destination: String, expected: VolumeFingerprint?)]) {
+        guard !active && !maintaining && !seedBusy else { return }
+        if !enabled {
+            revokeMirrorAuthorization()
+            return
+        }
+        guard !mirrorEnabled else { return }
+        let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
+        guard !configured.isEmpty, configured.allSatisfy({
+            !$0.path.isEmpty && !$0.destination.isEmpty && $0.expected?.isStrongIdentity == true
+        }) else {
+            mirrorStatus = "Configura prima sorgenti e destinazioni e verifica i volumi."
+            return
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Abilitare le cancellazioni speculari?"
+        alert.informativeText = """
+        MacSync potrà rimuovere dalla destinazione i file eliminati dalla sorgente, anche dopo un riavvio quando la sincronizzazione automatica è attiva. Se il recupero è disabilitato, la rimozione sarà definitiva.
+
+        L'autorizzazione vale solo per le coppie verificate e per nuovi eventi dopo la verifica. Le protezioni tecniche restano sempre attive; le protezioni quantitative sono facoltative. Usa esclusivamente dati di prova.
+        """
+        alert.addButton(withTitle: "Abilita cancellazioni speculari")
+        alert.addButton(withTitle: "Annulla")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let database: URL
+        do { database = try Self.databaseURL() }
+        catch { mirrorStatus = error.localizedDescription; return }
+        let revision = mirrorConfigurationRevision
+        maintaining = true
+        mirrorStatus = "Verifica delle cartelle per l'autorizzazione persistente..."
+        queue.async { [weak self] in
+            do {
+                let journal = try ChangeJournal(path: database.path)
+                let maps = try configured.map {
+                    try MountedFolderMapping(rootID: $0.id,
+                        source: URL(fileURLWithPath: $0.path),
+                        target: URL(fileURLWithPath: $0.destination), expectedTargetVolume: $0.expected)
+                }
+                let authorization = try MirrorAuthorization.capture(journal: journal, mappings: maps)
+                let data = try JSONEncoder().encode(authorization)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.maintaining = false
+                    guard self.mirrorConfigurationRevision == revision else { return }
+                    UserDefaults.standard.set(data, forKey: Self.authorizationKey)
+                    self.mirrorAuthorization = authorization
+                    self.mirrorEnabled = true
+                    self.mirrorStatus = "Cancellazioni autorizzate per le cartelle verificate; scelta persistente."
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.maintaining = false
+                    guard self.mirrorConfigurationRevision == revision else { return }
+                    self.mirrorStatus = "Autorizzazione non acquisita: " + error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func revokeMirrorAuthorization() {
+        mirrorConfigurationRevision += 1
+        UserDefaults.standard.removeObject(forKey: Self.authorizationKey)
+        UserDefaults.standard.removeObject(forKey: "MacSync.mirrorEnabled")
+        mirrorAuthorization = nil
+        mirrorEnabled = false
+        mirrorStatus = "Cancellazioni speculari disattivate"
+    }
+
+    func clearMirrorSafetyBlock() {
+        guard !active && !maintaining && !seedBusy else { return }
+        do {
+            let journal = try ChangeJournal(path: Self.databaseURL().path)
+            guard let reason = try journal.mirrorBlockReason() else {
+                mirrorStatus = "Nessun blocco persistente da rimuovere"
+                return
+            }
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Rimuovere il blocco di sicurezza?"
+            alert.informativeText = reason + "\n\nControlla le sorgenti e gli eventi pendenti. Se le soglie sono ancora superate, MacSync si bloccherà di nuovo al prossimo ciclo. Nessun file viene eliminato da questo pulsante."
+            alert.addButton(withTitle: "Ho verificato — rimuovi blocco")
+            alert.addButton(withTitle: "Annulla")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            try journal.clearMirrorBlock()
+            mirrorStatus = "Blocco rimosso; tutti i controlli saranno ripetuti prima del prossimo ciclo"
+        } catch { mirrorStatus = "Impossibile rimuovere il blocco: " + error.localizedDescription }
     }
 
     func start(
@@ -108,9 +216,9 @@ final class MountedCopyController: ObservableObject {
 
         \(deleteWarning)
 
-        Le cancellazioni precedenti a questa attivazione non saranno eseguite.
-        La protezione blocca cancellazioni massive e sorgenti/volumi anomali.
-        Questa scelta è valida soltanto per la sessione corrente.
+        Le cancellazioni anteriori all'autorizzazione persistente non saranno eseguite.
+        Le protezioni tecniche restano obbligatorie; i limiti quantitativi sono facoltativi.
+        Avviare questa sessione non modifica l'autorizzazione alle cancellazioni.
         """
         warning.addButton(withTitle: policy.enabled
             ? "Conferma copia e cancellazione di prova"
@@ -134,8 +242,8 @@ final class MountedCopyController: ObservableObject {
             alert.informativeText = """
             Se abilitate, MacSync potrà CREARE e SOVRASCRIVERE file
             automaticamente nella destinazione già configurata, senza
-            nuove conferme a ogni login. Solo copie e aggiornamenti:
-            le cancellazioni speculari NON saranno automatiche.
+            nuove conferme a ogni login. Le cancellazioni speculari saranno
+            eseguite soltanto se già autorizzate nelle relative impostazioni.
 
             FUNZIONE SPERIMENTALE: usa esclusivamente cartelle con
             dati di prova, non l'archivio di produzione originale.
@@ -160,7 +268,8 @@ final class MountedCopyController: ObservableObject {
         let policy: MirrorDeletionPolicy
         do {
             policy = try MirrorDeletionPolicy(
-                enabled: false, recoveryEnabled: false, retentionDays: nil
+                enabled: mirrorEnabled, recoveryEnabled: mirrorRecovery,
+                retentionDays: mirrorRetention == 0 ? nil : mirrorRetention
             )
         } catch {
             status = "Copie automatiche sospese: politica non valida"
@@ -178,6 +287,12 @@ final class MountedCopyController: ObservableObject {
         firstSlot: Date? = nil
     ) {
         guard !active && !seedBusy && !maintaining, schedule.isValid else { return }
+        let authorization = mirrorAuthorization
+        let protections = mirrorProtections
+        guard protections.isValid, !policy.enabled || authorization != nil else {
+            status = "Impostazioni protezione o autorizzazione non valide"
+            return
+        }
         do {
             let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
             guard !configured.isEmpty,
@@ -272,6 +387,11 @@ final class MountedCopyController: ObservableObject {
                 do {
                     let startedAt = Date()
                     guard !cancellation.isCancelled else { return }
+                    // A persistent safety latch blocks the ENTIRE cycle,
+                    // even when mirror has subsequently been disabled.
+                    if let reason = try journal.mirrorBlockReason() {
+                        throw MirrorDeletionFailure.bulkDeletion(reason)
+                    }
                     if worker == nil {
                         maps = try configured.map {
                             try MountedFolderMapping(
@@ -298,7 +418,8 @@ final class MountedCopyController: ObservableObject {
                             journal: journal,
                             manifest: RecoveryManifest(path: database.path),
                             log: log, mappings: maps, policy: policy,
-                            cancellation: cancellation
+                            cancellation: cancellation, authorization: authorization,
+                            protections: protections
                         )
                         try? log.record(
                             level: .info, rootID: "app", action: "mirror_armed",
@@ -306,6 +427,7 @@ final class MountedCopyController: ObservableObject {
                                 ? "Mirror di prova attivato con recupero" : "Mirror di prova attivato senza recupero"
                         )
                     }
+                    try mirrorWorker?.verifyBeforeSynchronization()
                     let summary = try worker.runCycle(
                         enabled: true, pageSize: 100,
                         shouldContinue: { !cancellation.isCancelled },
@@ -321,11 +443,13 @@ final class MountedCopyController: ObservableObject {
                     var mirrorSummary = MirrorDeletionSummary()
                     var expired = 0
                     if let mirrorWorker, !cancellation.isCancelled, !summary.interrupted {
+                        // Repeat the protection check even if uploads remain.
+                        try mirrorWorker.verifyBeforeSynchronization()
                         // A rename is currently represented as upload + delete.
                         // Never remove the old server file before pending
                         // uploads have been completed, including after failure.
                         if try journal.pendingUploads(limit: 1).isEmpty {
-                            mirrorSummary = try mirrorWorker.runOnce(maxFiles: 25)
+                            mirrorSummary = try mirrorWorker.runCycle(pageSize: 100)
                             expired = try mirrorWorker.pruneExpiredRecovery()
                         } else {
                             mirrorSummary.blocked = true
@@ -373,7 +497,8 @@ final class MountedCopyController: ObservableObject {
                     )
                     DispatchQueue.main.async { [weak self] in
                         guard !cancellation.isCancelled else { return }
-                        self?.status = "Copia sospesa: " + error.localizedDescription
+                        self?.status = "Sincronizzazione sospesa: " + error.localizedDescription
+                        self?.mirrorStatus = error.localizedDescription
                         let failed = SyncDashboardStats(failed: 1)
                         self?.lastCycleStats = failed
                         self?.sessionStats.accumulate(failed)
@@ -395,7 +520,7 @@ final class MountedCopyController: ObservableObject {
                 ? "Configurazione armata: la verifica delle sorgenti avverrà al primo ciclo"
                 : "Cancellazioni speculari disattivate"
             status = automatic
-                ? "Copie automatiche di prova pianificate (solo aggiunte e aggiornamenti)"
+                ? (policy.enabled ? "Sincronizzazione automatica di prova pianificata con mirror autorizzato" : "Copie automatiche di prova pianificate (solo aggiunte e aggiornamenti)")
                 : "Copie di prova pianificate; " + schedule.summary
             refresh()
             timer.resume()
