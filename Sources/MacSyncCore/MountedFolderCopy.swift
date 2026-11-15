@@ -189,6 +189,7 @@ public final class MountedFolderCopyWorker {
     public var onEvent: ((SyncCycleEvent) -> Void)?
     public var onJobStarted: ((QueuedChange) -> Void)?
     public var onPlan: ((Int) -> Void)?
+    public var onPhase: ((String) -> Void)?
     private func emit(_ kind: SyncEventKind, job: QueuedChange, mapping: MountedFolderMapping?,
                       bytes: Int64? = nil, seconds: Double = 0, detail: String = "") {
         onEvent?(SyncCycleEvent(kind:kind,job:job,mapping:mapping,bytes:bytes,seconds:seconds,detail:detail))
@@ -237,6 +238,7 @@ public final class MountedFolderCopyWorker {
     /// with bounded memory. A failing job is tried at most once per cycle;
     /// new events wait for the next scheduled run.
     public func runCycle(enabled: Bool = false, pageSize: Int = 100,
+                         throughID: Int64? = nil,
                          shouldContinue: () -> Bool = { true },
                          onProgress: (MountedCopySummary) -> Void = { _ in }) throws -> MountedCopySummary {
         var summary = MountedCopySummary()
@@ -244,7 +246,8 @@ public final class MountedFolderCopyWorker {
             summary.disabled = true
             return summary
         }
-        guard let upper = try journal.pendingUploadUpperBound() else { onPlan?(0); return summary }
+        guard let pendingUpper = try journal.pendingUploadUpperBound() else { onPlan?(0); return summary }
+        let upper = min(pendingUpper, throughID ?? Int64.max)
         onPlan?(try journal.plannedUploadCount(throughID: upper))
         let size = max(1, min(pageSize, 1000))
         nextAfterID = 0
@@ -516,8 +519,10 @@ public final class MountedFolderCopyWorker {
             }
             stageAttempted = true
             try checkpoint?(.beforeStageCopy, staging)
+            onPhase?("Trasferimento")
             let transferStart = ProcessInfo.processInfo.systemUptime
             try fm.copyItem(at: src, to: staging)
+            onPhase?("Verifica del trasferimento")
             observedStage = try readSnapshot(staging)
             if let observedStage, observedStage.kind == .file {
                 emit(.stageCopy,job:job,mapping:mapping,bytes:observedStage.size,
@@ -567,8 +572,10 @@ public final class MountedFolderCopyWorker {
                 try log.record(level: .info, rootID: job.rootID, action: "backup_start",
                     relativePath: job.relativePath, bytes: originalTarget.size,
                     message: "Backup temporaneo: " + backupURL.lastPathComponent)
+                onPhase?("Backup di sicurezza")
                 let backupStart = ProcessInfo.processInfo.systemUptime
                 try fm.copyItem(at: dst, to: backupURL)
+                onPhase?("Verifica e pubblicazione")
                 let backup = try readSnapshot(backupURL)
                 if backup.kind == .file {
                     emit(.backupCopy,job:job,mapping:mapping,bytes:backup.size,
