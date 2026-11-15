@@ -68,6 +68,7 @@ final class MountedCopyController: ObservableObject {
         DispatchQueue.global(qos:.utility).async { [weak self] in
             do {
                 let history = try SyncCycleHistory(path:path)
+                try history.markInterrupted(exceptSession:session)
                 let cycle = try history.cycles(limit:1).first
                 let stats = try cycle.map { try history.totals(cycleID:$0.id).stats } ?? SyncDashboardStats()
                 DispatchQueue.main.async { [weak self] in
@@ -131,7 +132,10 @@ final class MountedCopyController: ObservableObject {
     /// A request during an active cycle waits for that cycle to finish.
     func startArchiveAudit(sources: [(id:String,path:String,destination:String,expected:VolumeFingerprint?)],
                            interactive: Bool) {
-        guard !auditBusy && !maintaining && !seedBusy else { return }
+        guard !auditBusy && !maintaining && !seedBusy else {
+            if !interactive { noteAuditSkipped("altra verifica o manutenzione in corso") }
+            return
+        }
         let settings = auditSettings
         let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
         guard !configured.isEmpty,
@@ -195,6 +199,10 @@ final class MountedCopyController: ObservableObject {
                 }
             }
         }
+    }
+
+    func noteAuditSkipped(_ reason:String) {
+        if !auditBusy { auditStatus = "Verifica programmata rinviata: " + reason }
     }
 
     func cancelArchiveAudit() {
@@ -636,7 +644,7 @@ final class MountedCopyController: ObservableObject {
                     worker.onJobStarted = jobStarted
                     worker.onPhase = { phase in
                         progress.phase = phase
-                        publish()
+                        publish(force:phase == "Trasferimento" || phase == "Backup di sicurezza")
                     }
                     mirrorWorker?.onEvent = observe
                     mirrorWorker?.onJobStarted = jobStarted
@@ -910,6 +918,8 @@ final class MountedCopyController: ObservableObject {
         seedCancel = cancellation
         seedBusy = true
         seedReady = false
+        seedStartedAt = nil
+        seedCurrentPath = ""
         seedStatus = "Conferma in corso (senza modificare file)…"
         queue.async { [weak self] in
             do {
