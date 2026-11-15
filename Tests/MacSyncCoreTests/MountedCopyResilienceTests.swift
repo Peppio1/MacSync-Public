@@ -171,6 +171,109 @@ final class MountedCopyResilienceTests: XCTestCase {
         XCTAssertEqual(try read(target), "new image content")
     }
 
+    private func backups(_ f: Fixture) throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(at: f.dst, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix(".macsync-backup-") }
+    }
+
+    func testCleanupRunsOnlyAfterDatabaseAcknowledgmentAndLeavesLegacyBackups() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        try write("old original", to: f.dst.appendingPathComponent("photo.psd"))
+        let legacy = f.dst.appendingPathComponent(".macsync-backup-" + UUID().uuidString)
+        try write("legacy recovery", to: legacy)
+        let w = try worker(f)
+        var cleanupReached = false
+        w.checkpoint = { phase, url in
+            if phase == .beforeBackupCleanup {
+                cleanupReached = true
+                XCTAssertTrue(try self.pending(f).isEmpty)
+                XCTAssertEqual(try self.read(url), "old original")
+            }
+        }
+        XCTAssertEqual(try w.runCycle(enabled: true).updated, 1)
+        XCTAssertTrue(cleanupReached)
+        XCTAssertEqual(try backups(f).map(\.lastPathComponent), [legacy.lastPathComponent])
+        XCTAssertEqual(try read(legacy), "legacy recovery")
+        XCTAssertEqual(try read(f.dst.appendingPathComponent("photo.psd")), "new image content")
+    }
+
+    func testInterruptedOverwriteRetainsBackupEvenAfterRetrySucceeds() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        try write("old original", to: f.dst.appendingPathComponent("photo.psd"))
+        let w = try worker(f)
+        w.checkpoint = { phase, _ in
+            if phase == .afterPublish { throw SimulatedFailure.connectionLost }
+        }
+        XCTAssertEqual(try w.runCycle(enabled: true).failed, 1)
+        let retained = try XCTUnwrap(backups(f).first)
+        XCTAssertEqual(try read(retained), "old original")
+        XCTAssertEqual(try pending(f).count, 1)
+        XCTAssertEqual(try worker(f).runCycle(enabled: true).updated, 1)
+        XCTAssertEqual(try backups(f).map(\.lastPathComponent), [retained.lastPathComponent])
+        XCTAssertEqual(try read(retained), "old original")
+    }
+
+    func testSupersededAcknowledgmentCannotAuthorizeBackupDeletion() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        try write("old original", to: f.dst.appendingPathComponent("photo.psd"))
+        let w = try worker(f)
+        w.checkpoint = { phase, _ in
+            if phase == .afterPublish {
+                try ChangeJournal(path: f.db).enqueue(rootID: "photos", relativePath: "photo.psd", kind: .upsert)
+            }
+        }
+        XCTAssertEqual(try w.runCycle(enabled: true).deferred, 1)
+        XCTAssertEqual(try pending(f).count, 2)
+        XCTAssertEqual(try read(XCTUnwrap(backups(f).first)), "old original")
+    }
+
+    func testCleanupFailureDoesNotRetryConfirmedTransfer() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        try write("old original", to: f.dst.appendingPathComponent("photo.psd"))
+        let w = try worker(f)
+        w.checkpoint = { phase, _ in
+            if phase == .beforeBackupCleanup { throw SimulatedFailure.connectionLost }
+        }
+        let outcome = try w.runCycle(enabled: true)
+        XCTAssertEqual(outcome.updated, 1)
+        XCTAssertEqual(outcome.failed, 0)
+        XCTAssertTrue(try pending(f).isEmpty)
+        XCTAssertEqual(try read(XCTUnwrap(backups(f).first)), "old original")
+        XCTAssertTrue(try SyncActivityLog(path: f.db).recent().contains { $0.action == "backup_retained" })
+        XCTAssertEqual(try worker(f).runCycle(enabled: true).copied, 0)
+    }
+
+    func testBackupChangedBeforeCleanupIsPreserved() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        try write("old original", to: f.dst.appendingPathComponent("photo.psd"))
+        let w = try worker(f)
+        w.checkpoint = { phase, path in
+            if phase == .beforeBackupCleanup { try self.write("externally changed backup", to: path) }
+        }
+        XCTAssertEqual(try w.runCycle(enabled: true).updated, 1)
+        XCTAssertEqual(try read(XCTUnwrap(backups(f).first)), "externally changed backup")
+        XCTAssertTrue(try pending(f).isEmpty)
+    }
+
+    func testPublishedFileChangedBeforeCleanupPreservesBackup() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let target = f.dst.appendingPathComponent("photo.psd")
+        try write("old original", to: target)
+        let w = try worker(f)
+        w.checkpoint = { phase, _ in
+            if phase == .beforeBackupCleanup { try self.write("external change", to: target) }
+        }
+        XCTAssertEqual(try w.runCycle(enabled: true).updated, 1)
+        XCTAssertEqual(try read(XCTUnwrap(backups(f).first)), "old original")
+        XCTAssertEqual(try read(target), "external change")
+    }
+
     func testNewQueueEventDuringStagingPreventsOldPublication() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }
