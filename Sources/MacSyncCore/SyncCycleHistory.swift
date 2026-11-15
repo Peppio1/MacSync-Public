@@ -10,6 +10,7 @@ public enum SyncEventKind: String, Codable, CaseIterable, Sendable {
 }
 public struct SyncCycleEvent: Codable, Equatable, Sendable {
     public let kind: SyncEventKind
+    public let jobID: Int64
     public let rootID: String
     public let relativePath: String
     public let sourceRoot: String
@@ -23,7 +24,7 @@ public struct SyncCycleEvent: Codable, Equatable, Sendable {
     public init(kind: SyncEventKind, job: QueuedChange, mapping: MountedFolderMapping?,
                 bytes: Int64? = nil, seconds: Double = 0, recoveryPath: String? = nil,
                 detail: String = "", at: Date = Date()) {
-        self.kind = kind; rootID = job.rootID; relativePath = job.relativePath
+        self.kind = kind; jobID = job.id; rootID = job.rootID; relativePath = job.relativePath
         sourceRoot = mapping?.source.path ?? ""; targetRoot = mapping?.target.path ?? ""
         self.recoveryPath = recoveryPath; self.bytes = bytes
         self.seconds = seconds.isFinite ? max(0, seconds) : 0
@@ -83,14 +84,18 @@ public struct SyncLiveProgress: Equatable, Sendable {
     public var phase = "Verifica"
     public var currentFile = ""
     public var lastCopyRate: Double?
+    public var copiedBytes: Int64 = 0
+    public var copySeconds: Double = 0
+    public var meanCopyRate: Double? { copySeconds > 0 ? Double(copiedBytes) / copySeconds : nil }
     public var fraction: Double { planned > 0 ? min(0.99, Double(processed) / Double(planned)) : 0 }
     public init(started: Date, planned: Int = 0) { self.started = started; self.planned = max(0, planned) }
     public mutating func observe(_ event: SyncCycleEvent) {
         if event.kind.isJob { processed += 1 }
-        if event.kind == .stageCopy || event.kind == .backupCopy {
-            if event.seconds > 0, let bytes = event.bytes {
-                lastCopyRate = Double(bytes) / event.seconds
-            }
+        if event.kind == .stageCopy, event.seconds > 0, let bytes = event.bytes {
+            lastCopyRate = Double(bytes) / event.seconds
+            let sum = copiedBytes.addingReportingOverflow(bytes)
+            copiedBytes = sum.overflow ? Int64.max : sum.partialValue
+            copySeconds += event.seconds
         }
     }
     public static func formatRate(_ value: Double?) -> String {
@@ -225,7 +230,7 @@ public final class SyncCycleHistory {
         guard value.withCString({ sqlite3_bind_text(s,index,$0,-1,transient) }) == SQLITE_OK else { throw failure() }
     }
     private func col(_ s:OpaquePointer,_ i:Int32)->String {
-        guard let p = sqlite3_column_text(s,i) else { return "" }; return String(cString:p)
+        guard let p = sqlite3_column_text(s,i) else { return "" }; return String(cString:UnsafeRawPointer(p).assumingMemoryBound(to:CChar.self))
     }
     private func failure()->JournalError { .database(db.map { String(cString:sqlite3_errmsg($0)) } ?? "History unavailable") }
 }
