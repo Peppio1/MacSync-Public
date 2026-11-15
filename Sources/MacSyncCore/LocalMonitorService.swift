@@ -14,6 +14,7 @@ public struct MonitorUpdate: Sendable {
     public let message: String
     public let monitoring: Bool
     public let pendingChanges: Int
+    public var scanProgress: ArchiveAuditProgress? = nil
 }
 
 /// Local-only prototype. The watcher never connects to SMB and never performs
@@ -61,9 +62,26 @@ public final class LocalMonitorService {
                 self.activityLog = try SyncActivityLog(path: databasePath)
                 self.report("Creazione inventario locale in corso…", active: false)
 
+                var scan = ArchiveAuditProgress()
+                scan.phase = "Inventario locale iniziale"
+                var lastUpdate = 0.0
+                self.update(MonitorUpdate(message:scan.phase,monitoring:false,pendingChanges:0,scanProgress:scan))
                 for root in checked {
-                    _ = try store.reconcile(rootID: root.id, root: root.url)
+                    _ = try store.reconcile(rootID:root.id,root:root.url,onItem:{ item in
+                        if item.kind == "file" {
+                            scan.scannedFiles += 1
+                            let sum = scan.detectedBytes.addingReportingOverflow(max(0,item.size))
+                            scan.detectedBytes = sum.overflow ? Int64.max : sum.partialValue
+                        } else if item.kind == "directory" { scan.scannedDirectories += 1 }
+                        scan.currentPath = root.id + " / " + item.relativePath
+                        let now = ProcessInfo.processInfo.systemUptime
+                        if now-lastUpdate >= 0.25 {
+                            lastUpdate = now
+                            self.update(MonitorUpdate(message:scan.phase,monitoring:false,pendingChanges:0,scanProgress:scan))
+                        }
+                    })
                 }
+                self.update(MonitorUpdate(message:"Inventario locale completato",monitoring:false,pendingChanges:0,scanProgress:scan))
                 self.lastFullScan = Date()
 
                 let watcher = FSEventsWatcher(queue: self.queue) { [weak self] events in
