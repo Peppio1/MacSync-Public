@@ -376,4 +376,204 @@ final class MirrorDeletionTests: XCTestCase {
         XCTAssertEqual(summary.directories, 1, "deferred=\(summary.deferred) warnings=\(warnings)")
         XCTAssertFalse(FileManager.default.fileExists(atPath: dstDir.path))
     }
+    private func persistentWorker(_ f: Fixture, authorization: MirrorAuthorization,
+                                  protections: MirrorProtectionSettings = MirrorProtectionSettings(),
+                                  mappings: [MountedFolderMapping]? = nil,
+                                  cancellation: MirrorDeletionCancellation = MirrorDeletionCancellation()) throws -> MirrorDeletionWorker {
+        try MirrorDeletionWorker(journal: ChangeJournal(path: f.database),
+            manifest: RecoveryManifest(path: f.database), log: SyncActivityLog(path: f.database),
+            mappings: mappings ?? [f.mapping],
+            policy: MirrorDeletionPolicy(enabled: true, recoveryEnabled: false, retentionDays: nil),
+            cancellation: cancellation, authorization: authorization, protections: protections)
+    }
+
+    func testPersistentMirrorDefaultsAllOptionalProtectionOff() throws {
+        let settings = MirrorProtectionSettings()
+        XCTAssertFalse(settings.absoluteEnabled)
+        XCTAssertFalse(settings.fractionEnabled)
+        XCTAssertFalse(settings.emptyEnabled)
+        XCTAssertTrue(settings.isValid)
+        XCTAssertEqual(settings.windowHours, 24)
+    }
+
+    func testPersistentMirrorProcessesMoreThanThousandDeletesWithoutLimitIncludingEmptySource() throws {
+        let f = try fixture(fileCount: 1005)
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let authorization = try MirrorAuthorization.capture(journal: f.journal, mappings: [f.mapping])
+        for i in 0..<1005 {
+            try FileManager.default.removeItem(at: f.source.appendingPathComponent("photo\(i).dng"))
+        }
+        _ = try LocalInventory(path: f.database).reconcile(rootID: "photos", root: f.source)
+        let mirror = try persistentWorker(f, authorization: authorization)
+        let result = try mirror.runCycle(pageSize: 37)
+        XCTAssertEqual(result.removed, 1005)
+        XCTAssertEqual(result.deferred, 0)
+        XCTAssertTrue(try f.journal.pending().isEmpty)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: f.destination.path).isEmpty)
+    }
+
+    func testPersistentAuthorizationResumesAfterRestartButNeverReplaysPreConsentDeletes() throws {
+        let f = try fixture(fileCount: 4)
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        try deleteSource(f, name: "photo0.dng")
+        let authorization = try MirrorAuthorization.capture(journal: f.journal, mappings: [f.mapping])
+        let serialized = try JSONEncoder().encode(authorization)
+        try deleteSource(f, name: "photo1.dng")
+        let cancellation = MirrorDeletionCancellation()
+        let first = try persistentWorker(f, authorization: authorization, cancellation: cancellation)
+        cancellation.cancel()
+        XCTAssertEqual(try first.runCycle().removed, 0)
+        let decoded = try JSONDecoder().decode(MirrorAuthorization.self, from: serialized)
+        let reopened = try MountedFolderMapping(rootID: "photos", source: f.source, target: f.destination)
+        let restarted = try persistentWorker(f, authorization: decoded, mappings: [reopened])
+        XCTAssertEqual(try restarted.runCycle().removed, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: f.destination.appendingPathComponent("photo0.dng").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.destination.appendingPathComponent("photo1.dng").path))
+        XCTAssertEqual(try f.journal.pending().map(\.relativePath), ["photo0.dng"])
+    }
+
+    func testNewConsentDoesNotReplayDeletesCreatedWhileMirrorDisabled() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        _ = try MirrorAuthorization.capture(journal: f.journal, mappings: [f.mapping])
+        try deleteSource(f, name: "photo0.dng")
+        let newConsent = try MirrorAuthorization.capture(journal: f.journal, mappings: [f.mapping])
+        XCTAssertEqual(try persistentWorker(f, authorization: newConsent).runCycle().removed, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: f.destination.appendingPathComponent("photo0.dng").path))
+    }
+
+    func testPersistentConsentCannotBindReplacedDestinationOrDatabase() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let authorization = try MirrorAuthorization.capture(journal: f.journal, mappings: [f.mapping])
+        let secondDB = f.base.appendingPathComponent("other.sqlite").path
+        _ = try LocalInventory(path: secondDB).reconcile(rootID: "photos", root: f.source)
+        XCTAssertThrowsError(try MirrorDeletionWorker(journal: ChangeJournal(path: secondDB),
+            manifest: RecoveryManifest(path: secondDB), log: SyncActivityLog(path: secondDB),
+            mappings: [f.mapping], policy: MirrorDeletionPolicy(enabled: true, recoveryEnabled: false, retentionDays: nil),
+            authorization: authorization))
+        try deleteSource(f, name: "photo0.dng")
+        try FileManager.default.moveItem(at: f.destination, to: f.base.appendingPathComponent("previous-destination"))
+        try FileManager.default.createDirectory(at: f.destination, withIntermediateDirectories: false)
+        let unrelated = f.destination.appendingPathComponent("photo0.dng")
+        try Data("unrelated".utf8).write(to: unrelated)
+        let replacement = try MountedFolderMapping(rootID: "photos", source: f.source, target: f.destination)
+        XCTAssertThrowsError(try persistentWorker(f, authorization: authorization, mappings: [replacement]))
+        XCTAssertEqual(try String(contentsOf: unrelated, encoding: .utf8), "unrelated")
+    }
+
+    func testStaleLocalInventoryCannotBeAuthorized() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        try FileManager.default.removeItem(at: f.source.appendingPathComponent("photo0.dng"))
+        XCTAssertThrowsError(try MirrorAuthorization.capture(journal: f.journal, mappings: [f.mapping]))
+    }
+
+    func testOptionalAbsoluteLockPersistsEvenIfProtectionTurnedOffAndWindowExpires() throws {
+        let f = try fixture(fileCount: 4)
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let authorization = try MirrorAuthorization.capture(journal: f.journal, mappings: [f.mapping])
+        var settings = MirrorProtectionSettings()
+        settings.absoluteEnabled = true
+        settings.absoluteLimit = 2
+        try deleteSource(f, name: "photo0.dng")
+        try deleteSource(f, name: "photo1.dng")
+        let first = try persistentWorker(f, authorization: authorization, protections: settings)
+        XCTAssertThrowsError(try first.verifyBeforeSynchronization())
+        XCTAssertNotNil(try f.journal.mirrorBlockReason())
+        // Both targets remain; pre-copy verification caused no mutation.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: f.destination.appendingPathComponent("photo0.dng").path))
+        let restarted = try persistentWorker(f, authorization: authorization)
+        XCTAssertThrowsError(try restarted.verifyBeforeSynchronization(now: Date().addingTimeInterval(72*3600)))
+        try f.journal.clearMirrorBlock()
+        XCTAssertEqual(try restarted.runCycle().removed, 2)
+        XCTAssertNil(try f.journal.mirrorBlockReason())
+    }
+
+    func testRollingWindowIncludesRecentAttemptsButAllowsNormalOldHistory() throws {
+        let f = try fixture(fileCount: 10)
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let authorization = try MirrorAuthorization.capture(journal: f.journal, mappings: [f.mapping])
+        var settings = MirrorProtectionSettings()
+        settings.absoluteEnabled = true
+        settings.absoluteLimit = 3
+        try deleteSource(f, name: "photo0.dng")
+        try deleteSource(f, name: "photo1.dng")
+        XCTAssertEqual(try persistentWorker(f, authorization: authorization, protections: settings).runCycle().removed, 2)
+        try deleteSource(f, name: "photo2.dng")
+        let restarted = try persistentWorker(f, authorization: authorization, protections: settings)
+        XCTAssertNoThrow(try restarted.verifyBeforeSynchronization(now: Date().addingTimeInterval(25*3600)))
+        XCTAssertThrowsError(try restarted.verifyBeforeSynchronization())
+        XCTAssertNotNil(try f.journal.mirrorBlockReason())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: f.destination.appendingPathComponent("photo2.dng").path))
+    }
+
+    func testFractionAndEmptyProtectionsAreIndependent() throws {
+        let f = try fixture(fileCount: 4)
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let authorization = try MirrorAuthorization.capture(journal: f.journal, mappings: [f.mapping])
+        var fraction = MirrorProtectionSettings()
+        fraction.fractionEnabled = true
+        fraction.percentLimit = 50
+        try deleteSource(f, name: "photo0.dng")
+        XCTAssertNoThrow(try persistentWorker(f, authorization: authorization, protections: fraction).verifyBeforeSynchronization())
+        try deleteSource(f, name: "photo1.dng")
+        XCTAssertThrowsError(try persistentWorker(f, authorization: authorization, protections: fraction).verifyBeforeSynchronization())
+        try f.journal.clearMirrorBlock()
+        var empty = MirrorProtectionSettings()
+        empty.emptyEnabled = true
+        XCTAssertNoThrow(try persistentWorker(f, authorization: authorization, protections: empty).verifyBeforeSynchronization())
+        try deleteSource(f, name: "photo2.dng")
+        try deleteSource(f, name: "photo3.dng")
+        XCTAssertThrowsError(try persistentWorker(f, authorization: authorization, protections: empty).verifyBeforeSynchronization())
+        XCTAssertTrue(try XCTUnwrap(f.journal.mirrorBlockReason()).contains("vuota"))
+    }
+
+    func testProtectionEvaluatedPerPairButLatchBlocksAllPairs() throws {
+        let f = try fixture(fileCount: 4)
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let source2 = f.base.appendingPathComponent("source2"), target2 = f.base.appendingPathComponent("target2")
+        try FileManager.default.createDirectory(at: source2, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: target2, withIntermediateDirectories: false)
+        for i in 0..<4 {
+            let name = "image\(i).psd"
+            try Data("second pair".utf8).write(to: source2.appendingPathComponent(name))
+            try Data("second pair".utf8).write(to: target2.appendingPathComponent(name))
+        }
+        let inv = try LocalInventory(path: f.database)
+        _ = try inv.reconcile(rootID: "second", root: source2)
+        for job in try f.journal.pendingUploads() { try f.journal.markCompleted(id: job.id) }
+        let second = try MountedFolderMapping(rootID: "second", source: source2, target: target2)
+        let maps = [f.mapping, second]
+        let authorization = try MirrorAuthorization.capture(journal: f.journal, mappings: maps)
+        var settings = MirrorProtectionSettings()
+        settings.absoluteEnabled = true
+        settings.absoluteLimit = 3
+        for i in 0..<2 {
+            try deleteSource(f, name: "photo\(i).dng")
+            try FileManager.default.removeItem(at: source2.appendingPathComponent("image\(i).psd"))
+        }
+        _ = try inv.reconcile(rootID: "second", root: source2)
+        let mirror = try persistentWorker(f, authorization: authorization, protections: settings, mappings: maps)
+        XCTAssertNoThrow(try mirror.verifyBeforeSynchronization()) // two per pair, not four globally
+        try deleteSource(f, name: "photo2.dng")
+        XCTAssertThrowsError(try mirror.runCycle())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: target2.appendingPathComponent("image0.psd").path))
+        XCTAssertTrue(try XCTUnwrap(f.journal.mirrorBlockReason()).contains("photos"))
+    }
+
+    func testPersistentMirrorStillWaitsForUploadsAndBlocksStaleOrRecreatedSource() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let authorization = try MirrorAuthorization.capture(journal: f.journal, mappings: [f.mapping])
+        let mirror = try persistentWorker(f, authorization: authorization)
+        try deleteSource(f, name: "photo0.dng")
+        let job = try f.journal.enqueue(rootID: "photos", relativePath: "new.psd", kind: .upsert)
+        XCTAssertTrue(try mirror.runCycle().blocked)
+        try f.journal.markCompleted(id: job)
+        try Data("recreated".utf8).write(to: f.source.appendingPathComponent("photo0.dng"))
+        XCTAssertEqual(try mirror.runCycle().removed, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: f.destination.appendingPathComponent("photo0.dng").path))
+    }
+
 }
