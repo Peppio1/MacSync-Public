@@ -91,7 +91,10 @@ final class WorkloadValidationTests: XCTestCase {
             XCTAssertEqual(try resumed.runCycle(enabled: true).copied, 0)
         }
         let report = try ArchiveAudit(journal: reopened, mappings: maps).run(mode: .deep)
-        XCTAssertEqual(report.count(.matching), 360)
+        XCTAssertEqual(report.findings.filter { $0.kind == .matching && $0.objectKind == "file" }.count, 360)
+        XCTAssertEqual(report.findings.filter { $0.kind == .matching && $0.objectKind == "directory" }.count, 40)
+        XCTAssertEqual(report.count(.matching), 400)
+        XCTAssertEqual(report.count(.uncertain), 0)
         XCTAssertEqual(report.count(.missing), 0)
         XCTAssertEqual(report.count(.different), 0)
         XCTAssertEqual(report.count(.extra), 0)
