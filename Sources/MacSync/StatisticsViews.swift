@@ -17,6 +17,21 @@ func macSyncCycleState(_ state:String)->String {
     return (labels[base] ?? base) + (state.contains("_history_incomplete") ? " — storico incompleto" : "")
 }
 
+struct MacSyncLinearProgress: View {
+    let value: Double
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(MacSyncColors.line(scheme))
+                Capsule().fill(MacSyncColors.blue(scheme)).frame(width: geo.size.width * min(1, max(0, value)))
+            }
+        }.frame(height: 8)
+            .accessibilityLabel("Avanzamento")
+            .accessibilityValue("\(Int(min(1,max(0,value))*100)) percento")
+    }
+}
+
 struct LiveSyncPanel: View {
     @ObservedObject var copy: MountedCopyController
     var body: some View {
@@ -30,15 +45,19 @@ struct LiveSyncPanel: View {
                         if p.planned > 0 { Text("\(Int(p.fraction*100))%").monospacedDigit().bold() }
                     }.font(.headline)
                     if p.planned > 0 {
-                        ProgressView(value:p.fraction).tint(Color.accentColor)
+                        MacSyncLinearProgress(value:p.fraction)
                         Text("\(p.processed) / \(p.planned) operazioni elaborate (stima del lavoro iniziale)")
                     } else { ProgressView().controlSize(.small) }
                     HStack {
-                        Text("Inizio: \(p.started.formatted(date:.omitted,time:.standard))")
+                        Text("Inizio: \(macSyncClock(p.started, seconds: true))")
                         Spacer()
                         Text("Tempo: \(elapsedText(elapsed))").monospacedDigit()
                     }
-                    Text("Velocità media copia: " + SyncLiveProgress.formatRate(p.meanCopyRate))
+                    HStack {
+                        Text("Velocità media copia").foregroundStyle(.secondary)
+                        Spacer()
+                        Text(SyncLiveProgress.formatRate(p.meanCopyRate)).font(.system(size: 19, weight: .semibold)).monospacedDigit()
+                    }
                     if !p.currentFile.isEmpty {
                         Text(p.currentFile).lineLimit(1).truncationMode(.middle).help(p.currentFile)
                     }
@@ -51,15 +70,15 @@ struct LiveSyncPanel: View {
                         if cycle.state == "completed" { Text("100%").bold() }
                     }.font(.headline)
                     HStack {
-                        Text("Inizio: \(cycle.started.formatted(date:.omitted,time:.standard))")
+                        Text("Inizio: \(macSyncClock(cycle.started, seconds: true))")
                         Spacer()
-                        Text("Fine: \(cycle.ended?.formatted(date:.omitted,time:.standard) ?? "—")")
+                        Text("Fine: \(cycle.ended.map { macSyncClock($0, seconds: true) } ?? "—")")
                         Spacer()
                         Text("Durata: \(cycle.seconds.map(elapsedText) ?? "—")")
                     }
                 } else { Text(copy.active ? "In attesa del prossimo ciclo" : "Sincronizzazione ferma") }
                 if let next = copy.nextScheduledRun {
-                    Text("Prossimo ciclo: \(next.formatted(date:.abbreviated,time:.shortened))")
+                    Text("Prossimo ciclo: \(macSyncDateTime(next))")
                 }
             }
             if !copy.historyWarning.isEmpty { Text(copy.historyWarning).foregroundStyle(.orange) }
@@ -77,7 +96,10 @@ struct AuditProgressView: View {
             VStack(alignment:.leading,spacing:6) {
                 Text(progress.phase).font(.headline)
                 if progress.total > 0 && !progress.phase.hasPrefix("Analisi") {
-                    ProgressView(value:min(0.99,Double(progress.compared)/Double(progress.total))).tint(Color.accentColor)
+                    HStack {
+                        MacSyncLinearProgress(value:min(0.99,Double(progress.compared)/Double(progress.total)))
+                        Text("\(Int(min(0.99,Double(progress.compared)/Double(progress.total))*100))%").monospacedDigit().bold()
+                    }
                     Text("\(progress.compared) / \(progress.total) elementi confrontati")
                 } else { ProgressView().controlSize(.small) }
                 Text("File rilevati: \(progress.scannedFiles) · Cartelle: \(progress.scannedDirectories)")
@@ -420,14 +442,15 @@ struct ArchiveAuditPanel:View {
     @State private var showFindings=false
     var body:some View {
         VStack(alignment:.leading,spacing:8) {
-            Text("Verifica completa dell'archivio").font(.headline)
+            Text(copy.auditSettings.repair ? "Riallineamento abilitato" : "Modalità diagnostica — sola lettura").font(.headline)
+            Text(copy.auditSettings.mode == .quick ? "Confronta percorsi, dimensioni e date; non verifica integralmente il contenuto." : "Confronta il contenuto con SHA-256; può leggere tutto l’archivio attraverso la VPN.").font(.caption).foregroundStyle(.secondary)
             Group {
                 Picker("Metodo",selection:$copy.auditSettings.mode) {
                     Text("Rapida (metadati)").tag(ArchiveAuditMode.quick)
                     Text("Approfondita (SHA-256)").tag(ArchiveAuditMode.deep)
                 }.pickerStyle(.segmented)
-                Toggle("Accoda copie e aggiornamenti per riallineare",isOn:$copy.auditSettings.repair)
-                Toggle("Programma verifica automatica",isOn:$copy.auditSettings.enabled)
+                MacSyncSwitchRow("Accoda copie e aggiornamenti per riallineare",isOn:$copy.auditSettings.repair)
+                MacSyncSwitchRow("Programma verifica automatica",isOn:$copy.auditSettings.enabled)
                 if copy.auditSettings.enabled {
                     Picker("Frequenza",selection:$copy.auditSettings.frequency) {
                         Text("Ogni giorno").tag("daily");Text("Ogni settimana").tag("weekly");Text("Ogni mese").tag("monthly")
@@ -446,7 +469,7 @@ struct ArchiveAuditPanel:View {
                         Picker("Minuti",selection:$copy.auditSettings.minute) { ForEach(0...59,id:\.self){Text(String(format:"%02d",$0)).tag($0)} }.frame(width:150)
                         Spacer()
                     }
-                    if let next=runtime.nextAuditAt { Text("Prossima: \(next.formatted(date:.abbreviated,time:.shortened))").font(.caption) }
+                    if let next=runtime.nextAuditAt { Text("Prossima: \(macSyncDateTime(next))").font(.caption) }
                 }
             }.disabled(copy.active || copy.maintaining || copy.seedBusy)
             Text("Non elimina elementi presenti solo sul server. SHA-256 può leggere l'intero archivio via VPN. Il riallineamento resta soggetto alla normale coda e ai controlli di sicurezza.")

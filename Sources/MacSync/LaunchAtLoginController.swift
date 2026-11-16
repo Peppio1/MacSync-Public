@@ -12,7 +12,8 @@ final class LaunchAtLoginController: ObservableObject {
     @Published private(set) var isAvailable = true
     @Published private(set) var statusMessage = "Avvio al login non configurato"
 
-    init() {
+    init(previewOnly: Bool = false) {
+        if previewOnly { statusMessage = "Avvio al login disattivato — dati dimostrativi"; return }
         refresh()
     }
 

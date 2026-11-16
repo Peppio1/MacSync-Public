@@ -8,9 +8,10 @@ import MacSyncCore
 /// VPN client, SMB reconnect, or background probing separate from the plan.
 @MainActor
 final class MacSyncRuntime: ObservableObject {
-    let model = MacSyncViewModel()
-    let copy = MountedCopyController()
-    let settings = SyncSettingsController()
+    let previewOnly: Bool
+    let model: MacSyncViewModel
+    let copy: MountedCopyController
+    let settings: SyncSettingsController
     let destinations = DestinationStatusController()
 
     @Published private(set) var automaticStatus = "Copie automatiche disabilitate"
@@ -26,7 +27,17 @@ final class MacSyncRuntime: ObservableObject {
     private var pendingAlerts: [String: UUID] = [:]
     private let notificationDelegate = MacSyncNotificationDelegate()
 
-    init() {
+    init(previewOnly: Bool = false) {
+        self.previewOnly = previewOnly
+        model = MacSyncViewModel(previewOnly: previewOnly)
+        copy = MountedCopyController(previewOnly: previewOnly)
+        settings = SyncSettingsController(previewOnly: previewOnly)
+        guard !previewOnly else {
+            automaticStatus = "Copie automatiche abilitate — dati dimostrativi"
+            nextAutomaticAttempt = Date().addingTimeInterval(900)
+            destinations.update(["photo-uploads": .ready, "photo-editing": .ready], checkedAt: Date())
+            return
+        }
         if Bundle.main.bundleURL.pathExtension.lowercased() == "app" {
             UNUserNotificationCenter.current().delegate = notificationDelegate
         }
@@ -48,6 +59,7 @@ final class MacSyncRuntime: ObservableObject {
     deinit { autoTimer?.invalidate(); auditTimer?.invalidate() }
 
     func scheduleArchiveAudit() {
+        guard !previewOnly else { return }
         auditRevision += 1
         auditTimer?.invalidate()
         auditTimer = nil
@@ -81,12 +93,21 @@ final class MacSyncRuntime: ObservableObject {
         automaticStatus = "Copie fermate manualmente: avvio automatico sospeso fino al prossimo avvio dell'app"
     }
 
+    func stopAllOperations() {
+        stopCopiesForCurrentLaunch()
+        auditRevision += 1
+        auditTimer?.invalidate(); auditTimer = nil; nextAuditAt = nil
+        copy.cancelSeedVerification(); copy.cancelArchiveAudit(); copy.cancelMaintenance()
+        model.stopMonitoring()
+    }
+
     func resumeAutomaticCopies() {
-        guard copy.automaticCopiesEnabled, !copy.active, !copy.seedBusy, !copy.maintaining else { return }
+        guard copy.automaticCopiesEnabled, !copy.active, !copy.seedBusy, !copy.maintaining, !copy.interruptionRequested, copy.liveProgress == nil else { return }
         configurationRevision += 1
         suspendedUntilNextLaunch = false
         automaticStatus = "Copie automatiche abilitate: attendo il prossimo ciclo"
         scheduleNextAutomaticAttempt()
+        scheduleArchiveAudit()
     }
 
     func onAutomaticPreferenceChanged(_ enabled: Bool) {
@@ -199,7 +220,7 @@ final class MacSyncRuntime: ObservableObject {
         nextAutomaticAttempt = nil
         guard !suspendedUntilNextLaunch,
               copy.automaticCopiesEnabled,
-              !copy.active else { return }
+              !copy.active, !copy.interruptionRequested, copy.liveProgress == nil else { return }
         let schedule = settings.schedule
         let now = Date()
         let next = afterSlot.flatMap {

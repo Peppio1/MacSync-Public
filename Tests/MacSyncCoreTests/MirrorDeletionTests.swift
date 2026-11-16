@@ -3,6 +3,23 @@ import XCTest
 @testable import MacSyncCore
 
 final class MirrorDeletionTests: XCTestCase {
+    func testCycleCancellationKeepsFutureSlotsButSessionStopIsPermanent() {
+        let token = MirrorDeletionCancellation()
+        XCTAssertFalse(token.cancelCurrentCycle())
+        XCTAssertTrue(token.beginCycle())
+        XCTAssertFalse(token.beginCycle())
+        XCTAssertTrue(token.cancelCurrentCycle())
+        XCTAssertTrue(token.isCancelled)
+        XCTAssertFalse(token.isSessionCancelled)
+        XCTAssertTrue(token.endCycle())
+        XCTAssertTrue(token.beginCycle())
+        XCTAssertFalse(token.isCancelled)
+        token.cancel()
+        XCTAssertTrue(token.endCycle())
+        XCTAssertTrue(token.isSessionCancelled)
+        XCTAssertFalse(token.beginCycle())
+    }
+
     private struct Fixture {
         let base: URL
         let source: URL

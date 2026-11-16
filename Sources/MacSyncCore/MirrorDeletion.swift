@@ -24,7 +24,25 @@ public struct MirrorDeletionPolicy: Equatable, Sendable {
 public final class MirrorDeletionCancellation {
     private let lock = NSLock()
     private var stopped = false
+    private var cycleStopped = false
+    private var runningCycle = false
     public init() {}
+    public var isSessionCancelled: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
+    public var cycleInProgress: Bool { lock.lock(); defer { lock.unlock() }; return runningCycle }
+    public func beginCycle() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !stopped, !runningCycle else { return false }
+        cycleStopped = false; runningCycle = true; return true
+    }
+    @discardableResult public func cancelCurrentCycle() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard runningCycle, !stopped, !cycleStopped else { return false }
+        cycleStopped = true; return true
+    }
+    @discardableResult public func endCycle() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        runningCycle = false; return stopped || cycleStopped
+    }
     public func cancel() {
         lock.lock()
         stopped = true
@@ -33,7 +51,7 @@ public final class MirrorDeletionCancellation {
     public var isCancelled: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return stopped
+        return stopped || cycleStopped
     }
 }
 

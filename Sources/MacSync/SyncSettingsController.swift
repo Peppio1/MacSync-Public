@@ -7,13 +7,14 @@ import MacSyncCore
 /// Updating these values does not itself run a copy or delete.
 @MainActor
 final class SyncSettingsController: ObservableObject {
+    private let previewOnly: Bool
     @Published var schedule: SyncSchedule {
         didSet {
             guard schedule.isValid else {
                 schedule = .standard
                 return
             }
-            if let data = try? JSONEncoder().encode(schedule) {
+            if !previewOnly, let data = try? JSONEncoder().encode(schedule) {
                 UserDefaults.standard.set(data, forKey: "MacSync.schedule")
             }
         }
@@ -24,14 +25,23 @@ final class SyncSettingsController: ObservableObject {
                 alertPolicy = ConnectionAlertPolicy()
                 return
             }
-            if let data = try? JSONEncoder().encode(alertPolicy) {
+            if !previewOnly, let data = try? JSONEncoder().encode(alertPolicy) {
                 UserDefaults.standard.set(data, forKey: "MacSync.connectionAlertPolicy")
             }
         }
     }
     @Published var notificationPermissionStatus = "Notifiche non configurate"
 
-    init() {
+    init(previewOnly: Bool = false) {
+        self.previewOnly = previewOnly
+        if previewOnly {
+            var plan = SyncSchedule.standard; plan.interval = 15
+            schedule = plan
+            var policy = ConnectionAlertPolicy(); policy.enabled = true; policy.afterHours = 2
+            alertPolicy = policy
+            notificationPermissionStatus = "Stato dimostrativo — notifiche non inviate"
+            return
+        }
         let defaults = UserDefaults.standard
         let savedSchedule = defaults.data(forKey: "MacSync.schedule")
             .flatMap { try? JSONDecoder().decode(SyncSchedule.self, from: $0) }

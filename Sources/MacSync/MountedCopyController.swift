@@ -6,13 +6,49 @@ import MacSyncCore
 /// macOS Finder must mount SMB shares and supply its saved credentials.
 @MainActor
 final class MountedCopyController: ObservableObject {
+    private let previewOnly: Bool
+    @Published private(set) var interruptionRequested = false
+
+    init(previewOnly: Bool = false) {
+        self.previewOnly = previewOnly
+    }
+
+    // Screenshot fixture: called only from the opt-in UI test. No real database access.
+    func populateScreenshotFixture(page: MacSyncPage, entries: [SyncLogEntry], cycle: SyncCycleRecord?) {
+        guard previewOnly else { return }
+        automaticCopiesEnabled = true
+        mirrorEnabled = false; mirrorAuthorization = nil
+        mirrorProtections = MirrorProtectionSettings(); mirrorRecovery = false; mirrorRetention = 30
+        auditSettings = ArchiveAuditSettings()
+        status = "Archivio dimostrativo: destinazioni disponibili"
+        sessionStats = SyncDashboardStats(newFiles: 24, updatedFiles: 12, permanentlyDeleted: 1, movedToRecovery: 2, failed: 1, deferred: 4)
+        lastCycleStats = sessionStats
+        lastRecordedCycle = cycle
+        recentEntries = entries
+        previewStatus = "Confronto iniziale non eseguito"
+        auditSettings.enabled = false; auditSettings.repair = false; auditSettings.mode = .deep
+        if page == .overview {
+            active = true; automaticSession = true
+            var progress = SyncLiveProgress(started: Date().addingTimeInterval(-155), planned: 46)
+            progress.processed = 24; progress.phase = "Trasferimento"; progress.currentFile = "Cartella_1 / IMG_0042.dng"
+            progress.copiedBytes = 124000000; progress.copySeconds = 10
+            liveProgress = progress
+        } else if page == .audit {
+            auditBusy = true; maintaining = true
+            var progress = ArchiveAuditProgress(started: Date().addingTimeInterval(-30))
+            progress.phase = "Verifica SHA-256"; progress.scannedFiles = 240; progress.scannedDirectories = 12
+            progress.detectedBytes = 800000000; progress.compared = 96; progress.total = 240
+            progress.bytesRead = 320000000; progress.currentPath = "Foto_caricate / IMG_0042.dng"
+            auditProgress = progress; auditStatus = "Verifica dimostrativa in corso"
+        }
+    }
     @Published var status = "Copie ferme: puoi selezionare cartelle locali o SMB già montate."
     @Published var active = false
     @Published private(set) var nextScheduledRun: Date?
     var onConnectionCheck: (([String: DestinationAvailability], Date) -> Void)?
     @Published var automaticCopiesEnabled = UserDefaults.standard.bool(forKey: "MacSync.autoCopiesEnabled") {
         didSet {
-            UserDefaults.standard.set(automaticCopiesEnabled, forKey: "MacSync.autoCopiesEnabled")
+            if !previewOnly { UserDefaults.standard.set(automaticCopiesEnabled, forKey: "MacSync.autoCopiesEnabled") }
         }
     }
     @Published private(set) var automaticSession = false
@@ -41,17 +77,17 @@ final class MountedCopyController: ObservableObject {
         return settings
     }() {
         didSet {
-            if mirrorProtections.isValid, let data = try? JSONEncoder().encode(mirrorProtections) {
+            if !previewOnly, mirrorProtections.isValid, let data = try? JSONEncoder().encode(mirrorProtections) {
                 UserDefaults.standard.set(data, forKey: "MacSync.mirrorProtections.v1")
             }
         }
     }
     @Published var mirrorRecovery = (UserDefaults.standard.object(forKey: "MacSync.mirrorRecovery") as? Bool) ?? true {
-        didSet { UserDefaults.standard.set(mirrorRecovery, forKey: "MacSync.mirrorRecovery") }
+        didSet { if !previewOnly { UserDefaults.standard.set(mirrorRecovery, forKey: "MacSync.mirrorRecovery") } }
     }
     /// 0 = never delete recovery files automatically; 1...30 = days.
     @Published var mirrorRetention = UserDefaults.standard.object(forKey: "MacSync.mirrorRetention") as? Int ?? 30 {
-        didSet { UserDefaults.standard.set(mirrorRetention, forKey: "MacSync.mirrorRetention") }
+        didSet { if !previewOnly { UserDefaults.standard.set(mirrorRetention, forKey: "MacSync.mirrorRetention") } }
     }
     @Published var mirrorStatus = "Cancellazioni speculari non attive"
     @Published var lastCycleStats = SyncDashboardStats()
@@ -107,7 +143,7 @@ final class MountedCopyController: ObservableObject {
         return value
     }() {
         didSet {
-            if let data = try? JSONEncoder().encode(auditSettings) {
+            if !previewOnly, let data = try? JSONEncoder().encode(auditSettings) {
                 UserDefaults.standard.set(data,forKey:"MacSync.archiveAuditSettings")
             }
         }
@@ -430,7 +466,7 @@ final class MountedCopyController: ObservableObject {
         schedule: SyncSchedule,
         firstSlot: Date? = nil
     ) {
-        guard !active && !seedBusy && !maintaining, schedule.isValid else { return }
+        guard !previewOnly, !active && !seedBusy && !maintaining && !interruptionRequested && liveProgress == nil, schedule.isValid else { return }
         let authorization = mirrorAuthorization
         let protections = mirrorProtections
         guard protections.isValid, !policy.enabled || authorization != nil else {
@@ -468,6 +504,7 @@ final class MountedCopyController: ObservableObject {
             // Create the armed deletion worker on the serial background queue.
             let cancellation = MirrorDeletionCancellation()
             sessionCancellation = cancellation
+            interruptionRequested = false
             mirrorCancellation = policy.enabled ? cancellation : nil
             var mirrorWorker: MirrorDeletionWorker?
             try log.record(
@@ -487,7 +524,7 @@ final class MountedCopyController: ObservableObject {
                 leeway: .milliseconds(250)
             )
             timer.setEventHandler { [weak self] in
-                guard !cancellation.isCancelled else { return }
+                guard cancellation.beginCycle() else { return }
                 let cycleID = UUID().uuidString
                 let startedAt = Date()
                 let startUptime = ProcessInfo.processInfo.systemUptime
@@ -532,7 +569,9 @@ final class MountedCopyController: ObservableObject {
                     worker?.onPhase = nil
                     mirrorWorker?.onEvent = nil
                     mirrorWorker?.onJobStarted = nil
-                    if cancellation.isCancelled { outcomeState = "interrupted" }
+                    if cancellation.endCycle() { outcomeState = "interrupted"
+                        try? log.record(level: .info, rootID: "app", action: "cycle", message: "Ciclo interrotto su richiesta; operazioni in coda preservate")
+                    }
                     if !historyError.isEmpty { outcomeState += "_history_incomplete" }
                     let endedAt = Date()
                     do {
@@ -542,9 +581,12 @@ final class MountedCopyController: ObservableObject {
                     let saved = try? history?.cycles(limit:1).first
                     let finalStats = totals.stats
                     let warning = historyError
+                    let finalOutcome = outcomeState
                     DispatchQueue.main.async { [weak self] in
                         guard let self, self.historySessionID == sessionID else { return }
                         self.liveProgress = nil
+                        self.interruptionRequested = false
+                        if finalOutcome.hasPrefix("interrupted") { self.status = "Ciclo interrotto; operazioni rimanenti in coda." }
                         self.historyWarning = warning
                         self.lastRecordedCycle = saved ?? nil
                         self.lastCycleStats = finalStats
@@ -555,7 +597,7 @@ final class MountedCopyController: ObservableObject {
                     }
                     // Keep the cadence anchored to its scheduled slot.
                     // If a long copy crosses a slot, skip that slot.
-                    if !cancellation.isCancelled,
+                    if !cancellation.isSessionCancelled,
                        let next = schedule.nextSlot(
                            after: scheduledSlot, completedAt: Date()
                        ) {
@@ -565,7 +607,7 @@ final class MountedCopyController: ObservableObject {
                             leeway: .milliseconds(250)
                         )
                         DispatchQueue.main.async { [weak self] in
-                            if !cancellation.isCancelled, self?.active == true {
+                            if !cancellation.isSessionCancelled, self?.active == true {
                                 self?.nextScheduledRun = next
                             }
                         }
@@ -703,7 +745,7 @@ final class MountedCopyController: ObservableObject {
                         rootID: "app", action: "cycle",
                         bytes: summary.bytes,
                         durationSeconds: max(0, Date().timeIntervalSince(startedAt)),
-                        message: "Ciclo completato: \(summary.copied) copie, \(summary.deferred) rimandate, \(summary.failed) errori." + mirrorDetails
+                        message: (cancellation.isCancelled || summary.interrupted ? "Ciclo interrotto: " : "Ciclo concluso: ") + "\(summary.copied) copie, \(summary.deferred) rimandate, \(summary.failed) errori." + mirrorDetails
                     )
                     // Only the SQLite activity table is pruned, never file
                     // inventory, queue, photographs, backups or staging.
@@ -719,6 +761,7 @@ final class MountedCopyController: ObservableObject {
                         // History and totals are finalized even for interrupted cycles.
                     }
                 } catch {
+                    if cancellation.isCancelled { outcomeState = "interrupted"; return }
                     outcomeState = "suspended"
                     totals.stats.deletionsBlocked = policy.enabled
                     try? log.record(
@@ -1193,7 +1236,14 @@ final class MountedCopyController: ObservableObject {
         }
     }
 
+    func interruptCurrentCycle() {
+        guard let token = sessionCancellation, token.cancelCurrentCycle() else { return }
+        interruptionRequested = true
+        status = "Interruzione richiesta: attendo il prossimo punto sicuro."
+    }
+
     func stop() {
+        if sessionCancellation?.cycleInProgress == true { interruptionRequested = true }
         maintenanceCancel?.cancel()
         auditCancel?.cancel()
         sessionCancellation?.cancel()
@@ -1210,6 +1260,7 @@ final class MountedCopyController: ObservableObject {
     }
 
     func refresh() {
+        guard !previewOnly else { return }
         do {
             let database = try Self.databaseURL()
             guard FileManager.default.fileExists(atPath: database.path) else {
