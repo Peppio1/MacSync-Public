@@ -87,9 +87,24 @@ public enum WindowsPathSafety {
             guard info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else { throw MountedCopyError.unsafeFile }
             let names = try FileManager.default.contentsOfDirectory(atPath:parent.path)
             let aliases = names.filter { folded($0) == folded(part) }
-            guard aliases.count <= 1,
-                  aliases.isEmpty || Array(aliases[0].utf8) == Array(part.utf8)
-            else { throw MountedCopyError.destinationConflict }
+            guard aliases.count <= 1 else { throw MountedCopyError.destinationConflict }
+            if let actual = aliases.first, Array(actual.utf8) != Array(part.utf8) {
+                // Finder/APFS can report decomposed Unicode names even
+                // when the caller supplied the composed spelling. Accept
+                // canonical equivalence ONLY when both spellings address
+                // the same filesystem object; still reject case aliases
+                // and normalization collisions on other filesystems.
+                guard actual.precomposedStringWithCanonicalMapping == part.precomposedStringWithCanonicalMapping
+                else { throw MountedCopyError.destinationConflict }
+                var requested = stat(), listed = stat()
+                let requestedURL = parent.appendingPathComponent(part)
+                let listedURL = parent.appendingPathComponent(actual)
+                guard requestedURL.path.withCString({ lstat($0,&requested) }) == 0,
+                      listedURL.path.withCString({ lstat($0,&listed) }) == 0,
+                      requested.st_dev == listed.st_dev, requested.st_ino == listed.st_ino,
+                      requested.st_mode & mode_t(S_IFMT) != mode_t(S_IFLNK)
+                else { throw MountedCopyError.destinationConflict }
+            }
             parent.appendPathComponent(part)
         }
     }
@@ -224,12 +239,19 @@ public enum ArchiveDatabaseSafety {
         sqlite3_busy_timeout(db,5000)
         return db
     }
-    public static func verify(_ url: URL) throws {
-        let db = try open(url,flags:SQLITE_OPEN_READONLY)
+    /// The operational database is opened without CREATE, in read/write
+    /// mode so SQLite can recover a committed WAL even when its SHM sidecar
+    /// was removed on the previous clean close. Published snapshots use
+    /// read-only verification and must not depend on WAL/SHM sidecars.
+    public static func verify(_ url: URL, readOnly: Bool = false) throws {
+        _ = try fileIdentity(url)
+        let db = try open(url,flags:readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE)
         defer { sqlite3_close(db) }
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db,"PRAGMA quick_check;",-1,&stmt,nil) == SQLITE_OK else {
-            throw JournalError.database("Controllo integrità SQLite non riuscito")
+        let prepareResult = sqlite3_prepare_v2(db,"PRAGMA quick_check;",-1,&stmt,nil)
+        guard prepareResult == SQLITE_OK else {
+            if let stmt { sqlite3_finalize(stmt) }
+            throw JournalError.database("Controllo integrità SQLite non riuscito (codice \(prepareResult)): " + String(cString:sqlite3_errmsg(db)))
         }
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_step(stmt) == SQLITE_ROW,
@@ -247,8 +269,14 @@ public enum ArchiveDatabaseSafety {
             throw JournalError.database("Percorso backup già esistente o non valido")
         }
         let tmp = target.deletingLastPathComponent().appendingPathComponent(".backup-"+UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at:tmp) }
-        let src = try open(source,flags:SQLITE_OPEN_READONLY)
+        // Only the uniquely owned temporary snapshot and its own sidecars
+        // may be cleaned. Never remove WAL/SHM files from the source.
+        defer {
+            for suffix in ["","-wal","-shm","-journal"] {
+                try? FileManager.default.removeItem(atPath:tmp.path+suffix)
+            }
+        }
+        let src = try open(source,flags:SQLITE_OPEN_READWRITE)
         defer { sqlite3_close(src) }
         do {
             let dst = try open(tmp,flags:SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)
@@ -259,10 +287,28 @@ public enum ArchiveDatabaseSafety {
             let result = sqlite3_backup_step(backup,-1)
             let finish = sqlite3_backup_finish(backup)
             guard result == SQLITE_DONE, finish == SQLITE_OK else {
-                throw JournalError.database("Backup SQLite non completato")
+                throw JournalError.database("Backup SQLite non completato (codici \(result), \(finish))")
             }
+            // sqlite3_backup can preserve the WAL format of the database
+            // header. Convert the destination ONLY to rollback-journal
+            // format before closing, so a standalone file is still valid
+            // when opened read-only or moved to another directory.
+            var mode: OpaquePointer?
+            let rc = sqlite3_prepare_v2(dst,"PRAGMA journal_mode=DELETE;",-1,&mode,nil)
+            guard rc == SQLITE_OK else {
+                if let mode { sqlite3_finalize(mode) }
+                throw JournalError.database("Impossibile rendere autonomo il backup SQLite (codice \(rc)): " + String(cString:sqlite3_errmsg(dst)))
+            }
+            defer { sqlite3_finalize(mode) }
+            guard sqlite3_step(mode) == SQLITE_ROW,
+                  let name = sqlite3_column_text(mode,0),
+                  String(cString:name).lowercased() == "delete",
+                  sqlite3_step(mode) == SQLITE_DONE
+            else { throw JournalError.database("Modalità del backup SQLite non autonoma") }
         }
-        try verify(tmp)
+        guard !["-wal","-shm","-journal"].contains(where:{ FileManager.default.fileExists(atPath:tmp.path+$0) })
+        else { throw JournalError.database("Il backup SQLite presenta file ausiliari non consolidati") }
+        try verify(tmp,readOnly:true)
         try FileManager.default.moveItem(at:tmp,to:target)
     }
 }

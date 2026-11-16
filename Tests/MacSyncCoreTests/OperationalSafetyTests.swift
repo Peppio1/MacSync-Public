@@ -71,6 +71,23 @@ final class OperationalSafetyTests: XCTestCase {
         XCTAssertThrowsError(try WindowsPathSafety.checkNames(relativePath:"image.jpg",under:target))
         XCTAssertNoThrow(try WindowsPathSafety.checkNames(relativePath:"Image.jpg",under:target))
     }
+    func testCanonicalUnicodeSpellingAllowsSameFileButRejectsCaseAlias() throws {
+        let (base,_,target,_) = try fixture()
+        defer { try? FileManager.default.removeItem(at:base) }
+        let composed = "foto \u{00E0}\u{00E8}.dng"
+        let decomposed = composed.decomposedStringWithCanonicalMapping
+        XCTAssertNotEqual(Array(composed.utf8),Array(decomposed.utf8))
+        try Data("image".utf8).write(to:target.appendingPathComponent(composed))
+        XCTAssertNoThrow(try WindowsPathSafety.checkNames(relativePath:composed,under:target))
+        // On a normalization-sensitive filesystem an alternate spelling
+        // must remain blocked, rather than create a second Windows alias.
+        if FileManager.default.fileExists(atPath:target.appendingPathComponent(decomposed).path) {
+            XCTAssertNoThrow(try WindowsPathSafety.checkNames(relativePath:decomposed,under:target))
+        } else {
+            XCTAssertThrowsError(try WindowsPathSafety.checkNames(relativePath:decomposed,under:target))
+        }
+        XCTAssertThrowsError(try WindowsPathSafety.checkNames(relativePath:composed.uppercased(),under:target))
+    }
     func testExclusiveArchiveLockRejectsSecondInstanceAndReleasesOnClose() throws {
         let (base,_,_,_) = try fixture()
         defer { try? FileManager.default.removeItem(at:base) }
@@ -88,11 +105,38 @@ final class OperationalSafetyTests: XCTestCase {
         _ = try journal.enqueue(rootID:"r",relativePath:"a.jpg",kind:.upsert)
         let backup = base.appendingPathComponent("backup.sqlite")
         try ArchiveDatabaseSafety.backup(db,to:backup)
-        XCTAssertEqual(try ChangeJournal(path:backup.path).pending(),try journal.pending())
+        // The backup must be a portable single file BEFORE any writer
+        // reopens it and possibly changes its journal mode again.
+        try ArchiveDatabaseSafety.verify(backup,readOnly:true)
+        let header = try Data(contentsOf:backup).prefix(100)
+        XCTAssertEqual(Array(header.dropFirst(18).prefix(2)),[UInt8(1),UInt8(1)])
+        for suffix in ["-wal","-shm","-journal"] {
+            XCTAssertFalse(FileManager.default.fileExists(atPath:backup.path+suffix))
+        }
+        let isolated = base.appendingPathComponent("isolated",isDirectory:true)
+        try FileManager.default.createDirectory(at:isolated,withIntermediateDirectories:false)
+        let copy = isolated.appendingPathComponent("portable.sqlite")
+        try FileManager.default.copyItem(at:backup,to:copy)
+        try ArchiveDatabaseSafety.verify(copy,readOnly:true)
+        XCTAssertEqual(try ChangeJournal(path:copy.path).pending(),try journal.pending())
         XCTAssertThrowsError(try ArchiveDatabaseSafety.backup(db,to:backup))
         let bad = base.appendingPathComponent("bad.sqlite")
         try Data("not a sqlite database".utf8).write(to:bad)
         XCTAssertThrowsError(try ArchiveDatabaseSafety.verify(bad))
+    }
+    func testBackupOfClosedWALDatabaseRetainsCommittedQueue() throws {
+        let (base,_,_,db) = try fixture()
+        defer { try? FileManager.default.removeItem(at:base) }
+        let id: Int64
+        do {
+            let journal = try ChangeJournal(path:db.path)
+            id = try journal.enqueue(rootID:"r",relativePath:"closed.jpg",kind:.upsert)
+        }
+        try ArchiveDatabaseSafety.verify(db)
+        let backup = base.appendingPathComponent("closed-backup.sqlite")
+        try ArchiveDatabaseSafety.backup(db,to:backup)
+        try ArchiveDatabaseSafety.verify(backup,readOnly:true)
+        XCTAssertEqual(try ChangeJournal(path:backup.path).pending().map(\.id),[id])
     }
     func testAnchoredDirectoryRefusesReplacementBeforeRemoval() throws {
         let (base,_,target,_) = try fixture()

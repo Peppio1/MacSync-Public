@@ -51,7 +51,8 @@ final class AutomaticCopyRecoveryScenarioTests: XCTestCase {
             pairs: [configured]
         ), .disabled)
 
-        try fm.removeItem(at: destination)
+        let offlineDirectory = base.appendingPathComponent("temporarily-offline")
+        try fm.moveItem(at:destination,to:offlineDirectory)
         XCTAssertEqual(
             DestinationProbe.inspect(path: destination.path, expectedVolume: expected),
             .unavailable
@@ -62,10 +63,9 @@ final class AutomaticCopyRecoveryScenarioTests: XCTestCase {
         XCTAssertEqual(offline.deferred, 1)
         XCTAssertFalse(fm.fileExists(atPath: destination.path))
 
-        try fm.createDirectory(at: destination, withIntermediateDirectories: true)
-        try Data("server keeps this".utf8).write(
-            to: destination.appendingPathComponent("file-previously-deleted.jpg")
-        )
+        // Restore the exact same local directory and data. Deleting and
+        // recreating it would simulate replacement, not reconnection.
+        try fm.moveItem(at:offlineDirectory,to:destination)
         XCTAssertEqual(DestinationProbe.inspect(
             path: destination.path, expectedVolume: expected
         ), .ready)

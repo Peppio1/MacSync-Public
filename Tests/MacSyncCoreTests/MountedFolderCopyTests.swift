@@ -151,16 +151,23 @@ final class MountedFolderCopyTests: XCTestCase {
             rootID: "photos", source: fixture.source, target: fixture.target
         )
         let worker = try MountedFolderCopyWorker(journal: journal, log: log, mappings: [map])
-        try FileManager.default.removeItem(at: fixture.target)
+        let hidden = fixture.base.appendingPathComponent("temporarily-offline")
+        try FileManager.default.moveItem(at:fixture.target,to:hidden)
         let outcome = try worker.runOnce(enabled: true)
         XCTAssertEqual(outcome.deferred, 1)
         XCTAssertEqual(try journal.pending().count, 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.target.path))
-        // Simulate the SAME destination becoming available again. A failed
-        // attempt must not discard the job or invent a fallback folder.
-        try FileManager.default.createDirectory(
-            at: fixture.target, withIntermediateDirectories: true
-        )
+        // A replacement at the same path and on the same volume must
+        // remain blocked, and no queued job may be acknowledged.
+        try FileManager.default.createDirectory(at:fixture.target,withIntermediateDirectories:false)
+        let replacement = try worker.runOnce(enabled:true)
+        XCTAssertTrue(replacement.interrupted)
+        XCTAssertEqual(replacement.copied,0)
+        XCTAssertEqual(try journal.pending().count,1)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath:fixture.target.path).isEmpty)
+        try FileManager.default.removeItem(at:fixture.target)
+        // Restore the original directory, not an imitation with a new inode.
+        try FileManager.default.moveItem(at:hidden,to:fixture.target)
         let resumed = try worker.runOnce(enabled: true)
         XCTAssertEqual(resumed.created, 1)
         XCTAssertEqual(resumed.failed, 0)

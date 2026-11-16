@@ -1219,78 +1219,74 @@ final class MountedCopyController: ObservableObject {
             maintenanceStatus = "Nessun file temporaneo idoneo da rimuovere"
             return
         }
-        do {
-            let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
-            let approval = NSAlert()
-            approval.alertStyle = .warning
-            approval.messageText = "Eliminare \(count) file temporanei MacSync?"
-            approval.informativeText = """
-            Solo file UUID.partial vecchi di almeno 7 giorni, nella cartella
-            .macsync-staging. Verranno ricontrollati prima della rimozione.
-            Non verranno toccate fotografie o copie di backup.
-            Le copie devono rimanere arrestate.
-            """
-            approval.addButton(withTitle: "Elimina temporanei verificati")
-            approval.addButton(withTitle: "Annulla")
-            guard approval.runModal() == .alertFirstButtonReturn,
-                  !active, !maintaining, !seedBusy else { return }
+        let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
+        let approval = NSAlert()
+        approval.alertStyle = .warning
+        approval.messageText = "Eliminare \(count) file temporanei MacSync?"
+        approval.informativeText = """
+        Solo file UUID.partial vecchi di almeno 7 giorni, nella cartella
+        .macsync-staging. Verranno ricontrollati prima della rimozione.
+        Non verranno toccate fotografie o copie di backup.
+        Le copie devono rimanere arrestate.
+        """
+        approval.addButton(withTitle: "Elimina temporanei verificati")
+        approval.addButton(withTitle: "Annulla")
+        guard approval.runModal() == .alertFirstButtonReturn,
+              !active, !maintaining, !seedBusy else { return }
 
-            let cancel = SeedVerificationCancellation()
-            maintenanceCancel = cancel
-            maintaining = true
-            maintenanceStatus = "Pulizia temporanei verificati in corso…"
-            queue.async { [weak self] in
-                do {
-                    let freshMappings = try configured.map {
-                try MountedFolderMapping(
-                    rootID: $0.id, source: URL(fileURLWithPath: $0.path),
-                    target: URL(fileURLWithPath: $0.destination),
-                    expectedTargetVolume: $0.expected
-                )
-            }
-            guard freshMappings.count == pending.count,
-                  pending.allSatisfy({ saved in
-                      freshMappings.contains(where: {
-                          $0.rootID == saved.mapping.rootID &&
-                          $0.target == saved.mapping.target &&
-                          $0.source == saved.mapping.source &&
-                          $0.targetVolume == saved.mapping.targetVolume
-                      })
+        let cancel = SeedVerificationCancellation()
+        maintenanceCancel = cancel
+        maintaining = true
+        maintenanceStatus = "Pulizia temporanei verificati in corso…"
+        queue.async { [weak self] in
+            do {
+                let freshMappings = try configured.map {
+            try MountedFolderMapping(
+                rootID: $0.id, source: URL(fileURLWithPath: $0.path),
+                target: URL(fileURLWithPath: $0.destination),
+                expectedTargetVolume: $0.expected
+            )
+        }
+        guard freshMappings.count == pending.count,
+              pending.allSatisfy({ saved in
+                  freshMappings.contains(where: {
+                      $0.rootID == saved.mapping.rootID &&
+                      $0.target == saved.mapping.target &&
+                      $0.source == saved.mapping.source &&
+                      $0.targetVolume == saved.mapping.targetVolume
                   })
-            else { throw MountedCopyError.invalidMapping }
-                    try ChangeJournal(path:Self.databaseURL().path).verifyDirectoryBindings(freshMappings)
-                    var deleted = 0
-                    for item in pending {
-                        guard !cancel.isCancelled else { break }
-                        deleted += try StagingMaintenance.cleanup(
-                            mapping: item.mapping, inspected: item.inspection,
-                            approved: true, shouldContinue: { !cancel.isCancelled }
-                        )
-                    }
-                    let database = try Self.databaseURL()
-                    try? SyncActivityLog(path: database.path).record(
-                        level: .info, rootID: "app", action: "staging_cleanup",
-                        message: (cancel.isCancelled ? "Pulizia interrotta: " : "Pulizia completata: ") + "\(deleted) temporanei eliminati"
+              })
+        else { throw MountedCopyError.invalidMapping }
+                try ChangeJournal(path:Self.databaseURL().path).verifyDirectoryBindings(freshMappings)
+                var deleted = 0
+                for item in pending {
+                    guard !cancel.isCancelled else { break }
+                    deleted += try StagingMaintenance.cleanup(
+                        mapping: item.mapping, inspected: item.inspection,
+                        approved: true, shouldContinue: { !cancel.isCancelled }
                     )
-                    DispatchQueue.main.async { [weak self] in
-                        self?.maintaining = false
-                        self?.maintenanceCandidates = []
-                        self?.maintenanceCancel = nil
-                        self?.maintenanceStatus = (cancel.isCancelled ? "Pulizia interrotta: " : "Pulizia completata: ") + "\(deleted) temporanei eliminati. Foto e backup invariati."
-                        self?.refresh()
-                    }
-                } catch {
-                    DispatchQueue.main.async { [weak self] in
-                        self?.maintaining = false
-                        self?.maintenanceCancel = nil
-                        self?.maintenanceCandidates = []
-                        self?.maintenanceStatus = "Pulizia temporanei interrotta: "
-                            + error.localizedDescription
-                    }
+                }
+                let database = try Self.databaseURL()
+                try? SyncActivityLog(path: database.path).record(
+                    level: .info, rootID: "app", action: "staging_cleanup",
+                    message: (cancel.isCancelled ? "Pulizia interrotta: " : "Pulizia completata: ") + "\(deleted) temporanei eliminati"
+                )
+                DispatchQueue.main.async { [weak self] in
+                    self?.maintaining = false
+                    self?.maintenanceCandidates = []
+                    self?.maintenanceCancel = nil
+                    self?.maintenanceStatus = (cancel.isCancelled ? "Pulizia interrotta: " : "Pulizia completata: ") + "\(deleted) temporanei eliminati. Foto e backup invariati."
+                    self?.refresh()
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    self?.maintaining = false
+                    self?.maintenanceCancel = nil
+                    self?.maintenanceCandidates = []
+                    self?.maintenanceStatus = "Pulizia temporanei interrotta: "
+                        + error.localizedDescription
                 }
             }
-        } catch {
-            maintenanceStatus = "Pulizia bloccata: " + error.localizedDescription
         }
     }
 

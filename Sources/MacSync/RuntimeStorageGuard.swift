@@ -64,7 +64,7 @@ final class RuntimeStorageGuard {
                 let day = snapshots.appendingPathComponent(formatter.string(from:Date())+".sqlite")
                 if !FileManager.default.fileExists(atPath:day.path) {
                     try ArchiveDatabaseSafety.backup(db,to:day)
-                } else { try ArchiveDatabaseSafety.verify(day) }
+                } else { try ArchiveDatabaseSafety.verify(day,readOnly:true) }
             }
             return RuntimeStorageGuard(lock:lock)
         } catch {

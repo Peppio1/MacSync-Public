@@ -103,13 +103,14 @@ final class UploadCyclePerformanceTests: XCTestCase {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }
         for n in 0..<65 { try add(f, name: "photo-\(n).psd") }
-        try FileManager.default.removeItem(at: f.target)
+        let offlineDirectory = f.base.appendingPathComponent("temporarily-offline")
+        try FileManager.default.moveItem(at:f.target,to:offlineDirectory)
         let result = try f.worker.runCycle(enabled: true, pageSize: 10)
         XCTAssertTrue(result.interrupted)
         XCTAssertEqual(result.deferred, 1)
         XCTAssertEqual(result.copied, 0)
         XCTAssertEqual(try f.journal.pendingUploads().count, 65)
-        try FileManager.default.createDirectory(at: f.target, withIntermediateDirectories: false)
+        try FileManager.default.moveItem(at:offlineDirectory,to:f.target)
         XCTAssertEqual(try f.worker.runCycle(enabled: true).copied, 65)
     }
 
