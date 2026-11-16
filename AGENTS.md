@@ -1,7 +1,7 @@
 # AGENTS.md — MacSync
 
 ## Obiettivo
-App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell'iMac verso due cartelle di destinazione, locali (test sullo stesso Mac) o su condivisioni SMB già montate dal Finder. repository pubblico Videomakercd/MacSync-Public. Disponibile in uso commerciale senza componenti a pagamento, nessun servizio da installare sul server Windows 2016.
+App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell'iMac verso due cartelle di destinazione, locali (test sullo stesso Mac) o su condivisioni SMB già montate dal Finder. Repository pubblico Videomakercd/MacSync-Public. Disponibile in uso commerciale senza componenti a pagamento, nessun servizio da installare sul server Windows 2016.
 
 ## REQUISITI CONFERMATI (novembre 2026)
 - UI con configurazione per entrambe le coppie: Sorgente → Destinazione. Le due cartelle si scelgono con NSOpenPanel o drag & drop dal Finder. I nomi di riferimento sono Cartella_1 e Cartella_2 ma sono configurabili gli effettivi percorsi.
@@ -17,7 +17,7 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 3. Validare che nessuna sorgente/destinazione si sovrapponga, anche tra coppie, e che il volume destinazione risponda alla fingerprint di selezione (filesystem + mount point).
 4. Trasferimenti per file singolo, via staging nella destinazione stessa. Verificare sorgente stabile prima della pubblicazione. Sovrascritture in fase test devono avere backup non cancellato.
 5. Non loggare password, IP/host di server, percorsi assoluti, variabili d'ambiente con credenziali. Registro SQLite contiene percorso relativo del file e metadati: avvisare prima dell'esportazione.
-6. Versioni di codice e test sempre sul repository; GitHub Actions macOS 15 deve passare PR/commit. Nessun test GitHub sostituisce il collaudo SMB reale con iMac vero.
+6. Versioni di codice e test sempre sul repository; GitHub Actions macOS 15 deve essere eseguito su richiesta e superato prima di considerare una versione convalidata. Nessun test GitHub sostituisce il collaudo SMB reale con iMac vero.
 7. **Non dichiarare pronto per i 100 GB** finché bootstrap, cleanup staging, password Finder/VPN, macOS login, SMB rename e resilienza non sono collaudati.
 8. In assenza di certezze sull'API Foundation o sul comportamento di SMB, interrompere l'azione distruttiva e loggare l'errore senza peggiorare lo stato.
 

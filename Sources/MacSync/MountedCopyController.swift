@@ -796,7 +796,7 @@ final class MountedCopyController: ObservableObject {
         warning.messageText = "Verificare i file già copiati con SHA-256?"
         warning.informativeText = """
         MacSync confronterà il contenuto dei file già presenti in Sorgente e
-        Destinazione e leggerà integralmente entrambi i file. Per 100 GB
+        Destinazione e leggerà integralmente entrambi i file. Per esempio, per 100 GB
         potrebbe leggere circa 200 GB complessivi, di cui fino a 100 GB
         attraverso la VPN. NON trasferirà o cancellerà alcun file.
         Soltanto una conferma successiva potrà allineare la coda SQLite.

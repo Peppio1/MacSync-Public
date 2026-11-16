@@ -1,5 +1,7 @@
 # MacSync — prototipo v0.12.4
 
+> Edizione pubblica: lo storico Git è stato anonimizzato. Nomi, indirizzi di rete e dimensioni di archivio sono esempi dimostrativi. Le vecchie versioni e le prove storiche non attestano la convalida della versione corrente.
+
 Applicazione nativa macOS per la futura sincronizzazione **unidirezionale Sorgente → Destinazione**, con copie selettive a frequenza configurabile, SQLite e FSEvents.
 
 > **STATO: PROTOTIPO DA TESTARE, NON VERSIONE DI PRODUZIONE.** Copie automatiche e cancellazioni speculari sono disattivate per default. Dalla v0.12.3 le cancellazioni richiedono un consenso persistente esplicito legato alle coppie verificate; i controlli tecnici sono obbligatori. Per ora selezionare **solo cartelle di prova**, senza dati di produzione. Le sezioni storiche precedenti alla v0.12.3 descrivono i comportamenti delle rispettive versioni.

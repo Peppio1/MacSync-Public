@@ -1,18 +1,9 @@
 name: macOS CI
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'Package.swift'
-      - 'Sources/**'
-      - 'Tests/**'
-      - 'Packaging/**'
-      - '.github/workflows/**'
-  pull_request:
   workflow_dispatch:
 
-# Reduce macOS runner minutes in the private repository.
+# Compile explicitly on demand; prevent overlapping runs.
 concurrency:
   group: macsync-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
