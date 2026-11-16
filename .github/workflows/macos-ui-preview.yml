@@ -7,7 +7,7 @@ on:
     paths:
       - 'Package.swift'
       - 'Sources/MacSync/**'
-      - 'Sources/MacSyncCore/ArchiveAudit.swift'
+      - 'Sources/MacSyncCore/**'
       - 'Tests/MacSyncUIPreviewTests/**'
       - '.github/workflows/macos-ui-preview.yml'
 
