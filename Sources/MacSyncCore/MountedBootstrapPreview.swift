@@ -12,9 +12,9 @@ public enum MountedBootstrapPreview {
         try mapping.verify()
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let remote = try targetItems.map { item in
+        let remote: [RemoteFileMetadata] = try targetItems.map { item in
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
-            RemoteFileMetadata(
+            return RemoteFileMetadata(
                 path: item.relativePath,
                 size: item.size,
                 modTime: formatter.string(
