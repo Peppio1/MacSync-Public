@@ -6,6 +6,14 @@ import MacSyncCore
 
 /// Renders the actual configuration view with a preview-only runtime. All interactions are disabled; synthetic history is stored in a temporary SQLite database, never the real app archive.
 final class MacSyncUIPreviewTests: XCTestCase {
+    func testWindowLayoutPolicy() async {
+        await MainActor.run {
+            XCTAssertFalse(MacSyncWindowLayout(width: 1180, height: 820).compact)
+            XCTAssertTrue(MacSyncWindowLayout(width: 1020, height: 720).compact)
+            XCTAssertTrue(MacSyncWindowLayout(width: 980, height: 660).compact)
+            XCTAssertTrue(MacSyncWindowLayout(width: 1180, height: 660).compact)
+        }
+    }
     func testItalianWeekdayLabels() async {
         await MainActor.run {
             XCTAssertEqual((1...7).map(macSyncWeekdayName), ["Domenica","Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato"])
@@ -65,8 +73,8 @@ final class MacSyncUIPreviewTests: XCTestCase {
                         .allowsHitTesting(false)
                     try Self.render(screen, name: "page-\(pageKey(page))-\(suffix)", scheme: scheme, directory: directory, width: 1180, height: 820)
                     try Self.render(screen, name: "compact-\(pageKey(page))-\(suffix)", scheme: scheme, directory: directory, width: 1020, height: 720)
+                    try Self.render(screen, name: "minimum-\(pageKey(page))-\(suffix)", scheme: scheme, directory: directory, width: 980, height: 660)
                     if page == .audit {
-                        try Self.render(screen, name: "minimum-audit-\(suffix)", scheme: scheme, directory: directory, width: 980, height: 660)
                         runtime.copy.populateScreenshotFixture(page: page, entries: try log.recent(), cycle: try history.cycles(limit: 1).first, lastAudit: lastAudit, auditInProgress: false)
                         let idle = MacSyncConfigurationView(model: runtime.model, copy: runtime.copy, runtime: runtime, settings: runtime.settings, destinations: runtime.destinations, initialPage: page, previewScheme: scheme).allowsHitTesting(false)
                         try Self.render(idle, name: "idle-audit-\(suffix)", scheme: scheme, directory: directory, width: 1180, height: 820)
@@ -139,12 +147,18 @@ final class MacSyncUIPreviewTests: XCTestCase {
         let background = scheme == .dark
             ? Color(red: 0.13, green: 0.13, blue: 0.14)
             : Color(red: 0.96, green: 0.96, blue: 0.97)
-        let canvas = VStack(alignment: .leading, spacing: 12) {
-            Text("MacSync — Anteprima con dati sintetici").font(.headline)
-            view
-            Spacer(minLength: 0)
+        // Full-page captures measure exact usable content bounds.
+        let canvas = Group {
+            if name.hasPrefix("page-") || name.hasPrefix("compact-") || name.hasPrefix("minimum-") || name.hasPrefix("idle-") {
+                view
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("MacSync — Anteprima con dati sintetici").font(.headline)
+                    view
+                    Spacer(minLength: 0)
+                }.padding(20)
+            }
         }
-        .padding(20)
         .frame(width: CGFloat(width), height: CGFloat(height), alignment: .topLeading)
         .background(background)
         .environment(\.colorScheme, scheme)
@@ -166,6 +180,8 @@ final class MacSyncUIPreviewTests: XCTestCase {
         RunLoop.main.run(until: Date().addingTimeInterval(0.25))
         host.layoutSubtreeIfNeeded()
         host.displayIfNeeded()
+        XCTAssertEqual(host.bounds.width, CGFloat(width), accuracy: 0.5, "Unexpected host width: \(name)")
+        XCTAssertEqual(host.bounds.height, CGFloat(height), accuracy: 0.5, "Unexpected host height: \(name)")
         let bitmap = try XCTUnwrap(NSBitmapImageRep(
             bitmapDataPlanes: nil, pixelsWide: width * 2, pixelsHigh: height * 2,
             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,

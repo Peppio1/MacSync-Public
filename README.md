@@ -301,3 +301,8 @@ Rollback `rollback-v0.13.5` retains 0d8b99443b927c3621166dc5d45b382332b8bbf6 (14
 ### v0.13.7 — audit layout refinements
 
 Rollback `rollback-v0.13.6` retains d00ccf6bbd2e653f1435b38550d180da3e6d2165 (145 core tests and UI rendering passed). Audit-only compact panels, balanced columns, compact two-column report counts, file path beside the cancel action, and explicit Italian weekday names in both schedules. All result categories and confirmation actions remain; no core or database changes. Added weekday label regression and six audit screenshot fixtures, including idle standard/compact and running at 980×660, total 38 PNGs. Scroll fallback remains for unusually long states rather than hiding actions. Actual screenshot inspection and interactive/SMB validation pending.
+
+
+### v0.13.8 — adaptive desktop polish candidate
+
+Rollback `rollback-v0.13.7` retains 979f8a0a3ab1c6011ae248e12314b0979a56c248. Reviewed prior full-page light/dark standard and compact renders. Adaptive presentation measured from usable window geometry; compact dashboard, aligned folder/settings panels, explicit accent/green toggle presentation with native accessibility representation, larger standard audit text and metrics, fixed history filters/detail/footer with flexible scrollable Table. No change to core copy/audit logic, persisted configuration or SQLite. Full-page captures now use exact window content dimensions rather than a padded demonstration header. Added minimum 980×660 captures for every page (48 total) and layout policy test; visual QA, native keyboard/VoiceOver, actual SMB and interactive validation still pending. Scroll fallback retained for other pages in exceptionally expanded states.

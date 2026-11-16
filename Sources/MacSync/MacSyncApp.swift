@@ -398,6 +398,7 @@ struct SyncSummaryMetric: View {
     let count: Int
     let symbol: String
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.macSyncLayout) private var layout
 
     private var tone: Color {
         switch title {
@@ -411,18 +412,18 @@ struct SyncSummaryMetric: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: layout.compact ? 3 : 5) {
             HStack(spacing: 4) {
                 Image(systemName: symbol).font(.system(size: 13, weight: .semibold)).foregroundStyle(tone)
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right").font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary)
             }
-            Text(count.formatted()).font(.system(size: 26, weight: .semibold, design: .rounded))
+            Text(count.formatted()).font(.system(size: layout.compact ? 23 : 26, weight: .semibold, design: .rounded))
                 .monospacedDigit().foregroundStyle(tone).lineLimit(1).minimumScaleFactor(0.6)
             Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary).lineLimit(1)
         }
-        .padding(9)
-        .frame(maxWidth: .infinity, minHeight: 74, alignment: .leading)
+        .padding(layout.compact ? 7 : 9)
+        .frame(maxWidth: .infinity, minHeight: layout.compact ? 63 : 74, alignment: .leading)
         .background(MacSyncColors.inset(scheme), in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(MacSyncColors.line(scheme), lineWidth: 1))
         .accessibilityElement(children: .combine)
@@ -570,7 +571,8 @@ struct MacSyncConfigurationView: View {
         HStack(spacing: 10) {
             Text("Sincronizzazione automatica").font(.subheadline.weight(.semibold))
             Toggle("Sincronizzazione automatica",isOn: Binding(get:{ copy.automaticCopiesEnabled },set:{ runtime.onAutomaticPreferenceChanged($0) }))
-                .labelsHidden().toggleStyle(.switch).tint(.green)
+                .labelsHidden().toggleStyle(MacSyncVisibleSwitchStyle(green: true))
+                .help(runtime.automaticStatus)
                 .disabled(runtime.savingSchedule || copy.seedBusy || copy.maintaining || copy.interruptionRequested)
             Text(copy.automaticCopiesEnabled ? "Attiva" : "Disattivata").font(.subheadline.weight(.semibold))
                 .foregroundStyle(copy.automaticCopiesEnabled ? MacSyncColors.green(scheme) : Color.secondary)
@@ -578,10 +580,10 @@ struct MacSyncConfigurationView: View {
     }
 
     private var overviewPage: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             MacSyncPanel("Operazione corrente", icon: "arrow.left.arrow.right") {
                 HStack {
-                    Text(globalActivity).font(.subheadline.weight(.semibold))
+                    if copy.liveProgress == nil || copy.interruptionRequested { Text(globalActivity).font(.subheadline.weight(.semibold)) }
                     Spacer()
                     globalControls
                     if !copy.active && copy.liveProgress == nil && !copy.maintaining && !copy.seedBusy && model.scanProgress == nil {
@@ -599,8 +601,7 @@ struct MacSyncConfigurationView: View {
                     if let next = copy.nextScheduledRun ?? runtime.nextAutomaticAttempt { Text("Prossimo: " + macSyncDateTime(next)).font(.caption).foregroundStyle(Color.accentColor) }
                 }
                 if copy.interruptionRequested { Text("Interruzione richiesta: attendo il punto sicuro. La coda viene conservata.").font(.caption) }
-                if !model.message.isEmpty { Text(model.message).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(model.message)
-                }
+                if !model.message.isEmpty { Text(model.message).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(model.message) }
                 if let scan = model.scanProgress { AuditProgressView(progress: scan) }
                 if copy.liveProgress != nil {
                     LiveSyncPanel(copy: copy)
@@ -626,8 +627,8 @@ struct MacSyncConfigurationView: View {
                     Button("Apri riepilogo…") { initialMetric = nil; showSummary = true }
                 }
             }
-            HStack(alignment: .top, spacing: 12) {
-                MacSyncPanel("Ultimo ciclo", icon: "clock") {
+            HStack(alignment: .top, spacing: 8) {
+                MacSyncPanel("Ultimo ciclo", icon: "clock", fillHeight: true) {
                     if let cycle = copy.lastRecordedCycle {
                         HStack {
                             Label(macSyncCycleState(cycle.state), systemImage: cycle.state == "completed" ? "checkmark.circle.fill" : "clock")
@@ -647,16 +648,16 @@ struct MacSyncConfigurationView: View {
                         Button("Storico…") { page = .history }
                     }
                 }
-                MacSyncPanel("Destinazioni", icon: "folder") {
+                MacSyncPanel("Destinazioni", icon: "folder", fillHeight: true) {
                     let pairs = model.configuredPairs().filter { !$0.path.isEmpty }
                     Text("\(pairs.filter { destinations.state(for:$0.id).isReady }.count) / \(pairs.count) destinazioni pronte").font(.subheadline.weight(.semibold))
                     ForEach(Array(pairs.prefix(3).enumerated()),id: \.offset) { item in destinationLine(item.element.destination, state:destinations.state(for:item.element.id)) }
                     if pairs.count > 3 { Button("Mostra tutte le cartelle…") { page = .folders } }
                     Text("Ultimo controllo: " + (destinations.lastCheckedAt.map { macSyncClock($0) } ?? "non eseguito"))
                         .font(.caption).foregroundStyle(.secondary)
-                    Text("Controllo prima di ogni ciclo, senza verifiche di rete extra.").font(.caption).foregroundStyle(.secondary)
+                    // Cadence explained on Cartelle.
                 }
-            }
+            }.fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -749,7 +750,7 @@ struct MacSyncConfigurationView: View {
                                 }
                             }
                         }
-                    }.padding(10).frame(maxWidth:.infinity,alignment:.topLeading)
+                    }.padding(10).frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.topLeading)
                     .background(MacSyncColors.canvas(scheme),in:RoundedRectangle(cornerRadius:10))
                     .onDrop(of:[UTType.fileURL.identifier],isTargeted:nil) { folderDrop($0,target:false) }
                     Image(systemName:"arrow.right.circle").font(.system(size:26)).foregroundStyle(Color.accentColor).padding(.top,42)
@@ -773,10 +774,10 @@ struct MacSyncConfigurationView: View {
                             }.frame(maxWidth:.infinity,alignment:.leading).padding(10).background(MacSyncColors.inset(scheme),in:RoundedRectangle(cornerRadius:8)).help(plan.parent)
                             Text("Ogni sorgente viene sincronizzata nella sottocartella omonima.").font(.caption).foregroundStyle(.secondary)
                         }
-                    }.padding(10).frame(maxWidth:.infinity,alignment:.topLeading)
+                    }.padding(10).frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.topLeading)
                     .background(MacSyncColors.canvas(scheme),in:RoundedRectangle(cornerRadius:10))
                     .onDrop(of:[UTType.fileURL.identifier],isTargeted:nil) { folderDrop($0,target:true) }
-                }
+                }.fixedSize(horizontal:false,vertical:true)
                 if !folderEditAllowed { Text("Ferma le copie e attendi il termine delle operazioni per modificare le cartelle.").font(.caption).foregroundStyle(.secondary) }
             }
             MacSyncPanel("Connessione",icon:"network") {
@@ -786,7 +787,7 @@ struct MacSyncConfigurationView: View {
                     destinationLine(item.element.destination,state:destinations.state(for:item.element.id))
                 }
                 Text("Ultimo controllo: " + (destinations.lastCheckedAt.map {macSyncClock($0)} ?? "non eseguito")).font(.caption).foregroundStyle(.secondary)
-                Text("Direzione unica: sorgenti → destinazione.").font(.caption).foregroundStyle(.secondary)
+                Text("Direzione unica: sorgenti → destinazione. Controllo prima di ogni ciclo.").font(.caption).foregroundStyle(.secondary)
             }
             Text(model.message).font(.caption).foregroundStyle(.secondary).lineLimit(2).help(model.message)
         }
@@ -814,14 +815,20 @@ struct MacSyncConfigurationView: View {
                     HStack {
                         Text("Ogni")
                         Button("−") { intervalText = String(max(range.lowerBound,max(range.lowerBound,min(range.upperBound,Int(intervalText) ?? range.lowerBound))-1)) }
-                        TextField("Intervallo",text:$intervalText).frame(width:76).textFieldStyle(.roundedBorder).multilineTextAlignment(.center)
+                        TextField("Intervallo",text:$intervalText).frame(width:94).textFieldStyle(.roundedBorder).multilineTextAlignment(.center)
                         Button("+") { intervalText = String(min(range.upperBound,max(range.lowerBound,min(range.upperBound,Int(intervalText) ?? range.lowerBound))+1)) }
                         Text(draftSchedule.frequency == .minutes ? "minuti" : "ore")
                         Spacer()
                     }
                     HStack {
                         ForEach(draftSchedule.frequency == .minutes ? [5,10,15,20,30,45] : [1,2,4,8,12],id:\.self) { n in
-                            Button(String(n)) { intervalText = String(n) }.tint(Int(intervalText) == n ? Color.accentColor : Color.secondary)
+                            Button { intervalText = String(n) } label: {
+                                Text(String(n)).font(.subheadline.weight(Int(intervalText) == n ? .semibold : .regular))
+                                    .frame(minWidth: 30).padding(.vertical, 3)
+                            }.buttonStyle(.plain)
+                                .foregroundStyle(Int(intervalText) == n ? Color.accentColor : Color.primary)
+                                .background(Int(intervalText) == n ? Color.accentColor.opacity(0.14) : Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+                                .accessibilityAddTraits(Int(intervalText) == n ? .isSelected : [])
                         }
                     }
                     if editedSchedule == nil { Text("Inserisci un intervallo da \(range.lowerBound) a \(range.upperBound).").font(.caption).foregroundStyle(.orange) }
@@ -876,7 +883,7 @@ struct MacSyncConfigurationView: View {
         }
     }
     private var historyPage: some View {
-        MacSyncPanel("Registro e dettagli", icon: "list.bullet.rectangle") {
+        MacSyncPanel("Registro e dettagli", icon: "list.bullet.rectangle", fillHeight: true) {
             HStack(spacing: 8) {
                 TextField("Cerca file o errore…", text: $copy.logSearch)
                     .textFieldStyle(.roundedBorder)
@@ -903,7 +910,7 @@ struct MacSyncConfigurationView: View {
                 }
             }
             HStack {
-                Text("\(visibleLog.count) eventi visualizzati").font(.caption).foregroundStyle(.secondary)
+                Text("Filtri e comandi").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Aggiorna") { copy.refresh() }
                 Button("Esporta TSV…") { copy.exportLog() }
@@ -916,7 +923,8 @@ struct MacSyncConfigurationView: View {
                 TableColumn("Operazione") { row in let entry = row.entry; Text(macSyncAction(entry.action)).lineLimit(1) }.width(min: 78, ideal: 108)
                 TableColumn("File / dettaglio") { row in let entry = row.entry; Text(entry.relativePath.isEmpty ? entry.message : entry.relativePath).lineLimit(1).truncationMode(.middle).help(entry.relativePath.isEmpty ? entry.message : entry.relativePath) }
                 TableColumn("Dim.") { row in let entry = row.entry; Text(entry.bytes == 0 ? "—" : ByteCountFormatter.string(fromByteCount: entry.bytes, countStyle: .file)).monospacedDigit() }.width(min: 60, ideal: 80)
-            }.frame(height: 225)
+            }.frame(minHeight: 105, maxHeight: .infinity)
+                .layoutPriority(1)
             if let entry = visibleLog.first(where: { $0.id == selectedLog }) {
                 VStack(alignment: .leading, spacing: 7) {
                     HStack {
@@ -976,7 +984,7 @@ struct MacSyncConfigurationView: View {
                         .fixedSize(horizontal: false, vertical: true)
                  }
             }
-            MacSyncPanel("Cancellazioni e recupero", icon: "arrow.triangle.2.circlepath") {
+            MacSyncPanel("Cancellazioni e recupero", icon: "arrow.triangle.2.circlepath", fillHeight: true) {
                 VStack(alignment: .leading, spacing: 10) {
                     MacSyncSwitchRow(
                         "Abilita cancellazioni speculari",
@@ -1004,7 +1012,7 @@ struct MacSyncConfigurationView: View {
                                     }
                                 }
                                 .labelsHidden()
-                                .frame(width: 210)
+                                .frame(maxWidth: 180)
                                 .disabled(copy.active || copy.seedBusy || copy.maintaining || copy.interruptionRequested || runtime.savingSchedule)
                             }
                             Text("Recupero gestito in .macsync-recovery nella destinazione. I file scaduti verranno rimossi nei cicli successivi, solo se la protezione del volume è valida.")
@@ -1034,7 +1042,7 @@ struct MacSyncConfigurationView: View {
                 }.pickerStyle(.segmented)
             }
 
-            MacSyncPanel("Protezioni facoltative",icon:"shield") {
+            MacSyncPanel("Protezioni facoltative",icon:"shield",fillHeight:true) {
                     VStack(alignment: .leading, spacing: 8) {
                         MacSyncSwitchRow("Limite numerico", isOn: $copy.mirrorProtections.absoluteEnabled)
                         Text("Blocca il ciclo se il numero di cancellazioni supera la soglia nella finestra mobile.").font(.caption).foregroundStyle(.secondary)
@@ -1077,11 +1085,11 @@ struct MacSyncConfigurationView: View {
                     .disabled(copy.active || copy.seedBusy || copy.maintaining || copy.interruptionRequested || runtime.savingSchedule)
             }
             }.frame(maxWidth:.infinity,alignment:.topLeading)
-            }
+            }.fixedSize(horizontal:false,vertical:true)
             MacSyncPanel("Informazioni", icon: "info.circle", accent: false) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("MacSync · v0.13.7").font(.subheadline.weight(.semibold))
+                        Text("MacSync · v0.13.8").font(.subheadline.weight(.semibold))
                         Text("Registro SQLite locale · Aggiornamenti manuali").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -1204,22 +1212,24 @@ struct MacSyncPanel<Content: View>: View {
     let fillHeight: Bool
     let content: Content
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.macSyncLayout) private var layout
+    private var dense: Bool { compact || layout.compact }
     init(_ title: String, icon: String, accent: Bool = false, compact: Bool = false, fillHeight: Bool = false, @ViewBuilder content: () -> Content) {
         self.title = title; self.icon = icon; self.accent = accent; self.compact = compact; self.fillHeight = fillHeight; self.content = content()
     }
     var body: some View {
-        VStack(alignment: .leading, spacing: compact ? 5 : 8) {
+        VStack(alignment: .leading, spacing: dense ? 5 : 9) {
             HStack(spacing: 8) {
                 Image(systemName: icon)
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(MacSyncColors.blue(scheme))
-                    .frame(width: compact ? 23 : 26, height: compact ? 23 : 26)
+                    .frame(width: dense ? 23 : 27, height: dense ? 23 : 27)
                     .background(MacSyncColors.blue(scheme).opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-                Text(title).font(.system(size: 16, weight: .semibold))
+                Text(title).font(.system(size: dense ? 16 : 17, weight: .semibold))
             }
             content
         }
-        .padding(compact ? 9 : 12)
+        .padding(dense ? 9 : 14)
         .frame(maxWidth: .infinity, maxHeight: fillHeight ? .infinity : nil, alignment: .topLeading)
         .background(MacSyncColors.panel(scheme), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12)
@@ -1258,16 +1268,59 @@ func macSyncWasInterrupted(_ entry: SyncLogEntry) -> Bool {
     return message.hasPrefix("ciclo interrotto") || message.hasPrefix("pulizia interrotta") || message.hasPrefix("verifica annullata")
 }
 
+/// Presentation-only sizing policy, measured from actual content bounds.
+struct MacSyncWindowLayout: Equatable {
+    let width: CGFloat
+    let height: CGFloat
+    var compact: Bool { width < 1100 || height < 760 }
+    var sidebarWidth: CGFloat { compact ? 190 : 220 }
+    var pageInset: CGFloat { compact ? 12 : 18 }
+}
+private struct MacSyncWindowLayoutKey: EnvironmentKey {
+    static let defaultValue = MacSyncWindowLayout(width: 1180, height: 820)
+}
+extension EnvironmentValues {
+    var macSyncLayout: MacSyncWindowLayout {
+        get { self[MacSyncWindowLayoutKey.self] }
+        set { self[MacSyncWindowLayoutKey.self] = newValue }
+    }
+}
+
+/// Explicit contrast in inactive windows; accessibility remains a native toggle.
+struct MacSyncVisibleSwitchStyle: ToggleStyle {
+    @Environment(\.isEnabled) private var enabled
+    @Environment(\.colorScheme) private var scheme
+    var green = false
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            Capsule()
+                .fill(configuration.isOn ? (green ? MacSyncColors.green(scheme) : MacSyncColors.blue(scheme)) : Color.secondary.opacity(0.3))
+                .frame(width: 38, height: 21)
+                .overlay(alignment: configuration.isOn ? .trailing : .leading) {
+                    Circle().fill(Color.white).frame(width: 17, height: 17).padding(2)
+                }
+                .opacity(enabled ? 1 : 0.5)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityRepresentation {
+            Toggle(isOn: configuration.$isOn) { configuration.label }.toggleStyle(.switch)
+        }
+    }
+}
+
 struct MacSyncSwitchRow: View {
     let title: String
     @Binding var isOn: Bool
     init(_ title: String, isOn: Binding<Bool>) { self.title = title; self._isOn = isOn }
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             Text(title).fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 12)
+            Spacer(minLength: 4)
             Text(isOn ? "Attivo" : "Disattivo").font(.caption.weight(.semibold)).foregroundStyle(isOn ? Color.accentColor : Color.secondary)
-            Toggle(title, isOn: $isOn).toggleStyle(.switch).labelsHidden()
+            Toggle(title, isOn: $isOn).toggleStyle(MacSyncVisibleSwitchStyle()).labelsHidden()
                 .accessibilityLabel(title)
         }
     }
@@ -1286,6 +1339,8 @@ struct MacSyncSectionShell<Content: View>: View {
         self._page = page; self.monitoring = monitoring; self.next = next; self.showHeader = showHeader; self.activity = activity; self.controls = controls; self.content = content()
     }
     var body: some View {
+        GeometryReader { geometry in
+        let layout = MacSyncWindowLayout(width: geometry.size.width, height: geometry.size.height)
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 9) {
@@ -1319,7 +1374,7 @@ struct MacSyncSectionShell<Content: View>: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(monitoring ? MacSyncColors.green(scheme) : MacSyncColors.orange(scheme))
                     .padding(.vertical, 6)
-            }.padding(16).frame(width: 220).frame(maxHeight: .infinity)
+            }.padding(layout.compact ? 12 : 16).frame(width: layout.sidebarWidth).frame(maxHeight: .infinity)
                 .background(MacSyncColors.sidebar(scheme))
             Divider()
             VStack(spacing: 0) {
@@ -1336,23 +1391,29 @@ struct MacSyncSectionShell<Content: View>: View {
                     .background(MacSyncColors.panel(scheme))
                 Divider()
                 }
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 10) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(page.rawValue).font(.system(size: 27, weight: .bold))
-                            Text(page.subtitle).font(.system(size: 13)).foregroundStyle(.secondary)
-                        }
-                        .padding(.bottom, 1)
-                        content
-                    }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+                if page == .history {
+                    pageContent(layout).frame(maxHeight: .infinity, alignment: .topLeading)
+                } else {
+                    ScrollView { pageContent(layout) }
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(MacSyncColors.canvas(scheme))
         }
-        .font(.system(size: 13))
+        .font(.system(size: layout.compact ? 13 : 14))
         .tint(MacSyncColors.blue(scheme))
         .toggleStyle(.switch)
         .controlSize(.regular)
+        .environment(\.macSyncLayout, layout)
+        }
+    }
+    private func pageContent(_ layout: MacSyncWindowLayout) -> some View {
+        VStack(alignment: .leading, spacing: layout.compact ? 8 : 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(page.rawValue).font(.system(size: layout.compact ? 25 : 28, weight: .bold))
+                Text(page.subtitle).font(.system(size: 13)).foregroundStyle(.secondary)
+            }
+            content
+        }.padding(layout.pageInset).frame(maxWidth: .infinity, alignment: .topLeading)
     }
 }
 

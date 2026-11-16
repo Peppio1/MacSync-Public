@@ -34,8 +34,9 @@ struct MacSyncLinearProgress: View {
 
 struct LiveSyncPanel: View {
     @ObservedObject var copy: MountedCopyController
+    @Environment(\.macSyncLayout) private var layout
     var body: some View {
-        VStack(alignment:.leading,spacing:5) {
+        VStack(alignment:.leading,spacing:layout.compact ? 3 : 5) {
             if let p = copy.liveProgress {
                 TimelineView(.periodic(from:p.started,by:1)) { ctx in
                     let elapsed = max(0,ctx.date.timeIntervalSince(p.started))
@@ -88,7 +89,7 @@ struct LiveSyncPanel: View {
                 }
             }
             if !copy.historyWarning.isEmpty { Text(copy.historyWarning).foregroundStyle(.orange) }
-        }.font(.system(size: 13)).padding(10)
+        }.font(.system(size: 13)).padding(layout.compact ? 7 : 10)
             .frame(maxWidth:.infinity,alignment:.leading)
             .background(Color.secondary.opacity(0.07)).cornerRadius(8)
     }
@@ -447,17 +448,18 @@ struct ArchiveAuditPanel: View {
     @State private var selectedFinding: AuditFindingKind?
     @State private var showFindings = false
     @State private var recognize = false
+    @Environment(\.macSyncLayout) private var layout
+    private var detailFont: Font { .system(size: layout.compact ? 11 : 12) }
 
     private var busy: Bool {
         copy.maintaining || copy.seedBusy || copy.interruptionRequested || runtime.savingSchedule
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 8) {
+        VStack(alignment: .leading, spacing: layout.compact ? 8 : 12) {
+            HStack(alignment: .top, spacing: layout.compact ? 8 : 12) {
                 configuration.frame(maxWidth: .infinity, alignment: .topLeading)
-                VStack(alignment: .leading, spacing: 8) {
-                    operation
+                VStack(alignment: .leading, spacing: layout.compact ? 8 : 12) {
                     lastResult
                 }.frame(maxWidth: .infinity, alignment: .topLeading)
             }.fixedSize(horizontal: false, vertical: true)
@@ -475,7 +477,7 @@ struct ArchiveAuditPanel: View {
     }
 
     private var configuration: some View {
-        MacSyncPanel("Configurazione verifica", icon: "gearshape", compact: true, fillHeight: true) {
+        MacSyncPanel("Configurazione verifica", icon: "gearshape", compact: layout.compact, fillHeight: true) {
             Text("Metodo di verifica").font(.subheadline.weight(.semibold))
             Picker("Metodo", selection: $copy.auditSettings.mode) {
                 Text("Rapida (metadati)").tag(ArchiveAuditMode.quick)
@@ -484,26 +486,26 @@ struct ArchiveAuditPanel: View {
             Text(copy.auditSettings.mode == .quick
                 ? "Confronta percorsi, dimensioni e date."
                 : "Confronta il contenuto dei file tramite SHA-256; può leggere l’intero archivio via VPN.")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(detailFont).foregroundStyle(.secondary)
             Divider()
             MacSyncSwitchRow("Accoda file mancanti e differenti", isOn: $copy.auditSettings.repair)
-            Text("Prepara le copie e gli aggiornamenti necessari.").font(.caption).foregroundStyle(.secondary)
+            Text("Prepara le copie e gli aggiornamenti necessari.").font(detailFont).foregroundStyle(.secondary)
             Divider()
             MacSyncSwitchRow("Riconosci i file già copiati", isOn: $recognize)
                 .disabled(copy.auditSettings.mode != .deep)
             Text("SHA-256 manuale: chiude i job identici dopo conferma. Le copie restano sospese fino alla riattivazione manuale.")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(detailFont).foregroundStyle(.secondary)
             Divider()
             MacSyncSwitchRow("Programma verifica automatica", isOn: $copy.auditSettings.enabled)
-            Text("Verifiche periodiche senza riconoscimento automatico.").font(.caption).foregroundStyle(.secondary)
+            Text("Verifiche periodiche senza riconoscimento automatico.").font(detailFont).foregroundStyle(.secondary)
             if copy.auditSettings.enabled {
                 scheduleControls
                 if let next = runtime.nextAuditAt {
-                    Text("Prossima: \(macSyncDateTime(next))").font(.caption).foregroundStyle(.secondary)
+                    Text("Prossima: \(macSyncDateTime(next))").font(detailFont).foregroundStyle(.secondary)
                 }
             }
             Text("I file presenti solo nella destinazione sono segnalati, mai eliminati.")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(detailFont).foregroundStyle(.secondary)
         }.disabled(busy || copy.active)
     }
 
@@ -535,24 +537,24 @@ struct ArchiveAuditPanel: View {
                     ForEach(0...59, id: \.self) { Text(String(format: "%02d", $0)).tag($0) }
                 }
             }
-        }.font(.caption)
+        }.font(detailFont)
     }
 
     private var operation: some View {
-        MacSyncPanel("Stato e avanzamento", icon: "arrow.triangle.2.circlepath", accent: true, compact: true) {
+        MacSyncPanel("Stato e avanzamento", icon: "arrow.triangle.2.circlepath", accent: true, compact: layout.compact) {
             if let p = copy.auditProgress {
                 CompactArchiveAuditProgress(progress: p)
             } else {
                 Text(copy.auditBusy ? "Verifica in corso" : copy.seedBusy ? "Conferma in corso" : "Nessuna verifica in corso")
                     .font(.subheadline.weight(.semibold))
-                Text(copy.auditStatus).font(.caption).foregroundStyle(.secondary).lineLimit(2).help(copy.auditStatus)
+                Text(copy.auditStatus).font(detailFont).foregroundStyle(.secondary).lineLimit(2).help(copy.auditStatus)
             }
             if copy.seedBusy {
-                Text(copy.seedStatus).font(.caption).lineLimit(3).help(copy.seedStatus)
+                Text(copy.seedStatus).font(detailFont).lineLimit(3).help(copy.seedStatus)
             }
             HStack(spacing: 6) {
                 if let p = copy.auditProgress, !p.currentPath.isEmpty {
-                    Text("File: " + p.currentPath).font(.caption)
+                    Text("File: " + p.currentPath).font(detailFont)
                         .lineLimit(1).truncationMode(.middle).help(p.currentPath)
                         .accessibilityLabel("File corrente: " + p.currentPath)
                 }
@@ -575,13 +577,13 @@ struct ArchiveAuditPanel: View {
     }
 
     private var lastResult: some View {
-        MacSyncPanel("Ultima verifica", icon: "chart.bar.xaxis", compact: true, fillHeight: true) {
+        MacSyncPanel("Ultima verifica", icon: "chart.bar.xaxis", compact: layout.compact, fillHeight: true) {
             if let report = copy.auditReport {
                 resultRow("Data e ora", macSyncDateTime(report.ended))
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text(report.mode == .deep ? "SHA-256" : "Rapida (metadati)").font(.caption.weight(.medium))
                     Spacer(minLength: 4)
-                    Text("Durata: " + elapsedText(report.seconds)).font(.caption).monospacedDigit()
+                    Text("Durata: " + elapsedText(report.seconds)).font(detailFont).monospacedDigit()
                 }
                 Divider()
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], alignment: .leading, spacing: 4) {
@@ -596,27 +598,27 @@ struct ArchiveAuditPanel: View {
                     }
                 }
                 HStack {
-                    Text("Accodati: \(report.queuedRepairs.formatted())").font(.caption).foregroundStyle(.secondary)
+                    Text("Accodati: \(report.queuedRepairs.formatted())").font(detailFont).foregroundStyle(.secondary)
                     Spacer(minLength: 4)
                     Button("Visualizza report…") {
                         selectedFinding = nil; showFindings = true
                     }
                 }
             } else {
-                Text("Nessuna verifica completata").font(.caption).foregroundStyle(.secondary)
+                Text("Nessuna verifica completata").font(detailFont).foregroundStyle(.secondary)
                 Button("Visualizza report…") {}.disabled(true)
             }
             if copy.seedReady && !copy.seedBusy {
                 Divider()
                 Text("\(copy.seedVerifiedCount) file identici in coda").font(.subheadline.weight(.semibold))
-                Text("Nessun file verrà modificato.").font(.caption).foregroundStyle(.secondary)
+                Text("Nessun file verrà modificato.").font(detailFont).foregroundStyle(.secondary)
                 HStack {
                     Button("Conferma allineamento…") { copy.approveSeededFiles() }
                         .buttonStyle(.borderedProminent).disabled(copy.active || busy)
                     Button("Scarta") { copy.invalidateSeedReport() }.disabled(busy)
                 }
             } else if !copy.seedBusy && copy.seedStatus.hasPrefix("Allineamento confermato") {
-                Text(copy.seedStatus).font(.caption).lineLimit(3).help(copy.seedStatus)
+                Text(copy.seedStatus).font(detailFont).lineLimit(3).help(copy.seedStatus)
             }
         }
     }
@@ -633,19 +635,19 @@ struct ArchiveAuditPanel: View {
 
     private func resultRow(_ label: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(label).font(.caption).lineLimit(2)
+            Text(label).font(detailFont).lineLimit(2)
             Spacer(minLength: 4)
             Text(value).font(.caption.weight(.semibold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.8)
         }
     }
 
     private var maintenance: some View {
-        MacSyncPanel("Manutenzione temporanei", icon: "wrench.and.screwdriver", compact: true) {
+        MacSyncPanel("Manutenzione temporanei", icon: "wrench.and.screwdriver", compact: layout.compact) {
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Verifica e rimuove i temporanei di copie interrotte. Usala a copie ferme.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text(copy.maintenanceStatus).font(.caption).foregroundStyle(.secondary)
+                        .font(detailFont).foregroundStyle(.secondary)
+                    Text(copy.maintenanceStatus).font(detailFont).foregroundStyle(.secondary)
                         .lineLimit(2).help(copy.maintenanceStatus)
                 }
                 Spacer(minLength: 4)
@@ -665,6 +667,7 @@ struct ArchiveAuditPanel: View {
 /// Compact audit-only presentation. Inventory progress keeps its existing view.
 private struct CompactArchiveAuditProgress: View {
     let progress: ArchiveAuditProgress
+    @Environment(\.macSyncLayout) private var layout
     private var determinate: Bool {
         progress.total > 0 && !progress.phase.hasPrefix("Analisi")
     }
@@ -700,7 +703,7 @@ private struct CompactArchiveAuditProgress: View {
     private func metric(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title).font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.8)
-            Text(value).font(.system(size: 14, weight: .semibold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
+            Text(value).font(.system(size: layout.compact ? 14 : 17, weight: .semibold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }
