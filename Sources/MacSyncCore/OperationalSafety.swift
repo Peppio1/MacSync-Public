@@ -260,26 +260,52 @@ public enum ArchiveDatabaseSafety {
             throw JournalError.database("Database SQLite non integro: operazioni bloccate")
         }
     }
+    private static func requireAbsent(_ url: URL) throws {
+        var info = stat()
+        let rc = url.path.withCString { lstat($0,&info) }
+        guard rc != 0, errno == ENOENT else {
+            throw JournalError.database("Percorso backup o file ausiliario già esistente/non accessibile")
+        }
+    }
+
     /// sqlite3_backup includes committed WAL contents. Only publish a
-    /// verified snapshot; never replace an existing migration backup.
+    /// verified standalone snapshot; never replace an existing backup.
     public static func backup(_ source: URL, to target: URL) throws {
         try verify(source)
-        guard source.standardizedFileURL != target.standardizedFileURL,
-              !FileManager.default.fileExists(atPath:target.path) else {
-            throw JournalError.database("Percorso backup già esistente o non valido")
+        guard source.isFileURL, target.isFileURL,
+              source.standardizedFileURL != target.standardizedFileURL else {
+            throw JournalError.database("Percorso backup non valido")
         }
-        let tmp = target.deletingLastPathComponent().appendingPathComponent(".backup-"+UUID().uuidString)
-        // Only the uniquely owned temporary snapshot and its own sidecars
-        // may be cleaned. Never remove WAL/SHM files from the source.
+        let suffixes = ["-wal","-shm","-journal"]
+        try requireAbsent(target)
+        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:target.path+suffix)) }
+
+        // Own a private staging directory on the same filesystem as the
+        // final backup. SQLite may create/delete its own sidecars here.
+        let stage = target.deletingLastPathComponent()
+            .appendingPathComponent(".backup-"+UUID().uuidString,isDirectory:true)
+        guard stage.path.withCString({ mkdir($0,mode_t(0o700)) }) == 0 else {
+            throw JournalError.database("Cartella temporanea backup non creata (errno \(errno))")
+        }
+        let tmp = stage.appendingPathComponent("snapshot.sqlite")
+        // POSIX cleanup is non-throwing and touches only known private
+        // paths. ENOENT is expected after SQLite removes a journal or
+        // exclusive publication moves the main file. Never clean the source.
         defer {
-            for suffix in ["","-wal","-shm","-journal"] {
-                try? FileManager.default.removeItem(atPath:tmp.path+suffix)
+            for suffix in [""] + suffixes {
+                _ = (tmp.path+suffix).withCString { Darwin.unlink($0) }
             }
+            _ = stage.path.withCString { Darwin.rmdir($0) }
         }
+        let fd = tmp.path.withCString { Darwin.open($0,O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC,mode_t(0o600)) }
+        guard fd >= 0 else {
+            throw JournalError.database("File temporaneo backup non creato (errno \(errno))")
+        }
+        Darwin.close(fd)
         let src = try open(source,flags:SQLITE_OPEN_READWRITE)
         defer { sqlite3_close(src) }
         do {
-            let dst = try open(tmp,flags:SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)
+            let dst = try open(tmp,flags:SQLITE_OPEN_READWRITE)
             defer { sqlite3_close(dst) }
             guard let backup = sqlite3_backup_init(dst,"main",src,"main") else {
                 throw JournalError.database("Backup SQLite non inizializzato")
@@ -306,9 +332,34 @@ public enum ArchiveDatabaseSafety {
                   sqlite3_step(mode) == SQLITE_DONE
             else { throw JournalError.database("Modalità del backup SQLite non autonoma") }
         }
-        guard !["-wal","-shm","-journal"].contains(where:{ FileManager.default.fileExists(atPath:tmp.path+$0) })
-        else { throw JournalError.database("Il backup SQLite presenta file ausiliari non consolidati") }
+        // Validate the closed SQLite file, not a snapshot that still
+        // depends on private sidecars. Recheck after read-only verification.
+        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:tmp.path+suffix)) }
         try verify(tmp,readOnly:true)
-        try FileManager.default.moveItem(at:tmp,to:target)
+        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:tmp.path+suffix)) }
+        let header = try FileHandle(forReadingFrom:tmp)
+        let bytes: Data
+        do {
+            defer { try? header.close() }
+            bytes = try header.read(upToCount:100) ?? Data()
+        }
+        guard bytes.count >= 100, bytes[18] == 1, bytes[19] == 1 else {
+            throw JournalError.database("Il backup SQLite non è autonomo")
+        }
+
+        // Do not use FileManager.moveItem/removeItem for SQLite artifacts:
+        // publish exactly the verified main file via exclusive native rename.
+        // No copy fallback, no overwrite, no deletion of other backups.
+        try requireAbsent(target)
+        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:target.path+suffix)) }
+        let rc = tmp.path.withCString { old in
+            target.path.withCString { new in
+                renameatx_np(AT_FDCWD,old,AT_FDCWD,new,UInt32(RENAME_EXCL))
+            }
+        }
+        guard rc == 0 else {
+            throw JournalError.database("Pubblicazione esclusiva backup non riuscita (errno \(errno))")
+        }
+        try verify(target,readOnly:true)
     }
 }

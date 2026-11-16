@@ -138,6 +138,40 @@ final class OperationalSafetyTests: XCTestCase {
         try ArchiveDatabaseSafety.verify(backup,readOnly:true)
         XCTAssertEqual(try ChangeJournal(path:backup.path).pending().map(\.id),[id])
     }
+    func testRepeatedBackupsAreIndependentAndLeaveNoStagingFiles() throws {
+        let (base,_,_,db) = try fixture()
+        defer { try? FileManager.default.removeItem(at:base) }
+        let journal = try ChangeJournal(path:db.path)
+        let firstJob = try journal.enqueue(rootID:"r",relativePath:"one.jpg",kind:.upsert)
+        let first = base.appendingPathComponent("first.sqlite")
+        try ArchiveDatabaseSafety.backup(db,to:first)
+        let original = try Data(contentsOf:first)
+        let secondJob = try journal.enqueue(rootID:"r",relativePath:"two.jpg",kind:.upsert)
+        let second = base.appendingPathComponent("second.sqlite")
+        try ArchiveDatabaseSafety.backup(db,to:second)
+        XCTAssertEqual(try Data(contentsOf:first),original)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath:base.path)
+            .filter { $0.hasPrefix(".backup-") }.isEmpty)
+        try ArchiveDatabaseSafety.verify(first,readOnly:true)
+        try ArchiveDatabaseSafety.verify(second,readOnly:true)
+        XCTAssertEqual(try ChangeJournal(path:first.path).pending().map(\.id),[firstJob])
+        XCTAssertEqual(try ChangeJournal(path:second.path).pending().map(\.id),[firstJob,secondJob])
+    }
+    func testBackupRefusesExistingTargetSidecarWithoutRemovingIt() throws {
+        let (base,_,_,db) = try fixture()
+        defer { try? FileManager.default.removeItem(at:base) }
+        let journal = try ChangeJournal(path:db.path)
+        _ = try journal.enqueue(rootID:"r",relativePath:"a.jpg",kind:.upsert)
+        let target = base.appendingPathComponent("conflict.sqlite")
+        let sidecar = URL(fileURLWithPath:target.path+"-journal")
+        let other = Data("unrelated data".utf8)
+        try other.write(to:sidecar)
+        XCTAssertThrowsError(try ArchiveDatabaseSafety.backup(db,to:target))
+        XCTAssertFalse(FileManager.default.fileExists(atPath:target.path))
+        XCTAssertEqual(try Data(contentsOf:sidecar),other)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath:base.path)
+            .filter { $0.hasPrefix(".backup-") }.isEmpty)
+    }
     func testAnchoredDirectoryRefusesReplacementBeforeRemoval() throws {
         let (base,_,target,_) = try fixture()
         defer { try? FileManager.default.removeItem(at:base) }

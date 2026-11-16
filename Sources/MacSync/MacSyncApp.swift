@@ -1111,7 +1111,7 @@ struct MacSyncConfigurationView: View {
             MacSyncPanel("Informazioni", icon: "info.circle", accent: false) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("MacSync · v0.14.1").font(.subheadline.weight(.semibold))
+                        Text("MacSync · v0.14.2").font(.subheadline.weight(.semibold))
                         Text("Registro SQLite locale · Aggiornamenti manuali").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
