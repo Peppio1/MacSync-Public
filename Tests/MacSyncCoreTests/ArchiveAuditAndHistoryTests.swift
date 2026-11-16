@@ -33,6 +33,41 @@ final class ArchiveAuditAndHistoryTests:XCTestCase {
         _ = try LocalInventory(path:f.db).reconcile(rootID:"photos",root:f.source)
         for job in try f.journal.pending(limit:10000) { try f.journal.markCompleted(id:job.id) }
     }
+    func testUnifiedAuditHashesOnlyOnceAndRequiresApproval() throws {
+        let f=try setup(); defer{try? FileManager.default.removeItem(at:f.base)}
+        try put(f.source,"same.jpg","same"); try put(f.target,"same.jpg","same")
+        try put(f.source,"different.jpg","1234"); try put(f.target,"different.jpg","5678")
+        try put(f.source,"missing.jpg","absent"); try put(f.target,"extra.jpg","extra")
+        _ = try LocalInventory(path:f.db).reconcile(rootID:"photos",root:f.source)
+        let session=try SeededArchiveSession(database:URL(fileURLWithPath:f.db),mappings:[f.mapping])
+        let result=try session.auditAndRecognize(repair:true)
+        XCTAssertEqual(result.audit.bytesRead,16)
+        XCTAssertEqual(result.audit.count(.matching),1)
+        XCTAssertEqual(result.recognition.matches.map(\.relativePath),["same.jpg"])
+        XCTAssertEqual(try f.journal.pending().count,3)
+        XCTAssertEqual(try session.approve(report:result.recognition),1)
+        XCTAssertEqual(Set(try f.journal.pending().map(\.relativePath)),["different.jpg","missing.jpg"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath:f.target.appendingPathComponent("extra.jpg").path))
+    }
+    func testUnifiedRecognitionRejectsChangedFileBeforeApproval() throws {
+        let f=try setup(); defer{try? FileManager.default.removeItem(at:f.base)}
+        try put(f.source,"same.jpg","same"); try put(f.target,"same.jpg","same")
+        _ = try LocalInventory(path:f.db).reconcile(rootID:"photos",root:f.source)
+        let session=try SeededArchiveSession(database:URL(fileURLWithPath:f.db),mappings:[f.mapping])
+        let result=try session.auditAndRecognize()
+        try put(f.target,"same.jpg","DIFF")
+        XCTAssertEqual(try session.approve(report:result.recognition),0)
+        XCTAssertEqual(try f.journal.pending().count,1)
+    }
+    func testUnifiedRecognitionCancellationPreservesQueue() throws {
+        let f=try setup(); defer{try? FileManager.default.removeItem(at:f.base)}
+        try put(f.source,"same.jpg","same"); try put(f.target,"same.jpg","same")
+        _ = try LocalInventory(path:f.db).reconcile(rootID:"photos",root:f.source)
+        let session=try SeededArchiveSession(database:URL(fileURLWithPath:f.db),mappings:[f.mapping])
+        let c=SeedVerificationCancellation()
+        XCTAssertThrowsError(try session.auditAndRecognize(repair:true,cancellation:c,progress:{_ in c.cancel()}))
+        XCTAssertEqual(try f.journal.pending().count,1)
+    }
     func testQuickDiagnosticFindsAllCategoriesExcludingManagedFiles() throws {
         let f=try setup(); defer{try? FileManager.default.removeItem(at:f.base)}
         try put(f.source,"same.jpg","same"); try put(f.target,"same.jpg","same")

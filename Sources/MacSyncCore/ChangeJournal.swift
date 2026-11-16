@@ -210,7 +210,8 @@ public final class ChangeJournal {
     /// verification never calls this method.
     public func acknowledgeVerifiedFiles(
         _ entries: [SeedVerifiedMatch],
-        sourceRoots: [String: String]
+        sourceRoots: [String: String],
+        shouldContinue: () -> Bool = { true }
     ) throws -> Int {
         guard !entries.isEmpty else { return 0 }
         try execute("BEGIN IMMEDIATE TRANSACTION;")
@@ -243,6 +244,7 @@ public final class ChangeJournal {
             defer { sqlite3_finalize(statement) }
             var changed = 0
             for entry in entries {
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 guard let root = sourceRoots[entry.rootID] else { continue }
                 sqlite3_reset(statement)
                 sqlite3_clear_bindings(statement)
@@ -257,6 +259,7 @@ public final class ChangeJournal {
                 guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseFailure() }
                 changed += Int(sqlite3_changes(connection))
             }
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
             try execute("COMMIT;")
             return changed
         } catch {

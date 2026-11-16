@@ -171,12 +171,14 @@ final class MountedCopyController: ObservableObject {
     /// Both scheduled audit and ordinary copy use the SAME serial queue.
     /// A request during an active cycle waits for that cycle to finish.
     func startArchiveAudit(sources: [(id:String,path:String,destination:String,expected:VolumeFingerprint?)],
-                           interactive: Bool) {
-        guard !auditBusy && !maintaining && !seedBusy else {
-            if !interactive { noteAuditSkipped("altra verifica o manutenzione in corso") }
+                           interactive: Bool, recognizeExisting: Bool = false) {
+        guard !auditBusy && !maintaining && !seedBusy && !seedReady else {
+            if !interactive { noteAuditSkipped("verifica, conferma o manutenzione in corso") }
             return
         }
         let settings = auditSettings
+        let recognize = interactive && recognizeExisting && settings.mode == .deep
+        guard !recognize || (!active && liveProgress == nil && !interruptionRequested) else { auditStatus = "Sospendi le copie prima del riconoscimento"; return }
         let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
         guard !configured.isEmpty,
               configured.allSatisfy({ !$0.path.isEmpty && !$0.destination.isEmpty && $0.expected?.isStrongIdentity == true })
@@ -188,6 +190,7 @@ final class MountedCopyController: ObservableObject {
                 ? "La verifica SHA-256 legge integralmente i file confrontabili, anche via VPN. "
                 : "La verifica rapida enumera entrambe le cartelle e confronta i metadati. ")
                 + (settings.repair ? "Le differenze sicure verranno accodate come copie/aggiornamenti." : "Modalità solo diagnostica.")
+                + (recognize ? " I file identici ancora in coda potranno essere riconosciuti con conferma separata." : "")
                 + " Nessun file presente soltanto sul server verrà cancellato."
             alert.addButton(withTitle:"Avvia verifica"); alert.addButton(withTitle:"Annulla")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -200,6 +203,7 @@ final class MountedCopyController: ObservableObject {
         auditBusy = true
         maintaining = true
         invalidateSeedReport()
+        seedVerifiedCount = 0
         auditStatus = "Verifica in attesa della coda di lavoro"
         queue.async { [weak self] in
             do {
@@ -209,13 +213,24 @@ final class MountedCopyController: ObservableObject {
                     try MountedFolderMapping(rootID:$0.id,source:URL(fileURLWithPath:$0.path),
                         target:URL(fileURLWithPath:$0.destination),expectedTargetVolume:$0.expected)
                 }
-                let report = try ArchiveAudit(journal:journal,mappings:maps).run(mode:settings.mode,repair:settings.repair,
-                    cancellation:cancel,progress:{ snapshot in
-                        DispatchQueue.main.async { [weak self] in
-                            self?.auditProgress = snapshot
-                            self?.auditStatus = snapshot.phase
-                        }
-                    })
+                let report: ArchiveAuditReport
+                let recognition: SeedVerificationReport?
+                let session: SeededArchiveSession?
+                let progress: (ArchiveAuditProgress) -> Void = { snapshot in
+                    DispatchQueue.main.async { [weak self] in
+                        self?.auditProgress = snapshot
+                        self?.auditStatus = snapshot.phase
+                    }
+                }
+                if recognize {
+                    let local = try SeededArchiveSession(database:db,mappings:maps)
+                    let result = try local.auditAndRecognize(repair:settings.repair,cancellation:cancel,progress:progress)
+                    report = result.audit; recognition = result.recognition; session = local
+                } else {
+                    report = try ArchiveAudit(journal:journal,mappings:maps).run(mode:settings.mode,repair:settings.repair,cancellation:cancel,progress:progress)
+                    recognition = nil; session = nil
+                }
+
                 var storageWarning = ""
                 do {
                     let data = try JSONEncoder().encode(report)
@@ -225,6 +240,12 @@ final class MountedCopyController: ObservableObject {
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.auditReport = report
+                    if let recognition, let session, !cancel.isCancelled {
+                        self.seedReport = recognition; self.seedSession = session; self.seedCancel = cancel
+                        self.seedReady = !recognition.matches.isEmpty; self.seedVerifiedCount = recognition.verifiedCount
+                        self.seedInspectedCount = recognition.inspected; self.seedReadBytes = recognition.bytesRead
+                        self.seedStatus = recognition.matches.isEmpty ? "Nessun file in coda riconoscibile" : "\(recognition.verifiedCount) file identici in coda: conferma necessaria"
+                    }
                     self.auditStatus = "Verifica conclusa: " + String(report.queuedRepairs) + " riparazioni accodate" + warning
                     self.auditProgress = nil
                     self.auditBusy = false
@@ -1015,7 +1036,7 @@ final class MountedCopyController: ObservableObject {
         seedSession = nil
         seedReady = false
         if !seedBusy {
-            seedStatus = "Cartelle cambiate: eseguire una nuova verifica SHA-256"
+            seedStatus = "Nessun riconoscimento da confermare"
         }
     }
 

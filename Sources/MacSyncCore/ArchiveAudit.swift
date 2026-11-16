@@ -96,6 +96,7 @@ public final class ArchiveAudit {
     // in the local queue. No direct writes to the server; never creates DELETEs.
     public func run(mode: ArchiveAuditMode, repair: Bool = false,
                     cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
+                    onVerifiedFile: (String, String, SeedFileFingerprint, SeedFileFingerprint) -> Void = { _,_,_,_ in },
                     progress: (ArchiveAuditProgress) -> Void = { _ in }) throws -> ArchiveAuditReport {
         var state = ArchiveAuditProgress()
         let startTick = ProcessInfo.processInfo.systemUptime
@@ -209,6 +210,7 @@ public final class ArchiveAudit {
                         fingerprint = beforeA
                         kind = h1 == h2 ? .matching : .different
                         if kind == .different { detail = "Contenuto SHA-256 diverso" }
+                        else { onVerifiedFile(mapping.rootID,path,beforeA,beforeB) }
                     }
                     if repair && (kind == .missing || kind == .different), let src {
                         let url = try Self.safeURL(path,mapping:mapping,destination:false)

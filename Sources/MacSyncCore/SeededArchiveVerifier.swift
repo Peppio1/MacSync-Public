@@ -201,7 +201,7 @@ public final class SeededArchiveVerifier {
         if cancellation.isCancelled { throw SeedVerificationError.cancelled }
         let sources = mappings.mapValues { $0.source.path }
         let changed = try journal.acknowledgeVerifiedFiles(
-            stillValid, sourceRoots: sources
+            stillValid, sourceRoots: sources, shouldContinue: { !cancellation.isCancelled }
         )
         progress?(report.matches.count, report.matches.count)
         return changed
@@ -361,6 +361,53 @@ public struct SeededArchiveSession: Sendable {
         let report = try verifier.verify(cancellation: cancellation, progress: progress)
         try checkFileIdentity()
         return report
+    }
+
+    /// Use one complete archive scan and reuse its verified fingerprints.
+    /// Only job IDs captured before the scan can become approval candidates.
+    /// No queue acknowledgement happens without a subsequent explicit approval.
+    public func auditAndRecognize(
+        repair: Bool = false,
+        cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
+        progress: (ArchiveAuditProgress) -> Void = { _ in }
+    ) throws -> (audit: ArchiveAuditReport, recognition: SeedVerificationReport) {
+        let journal = try openJournal()
+        let upper = try journal.pendingUploadUpperBound() ?? 0
+        var cursor: Int64 = 0
+        var pending: [String: QueuedChange] = [:]
+        var ambiguous: Set<String> = []
+        var inspected = 0
+        while true {
+            guard !cancellation.isCancelled else { throw SeedVerificationError.cancelled }
+            let page = try journal.pendingUploads(limit:250,afterID:cursor,throughID:upper)
+            if page.isEmpty { break }
+            for job in page {
+                guard !cancellation.isCancelled else { throw SeedVerificationError.cancelled }
+                cursor = job.id
+                inspected += 1
+                let key = job.rootID + "\0" + job.relativePath
+                if pending[key] != nil { ambiguous.insert(key) }
+                pending[key] = job
+            }
+        }
+        var matches: [SeedVerifiedMatch] = []
+        let report = try ArchiveAudit(journal:journal,mappings:mappings).run(
+            mode:.deep,repair:repair,cancellation:cancellation,
+            onVerifiedFile: { root,path,source,target in
+                let key = root + "\0" + path
+                guard !ambiguous.contains(key), let job = pending[key] else { return }
+                matches.append(SeedVerifiedMatch(jobID:job.id,rootID:root,relativePath:path,source:source,target:target,verifiedBytes:source.size))
+            },progress:progress)
+        try checkFileIdentity()
+        guard !cancellation.isCancelled else { throw SeedVerificationError.cancelled }
+        // Report remaining jobs conservatively: directories, conflicts, files
+        // changed during scanning and unmatched jobs remain in the queue.
+        let differenceCount = report.findings.filter {
+            ($0.kind == .missing || $0.kind == .different) && pending[$0.rootID + "\0" + $0.relativePath] != nil
+        }.count
+        return (report,SeedVerificationReport(matches:matches,inspected:inspected,
+            missingOrDifferent:differenceCount,deferred:max(0,inspected-matches.count-differenceCount),
+            bytesRead:report.bytesRead))
     }
 
     public func approve(

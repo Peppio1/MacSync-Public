@@ -862,92 +862,7 @@ struct MacSyncConfigurationView: View {
     }
 
     private var auditPage: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            MacSyncPanel("Verifica completa", icon: "checkmark.shield", accent: true) {
-                ArchiveAuditPanel(copy:copy,runtime:runtime,model:model)
-            }
-            HStack(alignment: .top, spacing: 12) {
-            MacSyncPanel("Archivio già copiato", icon: "checkmark.seal", accent: false) {
-                Text("Allineamento iniziale SHA-256")
-                    .font(.headline)
-                Text("Confronta il contenuto su entrambi i lati (traffico VPN). Non copia né cancella file.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                VStack(alignment: .leading, spacing: 6) {
-                    if copy.seedBusy {
-                        Button("Annulla verifica") { copy.cancelSeedVerification() }.buttonStyle(MacSyncStopStyle())
-                    } else {
-                        Button("Verifica file già presenti") {
-                            copy.verifySeededFiles(sources: model.configuredPairs())
-                        }
-                        .disabled(copy.active || copy.maintaining)
-                    }
-                    if copy.seedReady && !copy.seedBusy {
-                        Button("Conferma \(copy.seedVerifiedCount) file identici") {
-                            copy.approveSeededFiles()
-                        }
-                        .disabled(copy.active || copy.maintaining)
-                    }
-                }
-
-                if copy.seedBusy, let start = copy.seedStartedAt {
-                    TimelineView(.periodic(from:start,by:1)) { ctx in
-                        let elapsed = max(0.001,ctx.date.timeIntervalSince(start))
-                        VStack(alignment:.leading,spacing:6) {
-                            if copy.seedTotalJobs > 0 {
-                                MacSyncLinearProgress(value:min(0.99,Double(copy.seedInspectedCount)/Double(copy.seedTotalJobs)))
-                                Text("Job analizzati: \(copy.seedInspectedCount) / \(copy.seedTotalJobs)")
-                            }
-                            Text("Tempo: " + elapsedText(elapsed) + " · Velocità media: " +
-                                SyncLiveProgress.formatRate(Double(copy.seedReadBytes)/elapsed))
-                            if !copy.seedCurrentPath.isEmpty {
-                                Text(copy.seedCurrentPath).lineLimit(1).truncationMode(.middle)
-                            }
-                            if copy.seedInspectedCount > 0 && copy.seedTotalJobs > copy.seedInspectedCount {
-                                let remaining = elapsed * Double(copy.seedTotalJobs-copy.seedInspectedCount) / Double(copy.seedInspectedCount)
-                                Text("Tempo rimanente indicativo: " + elapsedText(remaining))
-                            }
-                        }.font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                Text(copy.seedStatus)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Esaminati: \(copy.seedInspectedCount)")
-                    Text("Identici: \(copy.seedVerifiedCount)")
-                    Text("Letti: " + ByteCountFormatter.string(
-                        fromByteCount: copy.seedReadBytes, countStyle: .file
-                    ))
-                }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                Button("Anteprima iniziale — sola lettura") { copy.preview(sources: model.configuredPairs()) }
-                    .disabled(copy.active || copy.seedBusy || copy.maintaining || copy.interruptionRequested || runtime.savingSchedule)
-                Text(copy.previewStatus).font(.caption).foregroundStyle(.secondary)
-            }
-            MacSyncPanel("Manutenzione temporanei", icon: "wrench.and.screwdriver", accent: false) {
-                Text("Individua e rimuove i file temporanei lasciati da copie interrotte. Usala quando necessario, dopo aver fermato le copie.").font(.caption).foregroundStyle(.secondary)
-                if copy.maintaining && !copy.auditBusy { Button("Annulla manutenzione") { copy.cancelMaintenance() }.buttonStyle(MacSyncStopStyle()) }
-                VStack(alignment: .leading, spacing: 8) {
-                    Button("Verifica file temporanei") {
-                        copy.inspectStaging(sources: model.configuredPairs())
-                    }
-                     .disabled(copy.active || copy.maintaining || copy.seedBusy)
-                    Button("Pulisci temporanei…") {
-                        copy.cleanupStaging(sources: model.configuredPairs())
-                    }
-                     .disabled(copy.active || copy.maintaining || copy.seedBusy)
-                }
-                Text(copy.maintenanceStatus)
-                    .font(.caption2).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            }
-        }
+        ArchiveAuditPanel(copy:copy,runtime:runtime,model:model)
     }
     private struct LogRow: Identifiable {
         let entry: SyncLogEntry
@@ -1033,8 +948,9 @@ struct MacSyncConfigurationView: View {
         }.onAppear { copy.refresh() }
     }
     private var settingsPage: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top, spacing: 12) {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .top, spacing: 10) {
+            VStack(alignment:.leading,spacing:10) {
             MacSyncPanel("Generali", icon: "gearshape", accent: false) {
                 VStack(alignment: .leading, spacing: 10) {
                     MacSyncSwitchRow(
@@ -1060,19 +976,10 @@ struct MacSyncConfigurationView: View {
                         .fixedSize(horizontal: false, vertical: true)
                  }
             }
-            MacSyncPanel("Aspetto", icon: "paintbrush", accent: false) {
-                Picker("Tema", selection: $appearance) {
-                    Text("Automatico").tag("system")
-                    Text("Chiaro").tag("light")
-                    Text("Scuro").tag("dark")
-                }.pickerStyle(.segmented)
-            }
-            }
-            HStack(alignment:.top,spacing:12) {
             MacSyncPanel("Cancellazioni e recupero", icon: "arrow.triangle.2.circlepath") {
                 VStack(alignment: .leading, spacing: 10) {
                     MacSyncSwitchRow(
-                        "Abilita cancellazioni speculari (autorizzazione persistente)",
+                        "Abilita cancellazioni speculari",
                         isOn: Binding(get: { copy.mirrorEnabled }, set: {
                             copy.setMirrorEnabled($0, sources: model.configuredPairs())
                         })
@@ -1117,6 +1024,16 @@ struct MacSyncConfigurationView: View {
                     Button("Apri cartella di recupero") { copy.revealRecoveryFolders(sources:model.configuredPairs()) }
                 }
             }
+            }.frame(maxWidth:.infinity,alignment:.topLeading)
+            VStack(alignment:.leading,spacing:10) {
+            MacSyncPanel("Aspetto", icon: "paintbrush", accent: false) {
+                Picker("Tema", selection: $appearance) {
+                    Text("Automatico").tag("system")
+                    Text("Chiaro").tag("light")
+                    Text("Scuro").tag("dark")
+                }.pickerStyle(.segmented)
+            }
+
             MacSyncPanel("Protezioni facoltative",icon:"shield") {
                     VStack(alignment: .leading, spacing: 8) {
                         MacSyncSwitchRow("Limite numerico", isOn: $copy.mirrorProtections.absoluteEnabled)
@@ -1159,11 +1076,12 @@ struct MacSyncConfigurationView: View {
                     }
                     .disabled(copy.active || copy.seedBusy || copy.maintaining || copy.interruptionRequested || runtime.savingSchedule)
             }
+            }.frame(maxWidth:.infinity,alignment:.topLeading)
             }
             MacSyncPanel("Informazioni", icon: "info.circle", accent: false) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("MacSync · v0.13.4").font(.subheadline.weight(.semibold))
+                        Text("MacSync · v0.13.5").font(.subheadline.weight(.semibold))
                         Text("Registro SQLite locale · Aggiornamenti manuali").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
