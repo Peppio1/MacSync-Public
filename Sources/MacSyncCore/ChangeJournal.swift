@@ -51,6 +51,8 @@ public final class ChangeJournal {
                     completed INTEGER NOT NULL DEFAULT 0
                 );
                 """)
+            try execute("CREATE TABLE IF NOT EXISTS publication_intents(job_id INTEGER PRIMARY KEY, root_id TEXT NOT NULL, relative_path TEXT NOT NULL);")
+            try execute("CREATE TABLE IF NOT EXISTS directory_bindings(root_id TEXT NOT NULL, role TEXT NOT NULL, stamp TEXT NOT NULL, PRIMARY KEY(root_id,role));")
             try execute("CREATE INDEX IF NOT EXISTS idx_queue_pending ON change_queue(completed, id);")
             try execute("CREATE INDEX IF NOT EXISTS idx_queue_uploads ON change_queue(completed, kind, id);")
             try execute("CREATE INDEX IF NOT EXISTS idx_queue_current_path ON change_queue(root_id, relative_path, completed, id);")
@@ -160,6 +162,62 @@ public final class ChangeJournal {
     /// deletes remain queued for a future, separately gated mirror phase.
     /// Capture a bounded snapshot of pending work. Newly queued events
     /// receive larger AUTOINCREMENT IDs and wait until the next cycle.
+    /// First opt-in after migration establishes the target baseline. Never
+    /// replace an existing binding automatically, even on reconnection.
+    public func recordPublicationIntent(_ job: QueuedChange) throws {
+        let stmt = try prepare("INSERT OR IGNORE INTO publication_intents(job_id,root_id,relative_path) VALUES(?,?,?);")
+        defer { sqlite3_finalize(stmt) }
+        guard try uploadIsCurrent(job), sqlite3_bind_int64(stmt,1,job.id) == SQLITE_OK else { throw MountedCopyError.sourceChanging }
+        try bind(job.rootID,at:2,in:stmt); try bind(job.relativePath,at:3,in:stmt)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseFailure() }
+    }
+    public func hasPublicationIntent(_ job: QueuedChange) throws -> Bool {
+        let stmt = try prepare("SELECT 1 FROM publication_intents WHERE job_id=? AND root_id=? AND relative_path=?;")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_bind_int64(stmt,1,job.id) == SQLITE_OK else { throw databaseFailure() }
+        try bind(job.rootID,at:2,in:stmt); try bind(job.relativePath,at:3,in:stmt)
+        let rc = sqlite3_step(stmt)
+        guard rc == SQLITE_ROW || rc == SQLITE_DONE else { throw databaseFailure() }
+        return rc == SQLITE_ROW
+    }
+    public func clearPublicationIntent(_ job: QueuedChange) throws {
+        let stmt = try prepare("DELETE FROM publication_intents WHERE job_id=? AND root_id=? AND relative_path=?;")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_bind_int64(stmt,1,job.id) == SQLITE_OK else { throw databaseFailure() }
+        try bind(job.rootID,at:2,in:stmt); try bind(job.relativePath,at:3,in:stmt)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseFailure() }
+    }
+
+    public func verifyDirectoryBindings(_ maps: [MountedFolderMapping], allowNewTarget: Bool = false) throws {
+        let bindings = try maps.flatMap { map -> [(String,String,String)] in
+            try map.verify()
+            return try [("source",map.source),("target",map.target)].map { (map.rootID,$0.0,try DirectoryBinding.encoded($0.1)) }
+        }
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            for (rootID,role,stamp) in bindings {
+                    let query = try prepare("SELECT stamp FROM directory_bindings WHERE root_id=? AND role=?;")
+                    defer { sqlite3_finalize(query) }
+                    try bind(rootID,at:1,in:query); try bind(role,at:2,in:query)
+                    let state = sqlite3_step(query)
+                    if state == SQLITE_ROW {
+                        guard columnText(query,at:0) == stamp else {
+                            throw role == "source" ? MountedCopyError.sourceRootChanged : MountedCopyError.volumeChanged
+                        }
+                    } else {
+                        guard state == SQLITE_DONE, role == "target", allowNewTarget else {
+                            throw MountedCopyError.invalidMapping
+                        }
+                        let insert = try prepare("INSERT INTO directory_bindings(root_id,role,stamp) VALUES(?,?,?);")
+                        defer { sqlite3_finalize(insert) }
+                        try bind(rootID,at:1,in:insert); try bind(role,at:2,in:insert); try bind(stamp,at:3,in:insert)
+                        guard sqlite3_step(insert) == SQLITE_DONE else { throw databaseFailure() }
+                    }
+            }
+            try execute("COMMIT;")
+        } catch { try? execute("ROLLBACK;"); throw error }
+    }
+
     public func pendingUploadUpperBound() throws -> Int64? {
         let stmt = try prepare("""
             SELECT MAX(id) FROM change_queue WHERE completed=0 AND kind='upsert';

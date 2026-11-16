@@ -22,8 +22,9 @@ public enum SeedVerificationError: Error, LocalizedError {
 public final class SeedVerificationCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
+    private let shouldContinue: () -> Bool
 
-    public init() {}
+    public init(shouldContinue: @escaping () -> Bool = { true }) { self.shouldContinue = shouldContinue }
     public func cancel() {
         lock.lock()
         cancelled = true
@@ -31,8 +32,9 @@ public final class SeedVerificationCancellation: @unchecked Sendable {
     }
     public var isCancelled: Bool {
         lock.lock()
-        defer { lock.unlock() }
-        return cancelled
+        let value = cancelled
+        lock.unlock()
+        return value || !shouldContinue()
     }
 }
 
@@ -207,7 +209,7 @@ public final class SeededArchiveVerifier {
         return changed
     }
 
-    private func verifyOne(
+    func verifyOne(
         _ job: QueuedChange, mapping: MountedFolderMapping,
         cancellation: SeedVerificationCancellation,
         onBytesRead: (Int64) -> Void

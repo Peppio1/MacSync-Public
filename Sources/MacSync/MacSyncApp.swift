@@ -19,7 +19,8 @@ final class MacSyncViewModel: ObservableObject {
     @Published var pendingCount = 0
     @Published var scanProgress: ArchiveAuditProgress?
 
-    private lazy var service = LocalMonitorService { [weak self] update in
+    let safetyGate = MonitorSafetyGate()
+    private lazy var service = LocalMonitorService(safetyGate:safetyGate) { [weak self] update in
         DispatchQueue.main.async { [weak self] in
             self?.message = update.message
             self?.monitoring = update.monitoring
@@ -128,49 +129,68 @@ final class MacSyncViewModel: ObservableObject {
     /// Invoked only after copy and audit workers have stopped. The only
     /// remote writes are explicitly confirmed creation of missing child dirs.
     /// Old root IDs stay stable only if both actual paths and volume match.
-    func applyCommonFolders(add urls: [URL] = [], parent newParent: URL? = nil, remove id: String? = nil) -> Bool {
-        do {
-            let old = configuredPairs()
-            var plan = editableCommonPlan
-            if let id { plan.sources.removeAll { $0.id == id } }
-            for url in urls {
-                let path = url.standardizedFileURL.resolvingSymlinksInPath()
-                guard url.isFileURL, try path.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true,
-                      !(try VolumeFingerprint.read(at: path)).isNetworkVolume else { throw MountedCopyError.invalidMapping }
-                if !plan.sources.contains(where: { $0.path == path.path }) {
-                    plan.sources.append(CommonFolderSource(path: path.path))
+    func applyCommonFolders(add urls: [URL] = [], parent newParent: URL? = nil, remove id: String? = nil,
+                            cancellation: SeedVerificationCancellation, completion: @escaping @MainActor () -> Void) {
+        let original = editableCommonPlan
+        let old = configuredPairs()
+        message = "Verifica della nuova configurazione…"
+        DispatchQueue.global(qos:.utility).async {
+            do {
+                guard !cancellation.isCancelled else { throw SeedVerificationError.cancelled }
+                var plan = original
+                if let id { plan.sources.removeAll { $0.id == id } }
+                for url in urls {
+                    guard !cancellation.isCancelled else { throw SeedVerificationError.cancelled }
+                    let path = url.standardizedFileURL.resolvingSymlinksInPath()
+                    guard url.isFileURL, try path.resourceValues(forKeys:[.isDirectoryKey]).isDirectory == true,
+                          !(try VolumeFingerprint.read(at:path)).isNetworkVolume else { throw MountedCopyError.invalidMapping }
+                    if !plan.sources.contains(where:{$0.path == path.path}) { plan.sources.append(CommonFolderSource(path:path.path)) }
                 }
+                if let newParent {
+                    guard newParent.isFileURL else { throw MountedCopyError.invalidMapping }
+                    let resolved = newParent.standardizedFileURL.resolvingSymlinksInPath()
+                    guard try resolved.resourceValues(forKeys:[.isDirectoryKey]).isDirectory == true else { throw MountedCopyError.rootUnavailable }
+                    plan.parent = resolved.path; plan.expected = try VolumeFingerprint.read(at:resolved)
+                }
+                guard plan.isValid else { throw MountedCopyError.invalidMapping }
+                plan.sources = plan.sources.map { source in
+                    guard let previous = old.first(where:{$0.id == source.id}) else { return source }
+                    if previous.path == source.path && previous.destination == plan.target(for:source) && previous.expected == plan.expected { return source }
+                    return CommonFolderSource(path:source.path)
+                }
+                let validated = plan
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !cancellation.isCancelled else { completion(); return }
+                    let alert = NSAlert()
+                    alert.messageText = "Salvare la configurazione delle cartelle?"
+                    alert.informativeText = "Ogni sorgente verrà associata a una sottocartella omonima. Le sottocartelle mancanti verranno create; le associazioni modificate saranno indicizzate nuovamente. Nessun file sarà eliminato. Sincronizzazione automatica e cancellazioni richiederanno una nuova autorizzazione."
+                    alert.alertStyle = .warning
+                    alert.addButton(withTitle:"Salva"); alert.addButton(withTitle:"Annulla")
+                    guard alert.runModal() == .alertFirstButtonReturn else { self.message = "Configurazione invariata"; completion(); return }
+                    DispatchQueue.global(qos:.utility).async {
+                        do {
+                            try validated.prepareTargetDirectories(shouldContinue:{ !cancellation.isCancelled })
+                            guard !cancellation.isCancelled else { throw SeedVerificationError.cancelled }
+                            let bytes = try JSONEncoder().encode(validated)
+                            DispatchQueue.main.async { [weak self] in
+                                guard let self, !cancellation.isCancelled else { completion(); return }
+                                UserDefaults.standard.set(bytes,forKey:"MacSync.commonFolders.v1")
+                                self.configurationInvalid = false; self.commonPlan = validated
+                                if validated.sources.isEmpty {
+                                    self.monitoring = false; self.pendingCount = 0; self.message = "Aggiungi almeno una sorgente"
+                                }
+                                completion()
+                            }
+                        } catch {
+                            let reason = error.localizedDescription
+                            DispatchQueue.main.async { [weak self] in self?.message = "Configurazione non salvata: " + reason; completion() }
+                        }
+                    }
+                }
+            } catch {
+                let reason = error.localizedDescription
+                DispatchQueue.main.async { [weak self] in self?.message = "Configurazione non salvata: " + reason; completion() }
             }
-            if let newParent {
-                guard newParent.isFileURL else { throw MountedCopyError.invalidMapping }
-                let resolved = newParent.standardizedFileURL.resolvingSymlinksInPath()
-                guard try resolved.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else { throw MountedCopyError.rootUnavailable }
-                plan.parent = resolved.path
-                plan.expected = try VolumeFingerprint.read(at: resolved)
-            }
-            guard plan.isValid else { throw MountedCopyError.invalidMapping }
-            // Preserve original IDs only for unchanged source/target bindings.
-            plan.sources = plan.sources.map { source in
-                guard let previous = old.first(where:{$0.id == source.id}) else { return source }
-                if previous.path == source.path && previous.destination == plan.target(for:source) && previous.expected == plan.expected { return source }
-                return CommonFolderSource(path:source.path)
-            }
-            let alert = NSAlert()
-            alert.messageText = "Salvare la configurazione delle cartelle?"
-            alert.informativeText = "Ogni sorgente verrà associata a una sottocartella omonima della destinazione. Le sottocartelle mancanti verranno create. Le associazioni modificate saranno indicizzate nuovamente. I job delle associazioni rimosse o sostituite verranno ritirati dall'inventario locale. Nessun file sarà eliminato dalle cartelle. La sincronizzazione automatica e le cancellazioni dovranno essere riattivate esplicitamente."
-            alert.alertStyle = .warning
-            alert.addButton(withTitle:"Salva"); alert.addButton(withTitle:"Annulla")
-            guard alert.runModal() == .alertFirstButtonReturn else { return false }
-            try plan.prepareTargetDirectories()
-            let bytes = try JSONEncoder().encode(plan)
-            UserDefaults.standard.set(bytes,forKey:"MacSync.commonFolders.v1")
-            configurationInvalid = false
-            commonPlan = plan
-            if plan.sources.isEmpty { stopMonitoring(); monitoring = false; pendingCount = 0; message = "Aggiungi almeno una sorgente" }
-            return true
-        } catch {
-            message = "Configurazione non salvata: " + error.localizedDescription
-            return false
         }
     }
 
@@ -317,8 +337,12 @@ final class MacSyncViewModel: ObservableObject {
     }
 
     func stopMonitoring() {
-        service.stop()
+        service.stop(); monitoring = false
     }
+    func afterMonitorStopped(_ completion: @escaping @MainActor () -> Void) {
+        service.afterStopped { DispatchQueue.main.async { completion() } }
+    }
+    func refreshPendingCount() { service.refreshCount() }
 }
 
 private final class FolderDropCollector: @unchecked Sendable {
@@ -523,7 +547,7 @@ struct MacSyncConfigurationView: View {
                 }
             }
         }
-        .disabled(runtime.folderConfigurationBusy)
+        .disabled(runtime.folderConfigurationBusy || runtime.shuttingDown)
         .preferredColorScheme(previewScheme ?? (appearance == "light" ? .light : appearance == "dark" ? .dark : nil))
         .environment(\.locale, Locale(identifier: "it_IT"))
         .frame(minWidth: 980, minHeight: 660)
@@ -587,7 +611,7 @@ struct MacSyncConfigurationView: View {
                     Spacer()
                     globalControls
                     if !copy.active && copy.liveProgress == nil && !copy.maintaining && !copy.seedBusy && model.scanProgress == nil {
-                        Button("Avvia sincronizzazione") { runtime.stopCopiesForCurrentLaunch(); copy.start(sources:model.configuredPairs(),schedule:settings.schedule) }.buttonStyle(.borderedProminent).disabled(!model.monitoring || runtime.savingSchedule)
+                        Button("Avvia sincronizzazione") { runtime.startManualSynchronization() }.buttonStyle(.borderedProminent).disabled(!model.monitoring || runtime.savingSchedule)
                     }
                     Menu("Comandi") {
                         Button("Ferma tutto") { runtime.stopAllOperations() }
@@ -675,9 +699,7 @@ struct MacSyncConfigurationView: View {
     }
     private func changeFolders(add: [URL] = [], parent: URL? = nil, remove: String? = nil) {
         guard folderEditAllowed, !runtime.previewOnly else { return }
-        runtime.editFolderConfiguration {
-            _ = model.applyCommonFolders(add:add,parent:parent,remove:remove)
-        }
+        runtime.editFolderConfiguration(add:add,parent:parent,remove:remove)
     }
     private func folderDrop(_ providers: [NSItemProvider], target: Bool) -> Bool {
         guard folderEditAllowed else { return false }
@@ -1089,7 +1111,7 @@ struct MacSyncConfigurationView: View {
             MacSyncPanel("Informazioni", icon: "info.circle", accent: false) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("MacSync · v0.13.9").font(.subheadline.weight(.semibold))
+                        Text("MacSync · v0.14.0").font(.subheadline.weight(.semibold))
                         Text("Registro SQLite locale · Aggiornamenti manuali").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -1499,7 +1521,6 @@ private struct MacSyncStatusMenu: View {
             }
             Divider()
             Button("Esci") {
-                copy.stop()
                 NSApplication.shared.terminate(nil)
             }
         }
@@ -1510,6 +1531,7 @@ private struct MacSyncStatusMenu: View {
 
 @main
 struct MacSyncApp: App {
+    @NSApplicationDelegateAdaptor(MacSyncTerminationDelegate.self) private var terminationDelegate
     /// Created independently of the configuration window, so unattended
     /// COPY/UPDATE monitoring works when the menu-bar app is hidden.
     @StateObject private var runtime = MacSyncRuntime()

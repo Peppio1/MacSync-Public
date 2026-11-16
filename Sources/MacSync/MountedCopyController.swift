@@ -7,10 +7,13 @@ import MacSyncCore
 @MainActor
 final class MountedCopyController: ObservableObject {
     private let previewOnly: Bool
+    private let monitorGate: MonitorSafetyGate
+    var onQueueChanged: (() -> Void)?
     @Published private(set) var interruptionRequested = false
 
-    init(previewOnly: Bool = false) {
+    init(previewOnly: Bool = false, monitorGate: MonitorSafetyGate = MonitorSafetyGate()) {
         self.previewOnly = previewOnly
+        self.monitorGate = monitorGate
         if !previewOnly {
             UserDefaults.standard.set(automaticCopiesEnabled, forKey:"MacSync.autoCopiesEnabled.v2")
             UserDefaults.standard.set(false, forKey:"MacSync.autoCopiesEnabled")
@@ -178,7 +181,7 @@ final class MountedCopyController: ObservableObject {
     /// A request during an active cycle waits for that cycle to finish.
     func startArchiveAudit(sources: [(id:String,path:String,destination:String,expected:VolumeFingerprint?)],
                            interactive: Bool, recognizeExisting: Bool = false) {
-        guard !auditBusy && !maintaining && !seedBusy && !seedReady else {
+        guard monitorGate.isReady, !interruptionRequested, liveProgress == nil, !auditBusy && !maintaining && !seedBusy && !seedReady else {
             if !interactive { noteAuditSkipped("verifica, conferma o manutenzione in corso") }
             return
         }
@@ -204,7 +207,8 @@ final class MountedCopyController: ObservableObject {
         let db: URL
         do { db = try Self.databaseURL() }
         catch { auditStatus = error.localizedDescription; return }
-        let cancel = SeedVerificationCancellation()
+        let gate = monitorGate
+        let cancel = SeedVerificationCancellation(shouldContinue:{ gate.isReady })
         auditCancel = cancel
         auditBusy = true
         maintaining = true
@@ -219,6 +223,7 @@ final class MountedCopyController: ObservableObject {
                     try MountedFolderMapping(rootID:$0.id,source:URL(fileURLWithPath:$0.path),
                         target:URL(fileURLWithPath:$0.destination),expectedTargetVolume:$0.expected)
                 }
+                try journal.verifyDirectoryBindings(maps,allowNewTarget:interactive)
                 let report: ArchiveAuditReport
                 let recognition: SeedVerificationReport?
                 let session: SeededArchiveSession?
@@ -245,6 +250,7 @@ final class MountedCopyController: ObservableObject {
                 let warning = storageWarning
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
+                    self.onQueueChanged?()
                     self.auditReport = report
                     if let recognition, let session, !cancel.isCancelled {
                         self.seedReport = recognition; self.seedSession = session; self.seedCancel = cancel
@@ -300,12 +306,12 @@ final class MountedCopyController: ObservableObject {
     /// Explicit setting action only; verification runs on the existing serial
     /// worker queue and never opens an additional recurring SMB probe.
     func setMirrorEnabled(_ enabled: Bool, sources: [(id: String, path: String, destination: String, expected: VolumeFingerprint?)]) {
-        guard !active && !maintaining && !seedBusy else { return }
+        guard !active && !maintaining && !seedBusy && !interruptionRequested && liveProgress == nil else { return }
         if !enabled {
             revokeMirrorAuthorization()
             return
         }
-        guard !mirrorEnabled else { return }
+        guard !mirrorEnabled, monitorGate.isReady else { return }
         let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
         guard !configured.isEmpty, configured.allSatisfy({
             !$0.path.isEmpty && !$0.destination.isEmpty && $0.expected?.isStrongIdentity == true
@@ -328,6 +334,9 @@ final class MountedCopyController: ObservableObject {
         do { database = try Self.databaseURL() }
         catch { mirrorStatus = error.localizedDescription; return }
         let revision = mirrorConfigurationRevision
+        let gate = monitorGate
+        let cancel = SeedVerificationCancellation(shouldContinue:{ gate.isReady })
+        maintenanceCancel = cancel
         maintaining = true
         mirrorStatus = "Verifica delle cartelle per l'autorizzazione persistente..."
         queue.async { [weak self] in
@@ -338,12 +347,14 @@ final class MountedCopyController: ObservableObject {
                         source: URL(fileURLWithPath: $0.path),
                         target: URL(fileURLWithPath: $0.destination), expectedTargetVolume: $0.expected)
                 }
-                let authorization = try MirrorAuthorization.capture(journal: journal, mappings: maps)
+                try journal.verifyDirectoryBindings(maps,allowNewTarget:true)
+                let authorization = try MirrorAuthorization.capture(journal: journal, mappings: maps,shouldContinue:{ !cancel.isCancelled })
+                guard !cancel.isCancelled else { throw SeedVerificationError.cancelled }
                 let data = try JSONEncoder().encode(authorization)
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.maintaining = false
-                    guard self.mirrorConfigurationRevision == revision else { return }
+                    guard self.mirrorConfigurationRevision == revision, !cancel.isCancelled else { return }
                     UserDefaults.standard.set(data, forKey: Self.authorizationKey)
                     self.mirrorAuthorization = authorization
                     self.mirrorEnabled = true
@@ -393,7 +404,7 @@ final class MountedCopyController: ObservableObject {
         sources: [(id: String, path: String, destination: String, expected: VolumeFingerprint?)],
         schedule: SyncSchedule
     ) {
-        guard !maintaining && !seedBusy else {
+        guard monitorGate.isReady, !interruptionRequested, liveProgress == nil, !maintaining && !seedBusy && !seedReady else {
             status = "Una verifica/manutenzione è in corso. Le copie restano ferme."
             return
         }
@@ -413,7 +424,7 @@ final class MountedCopyController: ObservableObject {
 
         let warning = NSAlert()
         warning.alertStyle = .warning
-        warning.messageText = "Avviare la sincronizzazione di prova?"
+        warning.messageText = "Avviare la sincronizzazione?"
         let deleteWarning: String
         if !policy.enabled {
             deleteWarning = "La cancellazione speculare è DISABILITATA."
@@ -434,14 +445,14 @@ final class MountedCopyController: ObservableObject {
         Le protezioni tecniche restano obbligatorie; i limiti quantitativi sono facoltativi.
         Avviare questa sessione non modifica l'autorizzazione alle cancellazioni.
         """
-        warning.addButton(withTitle: "Avvia sincronizzazione di prova")
+        warning.addButton(withTitle: "Avvia sincronizzazione")
         warning.addButton(withTitle: "Annulla")
         guard warning.runModal() == .alertFirstButtonReturn else {
             status = "Copie non attivate"
             return
         }
         beginSession(sources: sources, policy: policy, automatic: false,
-                     schedule: schedule)
+                     schedule: schedule, firstSlot:Date())
     }
 
     /// Explicit persistent opt-in for scheduled automatic synchronization.
@@ -460,7 +471,7 @@ final class MountedCopyController: ObservableObject {
             FUNZIONE SPERIMENTALE: usa esclusivamente cartelle con
             dati di prova, non l'archivio di produzione originale.
             """
-            alert.addButton(withTitle: "Abilita copie automatiche di prova")
+            alert.addButton(withTitle: "Abilita copie automatiche")
             alert.addButton(withTitle: "Annulla")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
@@ -475,7 +486,7 @@ final class MountedCopyController: ObservableObject {
         schedule: SyncSchedule,
         firstSlot: Date
     ) {
-        guard automaticCopiesEnabled, !active, !maintaining, !seedBusy else { return }
+        guard monitorGate.isReady, automaticCopiesEnabled, !active, !maintaining, !seedBusy, !seedReady else { return }
         let policy: MirrorDeletionPolicy
         do {
             policy = try MirrorDeletionPolicy(
@@ -534,13 +545,14 @@ final class MountedCopyController: ObservableObject {
             // Initial source audit can be expensive on a large archive.
             // Create the armed deletion worker on the serial background queue.
             let cancellation = MirrorDeletionCancellation()
+            let gate = monitorGate
             sessionCancellation = cancellation
             interruptionRequested = false
             mirrorCancellation = policy.enabled ? cancellation : nil
             var mirrorWorker: MirrorDeletionWorker?
             try log.record(
                 level: .info, rootID: "app", action: "session",
-                message: "Sessione di copie di prova abilitata"
+                message: "Sessione di sincronizzazione abilitata"
             )
             let timer = DispatchSource.makeTimerSource(queue: queue)
             // Each synchronization has one connection check immediately
@@ -613,6 +625,7 @@ final class MountedCopyController: ObservableObject {
                     let finalStats = totals.stats
                     let warning = historyError
                     let finalOutcome = outcomeState
+                    if !automatic { timer.cancel() }
                     DispatchQueue.main.async { [weak self] in
                         guard let self, self.historySessionID == sessionID else { return }
                         self.liveProgress = nil
@@ -624,11 +637,15 @@ final class MountedCopyController: ObservableObject {
                         self.sessionStats.accumulate(finalStats)
                         self.completedCycles += 1
                         self.lastCycleAt = endedAt
-                        self.refresh()
+                        if !automatic {
+                            self.active = false; self.automaticSession = false; self.nextScheduledRun = nil
+                            self.timer = nil; self.sessionCancellation = nil; self.mirrorCancellation = nil
+                        }
+                        self.refresh(); self.onQueueChanged?()
                     }
                     // Keep the cadence anchored to its scheduled slot.
                     // If a long copy crosses a slot, skip that slot.
-                    if !cancellation.isSessionCancelled,
+                    if automatic, !cancellation.isSessionCancelled,
                        let next = schedule.nextSlot(
                            after: scheduledSlot, completedAt: Date()
                        ) {
@@ -676,7 +693,11 @@ final class MountedCopyController: ObservableObject {
                     if let reason = try journal.mirrorBlockReason() {
                         throw MirrorDeletionFailure.bulkDeletion(reason)
                     }
-                    if worker == nil {
+                    guard gate.isReady else { throw JournalError.database("Inventario sorgenti non pronto; ciclo sospeso") }
+                    // Reopen mappings on each healthy cycle, then compare the
+                    // durable logical identity. A changed inode never rebinds.
+                    worker = nil; mirrorWorker = nil
+                    do {
                         maps = try configured.map {
                             try MountedFolderMapping(
                                 rootID: $0.id,
@@ -685,9 +706,11 @@ final class MountedCopyController: ObservableObject {
                                 expectedTargetVolume: $0.expected
                             )
                         }
+                        try journal.verifyDirectoryBindings(maps,allowNewTarget:true)
                         worker = try MountedFolderCopyWorker(
                             journal: journal, log: log, mappings: maps
                         )
+                        worker?.operationAllowed = { gate.isReady && !cancellation.isCancelled }
                     }
                     // Do not process a queue belonging to a different source.
                     for mapping in maps {
@@ -705,10 +728,11 @@ final class MountedCopyController: ObservableObject {
                             cancellation: cancellation, authorization: authorization,
                             protections: protections
                         )
+                        mirrorWorker?.operationAllowed = { gate.isReady && !cancellation.isCancelled }
                         try? log.record(
                             level: .info, rootID: "app", action: "mirror_armed",
                             message: policy.recoveryEnabled
-                                ? "Mirror di prova attivato con recupero" : "Mirror di prova attivato senza recupero"
+                                ? "Mirror attivato con recupero" : "Mirror attivato senza recupero"
                         )
                     }
                     try mirrorWorker?.verifyBeforeSynchronization()
@@ -727,7 +751,7 @@ final class MountedCopyController: ObservableObject {
                     publish(force:true)
                     let summary = try worker.runCycle(
                         enabled: true, pageSize: 100, throughID: highWater,
-                        shouldContinue: { !cancellation.isCancelled },
+                        shouldContinue: { !cancellation.isCancelled && gate.isReady },
                         onProgress: { progress in
                             DispatchQueue.main.async { [weak self] in
                                 guard !cancellation.isCancelled else { return }
@@ -739,7 +763,7 @@ final class MountedCopyController: ObservableObject {
                     )
                     var mirrorSummary = MirrorDeletionSummary()
                     var expired = 0
-                    if let mirrorWorker, !cancellation.isCancelled, !summary.interrupted {
+                    if let mirrorWorker, gate.isReady, !cancellation.isCancelled, !summary.interrupted {
                         // Repeat the protection check even if uploads remain.
                         try mirrorWorker.verifyBeforeSynchronization()
                         // A rename is currently represented as upload + delete.
@@ -761,7 +785,7 @@ final class MountedCopyController: ObservableObject {
                     progress.currentFile = ""
                     publish(force:true)
                     totals.stats.deletionsBlocked = mirrorSummary.blocked
-                    outcomeState = summary.interrupted ? "interrupted" :
+                    outcomeState = !gate.isReady && !cancellation.isCancelled ? "suspended" : summary.interrupted ? "interrupted" :
                         (mirrorSummary.blocked ? "suspended" :
                          ((summary.failed + summary.deferred + mirrorSummary.deferred > 0) ? "partial" : "completed"))
                     let mirrorDetails = !policy.enabled ? "" :
@@ -776,7 +800,7 @@ final class MountedCopyController: ObservableObject {
                         rootID: "app", action: "cycle",
                         bytes: summary.bytes,
                         durationSeconds: max(0, Date().timeIntervalSince(startedAt)),
-                        message: (cancellation.isCancelled || summary.interrupted ? "Ciclo interrotto: " : "Ciclo concluso: ") + "\(summary.copied) copie, \(summary.deferred) rimandate, \(summary.failed) errori." + mirrorDetails
+                        message: (cancellation.isCancelled || summary.interrupted ? "Ciclo interrotto: " : "Ciclo concluso: ") + "\(summary.copied) copie, \(summary.reconciled) pubblicazioni precedenti riconciliate, \(summary.deferred) rimandate, \(summary.failed) errori." + mirrorDetails
                     )
                     // Only the SQLite activity table is pruned, never file
                     // inventory, queue, photographs, backups or staging.
@@ -787,7 +811,7 @@ final class MountedCopyController: ObservableObject {
                         + "\(ByteCountFormatter.string(fromByteCount: summary.bytes, countStyle: .file)) trasferiti."
                     DispatchQueue.main.async { [weak self] in
                         guard !cancellation.isCancelled else { return }
-                        self?.status = result
+                        self?.status = gate.isReady ? result : "Sincronizzazione sospesa: inventario non pronto; coda conservata"
                         self?.mirrorStatus = policy.enabled ? mirrorDetails : "Cancellazioni speculari disattivate"
                         // History and totals are finalized even for interrupted cycles.
                     }
@@ -821,8 +845,8 @@ final class MountedCopyController: ObservableObject {
                 ? "Configurazione armata: la verifica delle sorgenti avverrà al primo ciclo"
                 : "Cancellazioni speculari disattivate"
             status = automatic
-                ? (policy.enabled ? "Sincronizzazione automatica di prova pianificata con mirror autorizzato" : "Copie automatiche di prova pianificate (solo aggiunte e aggiornamenti)")
-                : "Copie di prova pianificate; " + schedule.summary
+                ? (policy.enabled ? "Sincronizzazione automatica pianificata con mirror autorizzato" : "Copie automatiche pianificate (solo aggiunte e aggiornamenti)")
+                : "Sincronizzazione manuale avviata"
             refresh()
             timer.resume()
         } catch {
@@ -973,7 +997,7 @@ final class MountedCopyController: ObservableObject {
 
     /// Only verified matches can be acknowledged. No copy/delete is issued.
     func approveSeededFiles() {
-        guard !active && !seedBusy && !maintaining,
+        guard monitorGate.isReady, !active && !seedBusy && !maintaining,
               let report = seedReport, let session = seedSession,
               !report.matches.isEmpty else { return }
 
@@ -993,7 +1017,8 @@ final class MountedCopyController: ObservableObject {
               !active && !seedBusy && !maintaining,
               seedSession != nil, seedCancel === previousCancellation,
               previousCancellation?.isCancelled == false else { return }
-        let cancellation = SeedVerificationCancellation()
+        let gate = monitorGate
+        let cancellation = SeedVerificationCancellation(shouldContinue:{ gate.isReady })
         seedCancel = cancellation
         seedBusy = true
         seedReady = false
@@ -1020,7 +1045,7 @@ final class MountedCopyController: ObservableObject {
                         + "chiusi in SQLite; \(report.matches.count - acknowledged) "
                         + "rimasti in coda perché cambiati o non più validi. "
                         + "Nessun file modificato."
-                    self?.refresh()
+                    self?.refresh(); self?.onQueueChanged?()
                 }
             } catch {
                 DispatchQueue.main.async { [weak self] in
@@ -1133,14 +1158,6 @@ final class MountedCopyController: ObservableObject {
             guard !configured.isEmpty,
                   configured.allSatisfy({ !$0.path.isEmpty && !$0.destination.isEmpty })
             else { throw MountedCopyError.invalidMapping }
-            let mappings = try configured.map {
-                try MountedFolderMapping(
-                    rootID: $0.id,
-                    source: URL(fileURLWithPath: $0.path),
-                    target: URL(fileURLWithPath: $0.destination),
-                    expectedTargetVolume: $0.expected
-                )
-            }
             let cancel = SeedVerificationCancellation()
             maintenanceCancel = cancel
             maintaining = true
@@ -1148,6 +1165,16 @@ final class MountedCopyController: ObservableObject {
             maintenanceStatus = "Verifica temporanei MacSync in corso…"
             queue.async { [weak self] in
                 do {
+                    let mappings = try configured.map {
+                try MountedFolderMapping(
+                    rootID: $0.id,
+                    source: URL(fileURLWithPath: $0.path),
+                    target: URL(fileURLWithPath: $0.destination),
+                    expectedTargetVolume: $0.expected
+                )
+            }
+                    let journal = try ChangeJournal(path:Self.databaseURL().path)
+                    try journal.verifyDirectoryBindings(mappings,allowNewTarget:true)
                     let candidates = try mappings.map {
                         (mapping: $0, inspection: try StagingMaintenance.inspect(mapping: $0, shouldContinue: { !cancel.isCancelled }))
                     }
@@ -1194,24 +1221,6 @@ final class MountedCopyController: ObservableObject {
         }
         do {
             let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
-            let freshMappings = try configured.map {
-                try MountedFolderMapping(
-                    rootID: $0.id, source: URL(fileURLWithPath: $0.path),
-                    target: URL(fileURLWithPath: $0.destination),
-                    expectedTargetVolume: $0.expected
-                )
-            }
-            guard freshMappings.count == pending.count,
-                  pending.allSatisfy({ saved in
-                      freshMappings.contains(where: {
-                          $0.rootID == saved.mapping.rootID &&
-                          $0.target == saved.mapping.target &&
-                          $0.source == saved.mapping.source &&
-                          $0.targetVolume == saved.mapping.targetVolume
-                      })
-                  })
-            else { throw MountedCopyError.invalidMapping }
-
             let approval = NSAlert()
             approval.alertStyle = .warning
             approval.messageText = "Eliminare \(count) file temporanei MacSync?"
@@ -1232,6 +1241,24 @@ final class MountedCopyController: ObservableObject {
             maintenanceStatus = "Pulizia temporanei verificati in corso…"
             queue.async { [weak self] in
                 do {
+                    let freshMappings = try configured.map {
+                try MountedFolderMapping(
+                    rootID: $0.id, source: URL(fileURLWithPath: $0.path),
+                    target: URL(fileURLWithPath: $0.destination),
+                    expectedTargetVolume: $0.expected
+                )
+            }
+            guard freshMappings.count == pending.count,
+                  pending.allSatisfy({ saved in
+                      freshMappings.contains(where: {
+                          $0.rootID == saved.mapping.rootID &&
+                          $0.target == saved.mapping.target &&
+                          $0.source == saved.mapping.source &&
+                          $0.targetVolume == saved.mapping.targetVolume
+                      })
+                  })
+            else { throw MountedCopyError.invalidMapping }
+                    try ChangeJournal(path:Self.databaseURL().path).verifyDirectoryBindings(freshMappings)
                     var deleted = 0
                     for item in pending {
                         guard !cancel.isCancelled else { break }
@@ -1280,6 +1307,7 @@ final class MountedCopyController: ObservableObject {
 
     func stop() {
         if sessionCancellation?.cycleInProgress == true { interruptionRequested = true }
+        seedCancel?.cancel()
         maintenanceCancel?.cancel()
         auditCancel?.cancel()
         sessionCancellation?.cancel()
@@ -1295,20 +1323,26 @@ final class MountedCopyController: ObservableObject {
         status = "Copie fermate. Un trasferimento già avviato può terminare."
     }
 
+    private var refreshRevision = 0
     func refresh() {
         guard !previewOnly else { return }
-        do {
-            let database = try Self.databaseURL()
-            guard FileManager.default.fileExists(atPath: database.path) else {
-                recentEntries = []
-                return
+        refreshRevision += 1
+        let revision = refreshRevision, level = SyncLogLevel(rawValue:logLevel), search = logSearch
+        queue.async { [weak self] in
+            do {
+                let db = try Self.databaseURL()
+                let entries = FileManager.default.fileExists(atPath:db.path)
+                    ? try SyncActivityLog(path:db.path).recent(limit:300,level:level,search:search) : []
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.refreshRevision == revision else { return }
+                    self.recentEntries = entries
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self,self.refreshRevision == revision else { return }
+                    self.status = "Impossibile leggere il registro: " + error.localizedDescription
+                }
             }
-            recentEntries = try SyncActivityLog(path: database.path).recent(
-                limit: 300, level: SyncLogLevel(rawValue: logLevel),
-                search: logSearch
-            )
-        } catch {
-            status = "Impossibile leggere il registro: " + error.localizedDescription
         }
     }
 

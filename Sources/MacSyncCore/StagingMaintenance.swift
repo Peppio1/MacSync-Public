@@ -6,11 +6,15 @@ public struct StagingCandidate: Equatable, Sendable {
     public let size: Int64
     public let modifiedAt: Date
     public let inode: UInt64
+    public let device: UInt64
+    public let ctimeSeconds: Int64
+    public let ctimeNanos: Int64
 }
 
 public struct StagingInspection: Equatable, Sendable {
     public let candidates: [StagingCandidate]
     public let totalBytes: Int64
+    public let directory: DirectoryBinding?
 
     public var count: Int { candidates.count }
 }
@@ -35,11 +39,12 @@ public enum StagingMaintenance {
         try mapping.verify()
         let stageDir = mapping.target.appendingPathComponent(".macsync-staging")
         guard let directoryStat = statInfo(stageDir) else {
-            return StagingInspection(candidates: [], totalBytes: 0)
+            return StagingInspection(candidates: [], totalBytes: 0, directory:nil)
         }
         guard (directoryStat.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR) else {
             throw MountedCopyError.unsafeFile
         }
+        let binding = try DirectoryBinding.read(stageDir)
         let names = try FileManager.default.contentsOfDirectory(atPath: stageDir.path)
         var candidates: [StagingCandidate] = []
         var total: Int64 = 0
@@ -59,14 +64,16 @@ public enum StagingMaintenance {
             total = overflow ? Int64.max : sum
             candidates.append(StagingCandidate(
                 fileName: name, size: size, modifiedAt: modified,
-                inode: UInt64(info.st_ino)
+                inode: UInt64(info.st_ino), device:UInt64(bitPattern:Int64(info.st_dev)),
+                ctimeSeconds:Int64(info.st_ctimespec.tv_sec),ctimeNanos:Int64(info.st_ctimespec.tv_nsec)
             ))
         }
         try mapping.verify()
+        guard try DirectoryBinding.read(stageDir) == binding else { throw MountedCopyError.volumeChanged }
         guard shouldContinue() else { throw SeedVerificationError.cancelled }
         return StagingInspection(
             candidates: candidates.sorted { $0.fileName < $1.fileName },
-            totalBytes: total
+            totalBytes: total, directory:binding
         )
     }
 
@@ -87,6 +94,8 @@ public enum StagingMaintenance {
         guard let directoryStat = statInfo(stageDir),
               (directoryStat.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR)
         else { throw MountedCopyError.unsafeFile }
+        guard let expected = inspected.directory, try DirectoryBinding.read(stageDir) == expected else { throw MountedCopyError.volumeChanged }
+        let anchor = try AnchoredDirectory(stageDir,expectedVolume:mapping.targetVolume)
         var removed = 0
         for candidate in inspected.candidates {
             guard shouldContinue() else { break }
@@ -96,6 +105,9 @@ public enum StagingMaintenance {
             guard let current = statInfo(location),
                   (current.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
                   UInt64(current.st_ino) == candidate.inode,
+                  UInt64(bitPattern:Int64(current.st_dev)) == candidate.device,
+                  Int64(current.st_ctimespec.tv_sec) == candidate.ctimeSeconds,
+                  Int64(current.st_ctimespec.tv_nsec) == candidate.ctimeNanos,
                   Int64(current.st_size) == candidate.size
             else { continue }
             let modified = Date(timeIntervalSince1970:
@@ -105,7 +117,7 @@ public enum StagingMaintenance {
             guard abs(modified.timeIntervalSince(candidate.modifiedAt)) <= 0.001,
                   now.timeIntervalSince(modified) >= minimumAge else { continue }
             guard shouldContinue() else { break }
-            try FileManager.default.removeItem(at: location)
+            try anchor.remove(candidate.fileName,matching:current,shouldContinue:shouldContinue)
             removed += 1
         }
         return removed

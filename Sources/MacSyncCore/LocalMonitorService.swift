@@ -31,8 +31,10 @@ public final class LocalMonitorService {
     private var recoveryRequired = false
     private let requestLock = NSLock()
     private var scanRequest: SeedVerificationCancellation?
+    public let safetyGate: MonitorSafetyGate
 
-    public init(onUpdate: @escaping (MonitorUpdate) -> Void) {
+    public init(safetyGate: MonitorSafetyGate = MonitorSafetyGate(), onUpdate: @escaping (MonitorUpdate) -> Void) {
+        self.safetyGate = safetyGate
         self.update = onUpdate
     }
 
@@ -41,6 +43,7 @@ public final class LocalMonitorService {
         requestLock.lock()
         scanRequest?.cancel()
         scanRequest = request
+        let generation = safetyGate.invalidate()
         queue.async { [self] in
             self.stopOnQueue()
             guard !request.isCancelled else { self.report("Scansione annullata", active: false); return }
@@ -98,12 +101,13 @@ public final class LocalMonitorService {
                 self.lastFullScan = Date()
 
                 let watcher = FSEventsWatcher(queue: self.queue) { [weak self] events in
-                    self?.process(events: events)
+                    self?.process(events: events, request:request, generation:generation)
                 }
                 try watcher.start(paths: checked.map { $0.url.path }, since: since)
                 self.watcher = watcher
                 guard !request.isCancelled else { throw SeedVerificationError.cancelled }
-                self.startHealthTimer()
+                self.startHealthTimer(request:request,generation:generation)
+                self.safetyGate.setReady(true,generation:generation)
                 self.report("Monitoraggio locale attivo", active: true)
             } catch {
                 self.stopOnQueue()
@@ -116,12 +120,16 @@ public final class LocalMonitorService {
     public func stop() {
         requestLock.lock()
         scanRequest?.cancel()
+        safetyGate.invalidate()
         queue.async { [self] in
             self.stopOnQueue()
             self.report("Monitoraggio locale arrestato", active: false)
         }
         requestLock.unlock()
     }
+
+    public func afterStopped(_ completion: @escaping () -> Void) { queue.async { completion() } }
+    public func refreshCount() { queue.async { [weak self] in guard let self, self.safetyGate.isReady else { return }; self.report("Monitoraggio locale attivo",active:true) } }
 
     private func validateRoots(_ roots: [MonitorRoot]) throws -> [MonitorRoot] {
         guard Set(roots.map(\.id)).count == roots.count else {
@@ -130,7 +138,7 @@ public final class LocalMonitorService {
         for root in roots {
             let values = try root.url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
             guard values.isDirectory == true, values.isSymbolicLink != true,
-                  root.url.isFileURL else {
+                  root.url.isFileURL, !(try VolumeFingerprint.read(at:root.url)).isNetworkVolume else {
                 throw JournalError.database("La cartella configurata non è una directory locale valida")
             }
         }
@@ -145,25 +153,31 @@ public final class LocalMonitorService {
         return roots
     }
 
-    private func process(events: [SourceEvent]) {
-        guard let inventory else { return }
+    private func process(events: [SourceEvent], request: SeedVerificationCancellation, generation: UUID) {
+        guard let inventory, !request.isCancelled else { return }
+        safetyGate.setReady(false,generation:generation)
         var totalChanges = 0
         do {
-            if events.contains(where: { $0.streamHistoryLost }) {
+            if recoveryRequired || events.contains(where: { $0.streamHistoryLost || $0.requiresFullReconciliation }) {
                 // A dropped event stream may have missed modifications under
                 // ANY watched root, not merely under the reported event path.
+                var scan = ArchiveAuditProgress(); scan.phase = "Riconciliazione inventario locale"
+                update(MonitorUpdate(message:scan.phase,monitoring:false,pendingChanges:(try? inventory.pendingCount()) ?? 0,scanProgress:scan))
                 let lastID = events.map(\.eventID).max()
                 for root in roots {
                     _ = try inventory.reconcile(
-                        rootID: root.id, root: root.url, eventID: lastID
+                        rootID: root.id, root: root.url, eventID: lastID, shouldContinue:{ !request.isCancelled }
                     )
                 }
                 lastFullScan = Date()
+                guard !request.isCancelled else { throw SeedVerificationError.cancelled }
                 recoveryRequired = false
+                safetyGate.setReady(true,generation:generation)
                 report("Eventi persi: inventario locale ricontrollato", active: true)
                 return
             }
             for event in events {
+                guard !request.isCancelled else { throw SeedVerificationError.cancelled }
                 guard let root = roots.first(where: {
                     event.path == $0.url.path || event.path.hasPrefix($0.url.path + "/")
                 }) else { continue }
@@ -172,18 +186,20 @@ public final class LocalMonitorService {
                     // If the source root disappeared, reconcile throws before
                     // any DB change. Do NOT treat missing source as deletions.
                     result = try inventory.reconcile(
-                        rootID: root.id, root: root.url, eventID: event.eventID
+                        rootID: root.id, root: root.url, eventID: event.eventID, shouldContinue:{ !request.isCancelled }
                     )
                 } else {
                     result = try inventory.reconcile(
                         rootID: root.id,
                         root: root.url,
                         subtree: URL(fileURLWithPath: event.path),
-                        eventID: event.eventID
+                        eventID: event.eventID, shouldContinue:{ !request.isCancelled }
                     )
                 }
                 totalChanges += result.queuedUpserts + result.queuedDeletes
             }
+            guard !request.isCancelled else { throw SeedVerificationError.cancelled }
+            safetyGate.setReady(true,generation:generation)
             if totalChanges > 0 {
                 try? activityLog?.record(
                     level: .info, rootID: "monitor", action: "detected",
@@ -199,11 +215,11 @@ public final class LocalMonitorService {
         }
     }
 
-    private func startHealthTimer() {
+    private func startHealthTimer(request: SeedVerificationCancellation,generation: UUID) {
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + .seconds(300), repeating: .seconds(300))
         timer.setEventHandler { [weak self] in
-            guard let self, let store = self.inventory else { return }
+            guard let self, let store = self.inventory, !request.isCancelled else { return }
             do {
                 for root in self.roots {
                     let values = try root.url.resourceValues(forKeys: [.isDirectoryKey])
@@ -213,9 +229,14 @@ public final class LocalMonitorService {
                 }
                 // This is a LOCAL periodic audit, not a recurring SMB scan.
                 if self.recoveryRequired || (self.lastFullScan.map({ Date().timeIntervalSince($0) >= 86_400 }) ?? true) {
+                    self.safetyGate.setReady(false,generation:generation)
+                    var scan = ArchiveAuditProgress(); scan.phase = "Verifica locale"
+                    self.update(MonitorUpdate(message:scan.phase,monitoring:false,pendingChanges:(try? store.pendingCount()) ?? 0,scanProgress:scan))
                     for root in self.roots {
-                        _ = try store.reconcile(rootID: root.id, root: root.url)
+                        _ = try store.reconcile(rootID: root.id, root: root.url, shouldContinue:{ !request.isCancelled })
                     }
+                    guard !request.isCancelled else { throw SeedVerificationError.cancelled }
+                    self.safetyGate.setReady(true,generation:generation)
                     self.lastFullScan = Date()
                     self.recoveryRequired = false
                     try? self.activityLog?.record(
@@ -225,6 +246,7 @@ public final class LocalMonitorService {
                     self.report("Verifica completa locale conclusa", active: true)
                 }
             } catch {
+                self.safetyGate.setReady(false,generation:generation)
                 self.recoveryRequired = true
                 self.report("Verifica locale sospesa: " + error.localizedDescription, active: false)
             }

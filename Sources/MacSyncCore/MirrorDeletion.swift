@@ -132,7 +132,7 @@ public struct MirrorAuthorization: Codable, Equatable, Sendable {
     fileprivate let databaseID: String
     fileprivate let cutoff: Int64
 
-    public static func capture(journal: ChangeJournal, mappings: [MountedFolderMapping]) throws -> MirrorAuthorization {
+    public static func capture(journal: ChangeJournal, mappings: [MountedFolderMapping], shouldContinue: () -> Bool = { true }) throws -> MirrorAuthorization {
         guard !mappings.isEmpty, Set(mappings.map(\.rootID)).count == mappings.count else {
             throw MirrorDeletionFailure.noBaseline
         }
@@ -148,7 +148,7 @@ public struct MirrorAuthorization: Codable, Equatable, Sendable {
         var roots: [String: Root] = [:]
         for map in mappings {
             let before = try captureIdentity(map, journal: journal, count: 0)
-            let inventory = try LocalScanner.scan(root: map.source)
+            let inventory = try LocalScanner.scan(root: map.source,shouldContinue:shouldContinue)
             let after = try captureIdentity(map, journal: journal, count: 0)
             guard before == after, try journal.inventoryPathsMatch(rootID: map.rootID, scanned: inventory)
             else { throw MirrorDeletionFailure.noBaseline }
@@ -158,6 +158,7 @@ public struct MirrorAuthorization: Codable, Equatable, Sendable {
             roots[map.rootID] = Root(sourcePath: map.source.path, targetPath: map.target.path,
                 targetVolume: map.targetVolume, identity: identity)
         }
+        guard shouldContinue() else { throw SeedVerificationError.cancelled }
         return MirrorAuthorization(roots: roots, databaseID: try journal.databaseIdentity(),
             cutoff: try journal.queueSequence())
     }
@@ -370,6 +371,7 @@ public final class MirrorDeletionWorker {
     private let armedAt: Date
     private let cancellation: MirrorDeletionCancellation
     private var appliedDuringSession = 0
+    public var operationAllowed: () -> Bool = { true }
     public var onEvent: ((SyncCycleEvent) -> Void)?
     public var onJobStarted: ((QueuedChange) -> Void)?
     public var onPlan: ((Int) -> Void)?
@@ -493,6 +495,7 @@ public final class MirrorDeletionWorker {
     /// Called before any upload and again before mirror/retention. A safety
     /// latch is persistent even if the operator disables a protection.
     public func verifyBeforeSynchronization(now: Date = Date()) throws {
+        guard !cancellation.isCancelled, operationAllowed() else { throw SeedVerificationError.cancelled }
         guard let authorization else { return }
         if let reason = try journal.mirrorBlockReason() {
             throw MirrorDeletionFailure.bulkDeletion(reason)
@@ -523,7 +526,7 @@ public final class MirrorDeletionWorker {
                 reason = "Limite percentuale: \(Int(fraction))%"
             } else if protections.emptyEnabled {
                 if verifyEmpty {
-                    if try LocalScanner.scan(root: mapping.source).isEmpty {
+                    if try LocalScanner.scan(root: mapping.source,shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() }).isEmpty {
                         reason = "Sorgente completamente vuota"
                     }
                 } else if counts.inventory == 0 {
@@ -546,6 +549,7 @@ public final class MirrorDeletionWorker {
     public func runCycle(pageSize: Int = 100, throughID: Int64? = nil) throws -> MirrorDeletionSummary {
         guard let authorization else { return try runOnce(maxFiles: 100) }
         var result = MirrorDeletionSummary()
+        guard !cancellation.isCancelled,operationAllowed() else { return result }
         try verifyBeforeSynchronization()
         guard !cancellation.isCancelled else { return result }
         guard try journal.pendingUploads(limit: 1).isEmpty else {
@@ -559,7 +563,7 @@ public final class MirrorDeletionWorker {
         var length = Int64.max
         var lastID: Int64 = 0
         var availableRoots: Set<String> = []
-        while !cancellation.isCancelled {
+        while !cancellation.isCancelled && operationAllowed() {
             try evaluateProtection(authorization: authorization, now: Date(), verifyEmpty: false)
             let page = try journal.pendingDeletePage(afterID: authorization.cutoff, throughID: upper,
                 previousLength: length, previousID: lastID, limit: pageSize)
@@ -578,7 +582,7 @@ public final class MirrorDeletionWorker {
     private func process(_ jobs: [QueuedChange], result: inout MirrorDeletionSummary,
                          availableRoots: inout Set<String>) throws {
         for job in jobs {
-            if cancellation.isCancelled { break }
+            if cancellation.isCancelled || !operationAllowed() { break }
             if !(try journal.pendingUploads(limit: 1).isEmpty) {
                 result.blocked = true
                 result.detail = "Nuove copie in coda: cancellazioni sospese"
@@ -600,7 +604,7 @@ public final class MirrorDeletionWorker {
             do {
                 try self.verifyRoots(mapping, baseline)
                 if !availableRoots.contains(job.rootID) {
-                    let currentInventory = try LocalScanner.scan(root: mapping.source)
+                    let currentInventory = try LocalScanner.scan(root: mapping.source,shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() })
                     if authorization != nil && protections.emptyEnabled && currentInventory.isEmpty {
                         let reason = job.rootID + ": Sorgente completamente vuota"
                         try journal.latchMirrorBlock(reason)
@@ -612,6 +616,9 @@ public final class MirrorDeletionWorker {
                     id: job.id, rootID: job.rootID, relativePath: job.relativePath
                 ) else { throw MirrorDeletionFailure.pendingTransfer }
 
+                guard WindowsPathSafety.validRelativePath(job.relativePath) else { throw MirrorDeletionFailure.unsafePath }
+                try WindowsPathSafety.checkNames(relativePath:job.relativePath,under:mapping.source)
+                try WindowsPathSafety.checkNames(relativePath:job.relativePath,under:mapping.target)
                 let source = try validatedPath(job.relativePath, under: mapping.source, allowMissingParents: true)
                 let destination = try validatedPath(job.relativePath, under: mapping.target)
                 // Source leaf must still be absent, including dangling symlinks.
@@ -647,12 +654,12 @@ public final class MirrorDeletionWorker {
                       latest.st_ctimespec.tv_nsec == target.st_ctimespec.tv_nsec else {
                     throw MirrorDeletionFailure.destinationChanged
                 }
-                if cancellation.isCancelled { break }
+                if cancellation.isCancelled || !operationAllowed() { break }
                 if let authorization {
                     try evaluateProtection(authorization: authorization, now: Date(), verifyEmpty: false)
                     try journal.recordMirrorAttempt(job)
                     // The reservation is durable before touching the share.
-                    if cancellation.isCancelled { break }
+                    if cancellation.isCancelled || !operationAllowed() { break }
                     guard try journal.pendingUploads(limit: 1).isEmpty,
                           try journal.deletionIsCurrent(id: job.id, rootID: job.rootID, relativePath: job.relativePath)
                     else { throw MirrorDeletionFailure.pendingTransfer }
@@ -673,7 +680,10 @@ public final class MirrorDeletionWorker {
                     } else {
                         // No recovery was explicitly chosen. There is NO
                         // automatic way to restore this file in MacSync.
-                        try Self.unlinkLeaf(destination)
+                        let parent = try AnchoredDirectory(destination.deletingLastPathComponent(),expectedVolume:mapping.targetVolume)
+                        try verifyRoots(mapping,baseline)
+                        guard try Self.statIfPresent(source) == nil else { throw MirrorDeletionFailure.sourceChanged }
+                        try parent.remove(destination.lastPathComponent,matching:target,shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() })
                         result.removed += 1
                         recordedRemoval = true
                         emit(.deleted,job:job,mapping:mapping,bytes:Int64(target.st_size))
@@ -687,7 +697,10 @@ public final class MirrorDeletionWorker {
                     // or a pending child operation will block automatically.
                     guard try FileManager.default.contentsOfDirectory(atPath: destination.path).isEmpty
                     else { throw MirrorDeletionFailure.destinationChanged }
-                    try Self.removeEmptyDirectory(destination)
+                    let parent = try AnchoredDirectory(destination.deletingLastPathComponent(),expectedVolume:mapping.targetVolume)
+                    try verifyRoots(mapping,baseline)
+                    guard try Self.statIfPresent(source) == nil else { throw MirrorDeletionFailure.sourceChanged }
+                    try parent.remove(destination.lastPathComponent,matching:target,directory:true,shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() })
                     result.directories += 1
                     recordedRemoval = true
                     emit(.directoryRemoved,job:job,mapping:mapping)
@@ -719,12 +732,12 @@ public final class MirrorDeletionWorker {
     /// This cleanup cannot remove ordinary destination photos or backups.
     @discardableResult
     public func pruneExpiredRecovery(now: Date = Date()) throws -> Int {
-        guard policy.enabled, !cancellation.isCancelled else { return 0 }
+        guard policy.enabled, !cancellation.isCancelled, operationAllowed() else { return 0 }
         if authorization != nil { try verifyBeforeSynchronization() }
         guard try journal.pendingUploads(limit: 1).isEmpty else { return 0 }
         var removed = 0
         for item in try manifest.expired(before: now) {
-            if cancellation.isCancelled { break }
+            if cancellation.isCancelled || !operationAllowed() { break }
             guard let mapping = mappings[item.rootID], let baseline = baselines[item.rootID],
                   mapping.target.path == item.targetRoot else { continue }
             do {
@@ -738,8 +751,10 @@ public final class MirrorDeletionWorker {
                       UInt64(current.st_ino) == item.inode,
                       Int64(current.st_size) == item.size,
                       abs(Self.modificationTime(current) - item.mtime) < 0.001 else { continue }
-                if cancellation.isCancelled { break }
-                try Self.unlinkLeaf(safe)
+                if cancellation.isCancelled || !operationAllowed() { break }
+                let parent = try AnchoredDirectory(safe.deletingLastPathComponent(),expectedVolume:mapping.targetVolume)
+                try verifyRoots(mapping,baseline)
+                try parent.remove(safe.lastPathComponent,matching:current,shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() })
                 try manifest.forget(id: item.id)
                 removed += 1
                 let job = QueuedChange(id:0,rootID:item.rootID,relativePath:item.managedRelativePath,kind:.delete,recordedAt:now)
@@ -768,7 +783,7 @@ public final class MirrorDeletionWorker {
             throw MirrorDeletionFailure.destinationChanged
         }
         try verifyRoots(mapping, baseline)
-        guard !cancellation.isCancelled,
+        guard !cancellation.isCancelled, operationAllowed(),
               try journal.pendingUploads(limit: 1).isEmpty,
               try journal.deletionIsCurrent(id: job.id, rootID: job.rootID, relativePath: job.relativePath),
               try Self.statIfPresent(source) == nil,
@@ -780,17 +795,24 @@ public final class MirrorDeletionWorker {
               latest.st_ctimespec.tv_sec == original.st_ctimespec.tv_sec,
               latest.st_ctimespec.tv_nsec == original.st_ctimespec.tv_nsec
         else { throw MirrorDeletionFailure.destinationChanged }
-        try FileManager.default.moveItem(at: destination, to: recovered)
-        guard let after = try Self.statIfPresent(recovered), Self.isRegularFile(after) else {
-            throw MirrorDeletionFailure.destinationChanged
-        }
+        let oldParent = try AnchoredDirectory(destination.deletingLastPathComponent(),expectedVolume:mapping.targetVolume)
+        let newParent = try AnchoredDirectory(recovered.deletingLastPathComponent(),expectedVolume:mapping.targetVolume)
+        // Persist the recovery record before moving; missing reserved paths are harmless.
         try manifest.record(
             id: uuid, rootID: job.rootID, targetRoot: mapping.target.path,
             managedPath: managed,
-            size: Int64(after.st_size), inode: UInt64(after.st_ino),
-            mtime: Self.modificationTime(after),
+            size: Int64(original.st_size), inode: UInt64(original.st_ino),
+            mtime: Self.modificationTime(original),
             retentionDays: policy.retentionDays
         )
+        try verifyRoots(mapping,baseline)
+        guard try Self.statIfPresent(source) == nil,
+              try journal.deletionIsCurrent(id:job.id,rootID:job.rootID,relativePath:job.relativePath),
+              try journal.pendingUploads(limit:1).isEmpty else { throw MirrorDeletionFailure.pendingTransfer }
+        try oldParent.publish(destination.lastPathComponent,matching:original,to:newParent,as:recovered.lastPathComponent,replacing:nil,
+            shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() })
+        guard let after = try Self.statIfPresent(recovered), Self.isRegularFile(after),
+              after.st_ino == original.st_ino, after.st_size == original.st_size else { throw MirrorDeletionFailure.destinationChanged }
         return recovered.path
     }
 
@@ -816,12 +838,12 @@ public final class MirrorDeletionWorker {
     ) throws -> URL {
         guard path.hasPrefix(".macsync-recovery/"), path.count > ".macsync-recovery/".count
         else { throw MirrorDeletionFailure.unsafePath }
-        return try validatedPath(path, under: mapping.target, createParents: createParents, recovery: true)
+        return try validatedPath(path, under: mapping.target, createParents: createParents, recovery: true, expectedVolume:mapping.targetVolume)
     }
 
     private func validatedPath(
         _ relative: String, under root: URL, createParents: Bool = false,
-        recovery: Bool = false, allowMissingParents: Bool = false
+        recovery: Bool = false, allowMissingParents: Bool = false, expectedVolume: VolumeFingerprint? = nil
     ) throws -> URL {
         let segments = relative.split(separator: "/", omittingEmptySubsequences: false)
         guard !segments.isEmpty,
@@ -837,7 +859,9 @@ public final class MirrorDeletionWorker {
             if let state = try Self.statIfPresent(current) {
                 guard Self.isDirectory(state) else { throw MirrorDeletionFailure.unsafePath }
             } else if createParents {
-                try FileManager.default.createDirectory(at: current, withIntermediateDirectories: false)
+                guard let expectedVolume else { throw MirrorDeletionFailure.unsafePath }
+                let parent = try AnchoredDirectory(current.deletingLastPathComponent(),expectedVolume:expectedVolume)
+                try parent.ensureDirectory(current.lastPathComponent,managed:recovery,shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() })
             } else if allowMissingParents {
                 // A whole source folder may have been deleted. Its missing
                 // descendants are valid DELETE events, provided all extant

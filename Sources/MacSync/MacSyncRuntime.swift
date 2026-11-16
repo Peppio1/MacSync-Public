@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import SwiftUI
 import UserNotifications
 import MacSyncCore
@@ -8,6 +9,12 @@ import MacSyncCore
 /// VPN client, SMB reconnect, or background probing separate from the plan.
 @MainActor
 final class MacSyncRuntime: ObservableObject {
+    static weak var operationalRuntime: MacSyncRuntime?
+    private let storageGuard: RuntimeStorageGuard?
+    @Published private(set) var shuttingDown = false
+    private var shutdownCompletion: (@MainActor () -> Void)?
+    private var shutdownWorkersDrained = false
+    private var folderEditCancellation: SeedVerificationCancellation?
     let previewOnly: Bool
     let model: MacSyncViewModel
     let copy: MountedCopyController
@@ -31,14 +38,21 @@ final class MacSyncRuntime: ObservableObject {
 
     init(previewOnly: Bool = false) {
         self.previewOnly = previewOnly
+        storageGuard = previewOnly ? nil : RuntimeStorageGuard.acquireOrExit()
         model = MacSyncViewModel(previewOnly: previewOnly)
-        copy = MountedCopyController(previewOnly: previewOnly)
+        copy = MountedCopyController(previewOnly: previewOnly,monitorGate:model.safetyGate)
         settings = SyncSettingsController(previewOnly: previewOnly)
         guard !previewOnly else {
             automaticStatus = "Copie automatiche abilitate"
             nextAutomaticAttempt = Date().addingTimeInterval(900)
             destinations.update(["photo-uploads": .ready, "photo-editing": .ready, "demo-third": .ready], checkedAt: Date())
             return
+        }
+        Self.operationalRuntime = self
+        copy.onQueueChanged = { [weak self] in
+            guard let self, !self.shuttingDown else { return }
+            self.model.refreshPendingCount()
+            if !self.copy.active && self.nextAutomaticAttempt == nil { self.scheduleNextAutomaticAttempt() }
         }
         if Bundle.main.bundleURL.pathExtension.lowercased() == "app" {
             UNUserNotificationCenter.current().delegate = notificationDelegate
@@ -61,7 +75,7 @@ final class MacSyncRuntime: ObservableObject {
     deinit { autoTimer?.invalidate(); auditTimer?.invalidate() }
 
     func scheduleArchiveAudit() {
-        guard !previewOnly else { return }
+        guard !previewOnly, !shuttingDown, !folderConfigurationBusy, !savingSchedule else { return }
         auditRevision += 1
         auditTimer?.invalidate()
         auditTimer = nil
@@ -73,7 +87,7 @@ final class MacSyncRuntime: ObservableObject {
         let timer = Timer(fire:next,interval:0,repeats:false) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, self.auditRevision == revision, self.copy.auditSettings.enabled else { return }
-                if self.model.monitoring {
+                if self.model.monitoring && self.model.safetyGate.isReady && !self.folderConfigurationBusy && !self.savingSchedule && !self.shuttingDown && self.copy.liveProgress == nil && !self.copy.interruptionRequested {
                     self.copy.startArchiveAudit(sources:self.model.configuredPairs(),interactive:false)
                 } else {
                     self.copy.noteAuditSkipped("monitoraggio locale non pronto; prossimo slot programmato")
@@ -83,6 +97,37 @@ final class MacSyncRuntime: ObservableObject {
         }
         RunLoop.main.add(timer,forMode:.common)
         auditTimer = timer
+    }
+
+    func requestShutdown(_ completion: @escaping @MainActor () -> Void) {
+        guard !shuttingDown else { return }
+        shuttingDown = true
+        shutdownCompletion = completion
+        folderEditCancellation?.cancel()
+        stopAllOperations()
+        copy.invalidateSeedReport()
+        // A blocked SMB call may take time; do not terminate during a write.
+        copy.afterWorkerStopped { [weak self] in
+            self?.model.afterMonitorStopped { [weak self] in
+                self?.shutdownWorkersDrained = true
+                self?.finishShutdownIfReady()
+            }
+        }
+    }
+
+    private func finishShutdownIfReady() {
+        guard shuttingDown, shutdownWorkersDrained, !folderConfigurationBusy else { return }
+        let complete = shutdownCompletion; shutdownCompletion = nil; complete?()
+    }
+
+    func startManualSynchronization() {
+        guard !previewOnly, !shuttingDown, !savingSchedule, !folderConfigurationBusy,
+              model.monitoring, model.safetyGate.isReady, !copy.active, !copy.maintaining,
+              !copy.seedBusy, !copy.seedReady, !copy.interruptionRequested else { return }
+        configurationRevision += 1
+        autoTimer?.invalidate(); autoTimer = nil; nextAutomaticAttempt = nil
+        copy.start(sources:model.configuredPairs(),schedule:settings.schedule)
+        if !copy.active { scheduleNextAutomaticAttempt() }
     }
 
     func stopCopiesForCurrentLaunch() {
@@ -104,7 +149,7 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     func resumeAutomaticCopies() {
-        guard !savingSchedule, !folderConfigurationBusy, copy.automaticCopiesEnabled, !copy.active, !copy.seedBusy, !copy.maintaining, !copy.interruptionRequested, copy.liveProgress == nil else { return }
+        guard !shuttingDown, !savingSchedule, !folderConfigurationBusy, copy.automaticCopiesEnabled, !copy.active, !copy.seedBusy, !copy.maintaining, !copy.interruptionRequested, copy.liveProgress == nil else { return }
         configurationRevision += 1
         suspendedUntilNextLaunch = false
         automaticStatus = "Copie automatiche abilitate: attendo il prossimo ciclo"
@@ -113,7 +158,7 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     func onAutomaticPreferenceChanged(_ enabled: Bool) {
-        guard !savingSchedule, !folderConfigurationBusy else { return }
+        guard !shuttingDown, !savingSchedule, !folderConfigurationBusy else { return }
         configurationRevision += 1
         copy.setAutomaticCopiesEnabled(enabled)
         if copy.automaticCopiesEnabled {
@@ -127,7 +172,7 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     func saveSchedule(_ schedule: SyncSchedule) {
-        guard !previewOnly, schedule.isValid, !folderConfigurationBusy, !savingSchedule, !copy.seedBusy, !copy.maintaining, !copy.auditBusy else { return }
+        guard !previewOnly, !shuttingDown, schedule.isValid, !folderConfigurationBusy, !savingSchedule, !copy.seedBusy, !copy.maintaining, !copy.auditBusy else { return }
         let resume = copy.automaticCopiesEnabled && !suspendedUntilNextLaunch
         savingSchedule = true
         configurationRevision += 1
@@ -142,6 +187,7 @@ final class MacSyncRuntime: ObservableObject {
             self.savingSchedule = false
             self.automaticStatus = resume ? "Frequenza aggiornata: pianificazione riavviata" : "Frequenza aggiornata"
             self.scheduleNextAutomaticAttempt()
+            self.scheduleArchiveAudit()
         }
     }
 
@@ -161,17 +207,32 @@ final class MacSyncRuntime: ObservableObject {
         }
     }
 
-    func editFolderConfiguration(_ edit: @escaping @MainActor () -> Void) {
-        guard !previewOnly, !folderConfigurationBusy, !savingSchedule, !copy.active, copy.liveProgress == nil, !copy.interruptionRequested, !copy.maintaining, !copy.seedBusy else { return }
+    func editFolderConfiguration(add:[URL],parent:URL?,remove:String?) {
+        guard !previewOnly, !shuttingDown, !folderConfigurationBusy, !savingSchedule, !copy.active, copy.liveProgress == nil, !copy.interruptionRequested, !copy.maintaining, !copy.seedBusy else { return }
         folderConfigurationBusy = true
+        let token = SeedVerificationCancellation()
+        folderEditCancellation = token
         stopAllOperations()
         copy.invalidateSeedReport()
         onFolderConfigurationChanged()
         copy.afterWorkerStopped { [weak self] in
             guard let self else { return }
-            edit()
-            if self.model.configuredPairs().contains(where:{ !$0.path.isEmpty }) { self.model.startMonitoring() }
-            self.folderConfigurationBusy = false
+            self.model.afterMonitorStopped { [weak self] in
+                guard let self else { return }
+                if self.shuttingDown || token.isCancelled {
+                    self.folderConfigurationBusy = false
+                    self.folderEditCancellation = nil
+                    self.finishShutdownIfReady()
+                    return
+                }
+                self.model.applyCommonFolders(add:add,parent:parent,remove:remove,cancellation:token) { [weak self] in
+                    guard let self else { return }
+                    self.folderConfigurationBusy = false
+                    self.folderEditCancellation = nil
+                    if !self.shuttingDown && self.model.configuredPairs().contains(where:{ !$0.path.isEmpty }) { self.model.startMonitoring() }
+                    self.finishShutdownIfReady()
+                }
+            }
         }
     }
 
@@ -255,7 +316,7 @@ final class MacSyncRuntime: ObservableObject {
         autoTimer?.invalidate()
         autoTimer = nil
         nextAutomaticAttempt = nil
-        guard !savingSchedule, !folderConfigurationBusy, !suspendedUntilNextLaunch,
+        guard !shuttingDown, !savingSchedule, !folderConfigurationBusy, !suspendedUntilNextLaunch,
               copy.automaticCopiesEnabled,
               !copy.active, !copy.interruptionRequested, copy.liveProgress == nil else { return }
         let schedule = settings.schedule
@@ -283,9 +344,9 @@ final class MacSyncRuntime: ObservableObject {
     /// probes SMB. Once armed, the copy worker owns all subsequent slots,
     /// including offline checks, retries and notifications.
     private func activateAutomaticSession(at slot: Date) {
-        guard !savingSchedule, !folderConfigurationBusy, !suspendedUntilNextLaunch,
+        guard !shuttingDown, !savingSchedule, !folderConfigurationBusy, !suspendedUntilNextLaunch,
               copy.automaticCopiesEnabled, !copy.active else { return }
-        guard model.monitoring else {
+        guard model.monitoring, model.safetyGate.isReady, !copy.maintaining, !copy.seedBusy, !copy.seedReady else {
             automaticStatus = "Attendo il monitoraggio delle sorgenti"
             scheduleNextAutomaticAttempt(afterSlot: slot)
             return

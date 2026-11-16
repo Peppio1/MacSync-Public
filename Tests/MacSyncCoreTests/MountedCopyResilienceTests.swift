@@ -243,6 +243,25 @@ final class MountedCopyResilienceTests: XCTestCase {
         XCTAssertEqual(try pending(f).count, 1)
     }
 
+    func testInterruptedPublicationWithInventoryReconcilesWithoutSecondTransfer() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        _ = try LocalInventory(path:f.db).reconcile(rootID:"photos",root:f.src)
+        let w = try worker(f)
+        w.checkpoint = { phase,_ in if phase == .afterPublish { throw SimulatedFailure.connectionLost } }
+        XCTAssertEqual(try w.runCycle(enabled:true).failed,1)
+        XCTAssertEqual(try pending(f).count,1)
+        let retry = try worker(f)
+        retry.checkpoint = { phase,_ in
+            if phase == .beforeStageCopy { XCTFail("Identical interrupted publication must not be recopied") }
+        }
+        let result = try retry.runCycle(enabled:true)
+        XCTAssertEqual(result.reconciled,1)
+        XCTAssertEqual(result.bytes,0)
+        XCTAssertTrue(try pending(f).isEmpty)
+        XCTAssertEqual(try read(f.dst.appendingPathComponent("photo.psd")),"new image content")
+    }
+
     func testFailedAcknowledgmentAfterPublicationKeepsQueueAndCanRetry() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }

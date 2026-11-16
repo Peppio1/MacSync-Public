@@ -7,12 +7,14 @@ public struct TrackedItem: Equatable, Sendable {
     public let kind: String
     public let size: Int64
     public let modifiedAt: Double
+    public let changeStamp: String?
 
-    public init(relativePath: String, kind: String, size: Int64, modifiedAt: Double) {
+    public init(relativePath: String, kind: String, size: Int64, modifiedAt: Double, changeStamp: String? = nil) {
         self.relativePath = relativePath
         self.kind = kind
         self.size = size
         self.modifiedAt = modifiedAt
+        self.changeStamp = changeStamp
     }
 }
 
@@ -108,15 +110,25 @@ public enum LocalScanner {
                 throw JournalError.database("Unexpected path outside root")
             }
             let relative = String(effectivePath.dropFirst(prefix.count))
-            if excludeManaged && kind == "file" &&
+            if kind == "file" &&
                 (metadata.fileSize == nil || metadata.contentModificationDate == nil) {
                 throw JournalError.database("Metadati non disponibili durante la verifica completa")
+            }
+            var changeStamp: String?
+            if kind == "file" {
+                var actual = stat()
+                guard file.path.withCString({ lstat($0,&actual) }) == 0,
+                      actual.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+                      Int64(actual.st_size) == Int64(metadata.fileSize ?? -1) else {
+                    throw JournalError.database("File changed during inventory scan")
+                }
+                changeStamp = "\(actual.st_ino):\(actual.st_ctimespec.tv_sec):\(actual.st_ctimespec.tv_nsec)"
             }
             let item = TrackedItem(
                 relativePath: relative,
                 kind: kind,
                 size: Int64(metadata.fileSize ?? 0),
-                modifiedAt: metadata.contentModificationDate?.timeIntervalSince1970 ?? 0
+                modifiedAt: metadata.contentModificationDate?.timeIntervalSince1970 ?? 0, changeStamp: changeStamp
             )
             found.append(item)
             onItem(item)
@@ -214,6 +226,18 @@ public final class LocalInventory {
                     completed INTEGER NOT NULL DEFAULT 0
                 );
                 """)
+            try execute("CREATE TABLE IF NOT EXISTS directory_bindings(root_id TEXT NOT NULL, role TEXT NOT NULL, stamp TEXT NOT NULL, PRIMARY KEY(root_id,role));")
+            // Compatible migration: old rows learn the new stamp on their next scan.
+            let columns = try prepare("PRAGMA table_info(file_inventory);")
+            var hasStamp = false
+            var infoResult = sqlite3_step(columns)
+            while infoResult == SQLITE_ROW {
+                if column(columns,1) == "change_stamp" { hasStamp = true }
+                infoResult = sqlite3_step(columns)
+            }
+            sqlite3_finalize(columns)
+            guard infoResult == SQLITE_DONE else { throw failure() }
+            if !hasStamp { try execute("ALTER TABLE file_inventory ADD COLUMN change_stamp TEXT;") }
             try execute("CREATE INDEX IF NOT EXISTS idx_inventory_pending_path ON change_queue(root_id, relative_path, completed);")
         } catch {
             sqlite3_close(db)
@@ -268,7 +292,7 @@ public final class LocalInventory {
         }
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
-            for table in ["change_queue", "file_inventory", "watched_roots"] {
+            for table in ["change_queue", "file_inventory", "watched_roots", "directory_bindings"] {
                 let statement = try prepare("DELETE FROM " + table + " WHERE root_id = ?;")
                 defer { sqlite3_finalize(statement) }
                 try bind(rootID, at: 1, statement: statement)
@@ -331,7 +355,7 @@ public final class LocalInventory {
             }
             guard code == SQLITE_DONE else { throw failure() }
             for id in old {
-                for sql in ["DELETE FROM change_queue WHERE root_id=? AND completed=0;", "DELETE FROM file_inventory WHERE root_id=?;", "DELETE FROM watched_roots WHERE root_id=?;"] {
+                for sql in ["DELETE FROM change_queue WHERE root_id=? AND completed=0;", "DELETE FROM file_inventory WHERE root_id=?;", "DELETE FROM watched_roots WHERE root_id=?;", "DELETE FROM directory_bindings WHERE root_id=?;"] {
                     let stmt = try prepare(sql)
                     defer { sqlite3_finalize(stmt) }
                     try bind(id,at:1,statement:stmt)
@@ -374,6 +398,7 @@ public final class LocalInventory {
         guard !rootID.isEmpty else { throw JournalError.database("Missing root identifier") }
         let root = root.standardizedFileURL.resolvingSymlinksInPath()
         let target = (subtree ?? root).standardizedFileURL.resolvingSymlinksInPath()
+        let binding = try DirectoryBinding.encoded(root)
         let rows = try LocalScanner.scan(root: root, subtree: subtree, shouldContinue: shouldContinue, onItem: onItem)
         guard shouldContinue() else { throw SeedVerificationError.cancelled }
         let fullScan = target.path == root.path
@@ -385,6 +410,17 @@ public final class LocalInventory {
                 throw JournalError.database("Source root moved; refusing to reconcile against a different path")
             }
 
+            guard try DirectoryBinding.encoded(root) == binding else { throw MountedCopyError.sourceRootChanged }
+            let existingBinding = try prepare("SELECT stamp FROM directory_bindings WHERE root_id=? AND role='source';")
+            try bind(rootID,at:1,statement:existingBinding)
+            let bindingResult = sqlite3_step(existingBinding)
+            let matches = bindingResult == SQLITE_ROW && column(existingBinding,0) == binding
+            sqlite3_finalize(existingBinding)
+            guard bindingResult == SQLITE_DONE || matches else { throw MountedCopyError.sourceRootChanged }
+            let pin = try prepare("INSERT OR IGNORE INTO directory_bindings(root_id,role,stamp) VALUES(?,'source',?);")
+            defer { sqlite3_finalize(pin) }
+            try bind(rootID,at:1,statement:pin); try bind(binding,at:2,statement:pin)
+            guard sqlite3_step(pin) == SQLITE_DONE else { throw failure() }
             let before = try readEntries(rootID: rootID, scope: fullScan ? nil : scope)
             let affected = before
             let seen = Dictionary(uniqueKeysWithValues: rows.map { ($0.relativePath, $0) })
@@ -394,8 +430,12 @@ public final class LocalInventory {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 if before[row.relativePath] != row {
                     try store(rootID: rootID, item: row)
-                    try enqueue(rootID: rootID, relativePath: row.relativePath, kind: .upsert)
-                    upserts += 1
+                    // Upgrade legacy metadata without re-uploading the entire archive.
+                    let old = before[row.relativePath]
+                    if old == nil || old?.changeStamp != nil || old?.kind != row.kind || old?.size != row.size || old?.modifiedAt != row.modifiedAt {
+                        try enqueue(rootID: rootID, relativePath: row.relativePath, kind: .upsert)
+                        upserts += 1
+                    }
                 }
             }
 
@@ -411,6 +451,7 @@ public final class LocalInventory {
             let checkpoint: UInt64?
             if let eventID { checkpoint = max(prior ?? 0, eventID) }
             else { checkpoint = prior }
+            guard try DirectoryBinding.encoded(root) == binding else { throw MountedCopyError.sourceRootChanged }
             try saveRoot(rootID: rootID, rootPath: root.path, eventID: checkpoint)
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             try execute("COMMIT;")
@@ -429,7 +470,7 @@ public final class LocalInventory {
         let sql: String
         if scope != nil {
             sql = """
-                SELECT relative_path, kind, file_size, modified_at
+                SELECT relative_path, kind, file_size, modified_at, change_stamp
                 FROM file_inventory
                 WHERE root_id = ? AND
                   (relative_path = ? OR
@@ -437,7 +478,7 @@ public final class LocalInventory {
                 """
         } else {
             sql = """
-                SELECT relative_path, kind, file_size, modified_at
+                SELECT relative_path, kind, file_size, modified_at, change_stamp
                 FROM file_inventory WHERE root_id = ?;
                 """
         }
@@ -458,7 +499,8 @@ public final class LocalInventory {
             items[path] = TrackedItem(
                 relativePath: path, kind: column(statement, 1),
                 size: sqlite3_column_int64(statement, 2),
-                modifiedAt: sqlite3_column_double(statement, 3)
+                modifiedAt: sqlite3_column_double(statement, 3),
+                changeStamp: sqlite3_column_type(statement,4) == SQLITE_NULL ? nil : column(statement,4)
             )
         }
         return items
@@ -466,15 +508,17 @@ public final class LocalInventory {
 
     private func store(rootID: String, item: TrackedItem) throws {
         let statement = try prepare("""
-            INSERT INTO file_inventory(root_id,relative_path,kind,file_size,modified_at)
-            VALUES(?,?,?,?,?)
+            INSERT INTO file_inventory(root_id,relative_path,kind,file_size,modified_at,change_stamp)
+            VALUES(?,?,?,?,?,?)
             ON CONFLICT(root_id,relative_path) DO UPDATE SET
-              kind=excluded.kind,file_size=excluded.file_size,modified_at=excluded.modified_at;
+              kind=excluded.kind,file_size=excluded.file_size,modified_at=excluded.modified_at,change_stamp=excluded.change_stamp;
             """)
         defer { sqlite3_finalize(statement) }
         try bind(rootID, at: 1, statement: statement)
         try bind(item.relativePath, at: 2, statement: statement)
         try bind(item.kind, at: 3, statement: statement)
+        if let stamp = item.changeStamp { try bind(stamp,at:6,statement:statement) }
+        else { guard sqlite3_bind_null(statement,6) == SQLITE_OK else { throw failure() } }
         guard sqlite3_bind_int64(statement, 4, item.size) == SQLITE_OK,
               sqlite3_bind_double(statement, 5, item.modifiedAt) == SQLITE_OK,
               sqlite3_step(statement) == SQLITE_DONE else { throw failure() }

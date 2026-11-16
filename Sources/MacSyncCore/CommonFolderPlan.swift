@@ -31,7 +31,7 @@ public struct CommonFolderPlan: Codable, Equatable, Sendable {
             a == b || a.hasPrefix(b + "/") || b.hasPrefix(a + "/") || a == "/" || b == "/"
         }
         guard Set(sources.map(\.id)).count == sources.count,
-              sources.allSatisfy({ !$0.id.isEmpty && $0.path.hasPrefix("/") && $0.path != "/" && !$0.name.isEmpty && !$0.name.lowercased().hasPrefix(".macsync-") }),
+              sources.allSatisfy({ !$0.id.isEmpty && $0.path.hasPrefix("/") && $0.path != "/" && WindowsPathSafety.validComponent($0.name) }),
               Set(sources.map { $0.name.precomposedStringWithCanonicalMapping.lowercased() }).count == sources.count,
               parent.isEmpty || (parent.hasPrefix("/") && parent != "/" && expected?.isStrongIdentity == true)
         else { return false }
@@ -45,7 +45,7 @@ public struct CommonFolderPlan: Codable, Equatable, Sendable {
 
     /// Directory creation anchored to an opened parent descriptor; a lost
     /// SMB mount must not fall back to an ordinary local /Volumes directory.
-    public func prepareTargetDirectories() throws {
+    public func prepareTargetDirectories(shouldContinue: () -> Bool = { true }) throws {
         guard isValid else { throw MountedCopyError.invalidMapping }
         guard !parent.isEmpty else { return }
         guard let expected, DestinationProbe.inspect(path:parent,expectedVolume:expected) == .ready,
@@ -56,6 +56,8 @@ public struct CommonFolderPlan: Codable, Equatable, Sendable {
         defer { Darwin.close(fd) }
         guard try VolumeFingerprint.read(directoryDescriptor:fd) == expected else { throw MountedCopyError.volumeChanged }
         for source in sources {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            try WindowsPathSafety.checkNames(relativePath:source.name,under:URL(fileURLWithPath:parent))
             var info = stat()
             let result = source.name.withCString { fstatat(fd,$0,&info,AT_SYMLINK_NOFOLLOW) }
             if result == 0 {
@@ -63,6 +65,7 @@ public struct CommonFolderPlan: Codable, Equatable, Sendable {
             } else if errno != ENOENT { throw MountedCopyError.rootUnavailable }
         }
         for source in sources {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
             guard DestinationProbe.inspect(path:parent,expectedVolume:expected) == .ready else { throw MountedCopyError.volumeChanged }
             let result = source.name.withCString { mkdirat(fd,$0,mode_t(0o777)) }
             if result != 0 && errno != EEXIST { throw MountedCopyError.rootUnavailable }
