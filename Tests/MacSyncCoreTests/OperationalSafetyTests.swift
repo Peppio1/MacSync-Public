@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 import Darwin
+import SQLite3
 @testable import MacSyncCore
 
 final class OperationalSafetyTests: XCTestCase {
@@ -172,6 +173,41 @@ final class OperationalSafetyTests: XCTestCase {
         XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath:base.path)
             .filter { $0.hasPrefix(".backup-") }.isEmpty)
     }
+    /// Independent test-only experiment: VACUUM INTO creates a compact
+    /// standalone copy without manually changing the destination's mode.
+    /// It is NOT used by production until separately verified.
+    func testDiagnosticVacuumIntoWithOpenWALSource() throws {
+        let (base,_,_,db) = try fixture()
+        defer { try? FileManager.default.removeItem(at:base) }
+        let journal = try ChangeJournal(path:db.path)
+        let id = try journal.enqueue(rootID:"probe",relativePath:"sample.jpg",kind:.upsert)
+        let target = base.appendingPathComponent("vacuum-probe.sqlite")
+        var handle: OpaquePointer?
+        let openRC = sqlite3_open_v2(db.path,&handle,SQLITE_OPEN_READWRITE,nil)
+        guard openRC == SQLITE_OK, let handle else {
+            if let handle { sqlite3_close(handle) }
+            XCTFail("SQLITE_DIAG vacuum open rc=\(openRC)"); return
+        }
+        defer { sqlite3_close(handle) }
+        sqlite3_busy_timeout(handle,5000)
+        let literal = target.path.replacingOccurrences(of:"'",with:"''")
+        let rc = sqlite3_exec(handle,"VACUUM INTO '\(literal)';",nil,nil,nil)
+        print("SQLITE_DIAG vacuum-into rc=\(rc) message=\(String(cString:sqlite3_errmsg(handle)))")
+        XCTAssertEqual(rc,SQLITE_OK)
+        guard rc == SQLITE_OK else { return }
+        let header = try Data(contentsOf:target).prefix(100)
+        let modeBytes = Array(header.dropFirst(18).prefix(2))
+        print("SQLITE_DIAG vacuum-header=\(modeBytes)")
+        XCTAssertEqual(modeBytes,[UInt8(1),UInt8(1)])
+        for suffix in ["-wal","-shm","-journal"] {
+            let exists = FileManager.default.fileExists(atPath:target.path+suffix)
+            print("SQLITE_DIAG vacuum-sidecar=\(suffix) exists=\(exists)")
+            XCTAssertFalse(exists)
+        }
+        try ArchiveDatabaseSafety.verify(target,readOnly:true)
+        XCTAssertEqual(try ChangeJournal(path:target.path).pending().map(\.id),[id])
+    }
+
     func testAnchoredDirectoryRefusesReplacementBeforeRemoval() throws {
         let (base,_,target,_) = try fixture()
         defer { try? FileManager.default.removeItem(at:base) }

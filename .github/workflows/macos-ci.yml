@@ -1,30 +1,17 @@
-name: macOS CI
+name: SQLite targeted diagnostics
 
 on:
   push:
-    branches: [main]
-    paths:
-      - 'Package.swift'
-      - 'Sources/**'
-      - 'Tests/**'
-      - 'Packaging/**'
-      - '.github/workflows/macos-ci.yml'
-      - '.github/workflows/macos-ui-preview.yml'
+    branches: [diagnostic-sqlite-v0142]
   workflow_dispatch:
-
-# One automatic macOS runner for functional tests, release and UI previews.
-# The separate UI workflow remains available for manual preview-only runs.
-concurrency:
-  group: macsync-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  sqlite-diagnostics:
     runs-on: macos-15
-    timeout-minutes: 25
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
         with:
@@ -33,70 +20,5 @@ jobs:
         run: |
           xcodebuild -version
           swift --version
-      - name: Tests
-        run: swift test
-      - name: Release build
-        run: swift build -c release
-      - name: Assemble unsigned prototype bundle
-        run: |
-          mkdir -p dist/MacSync.app/Contents/MacOS
-          cp .build/release/MacSync dist/MacSync.app/Contents/MacOS/MacSync
-          cp Packaging/Info.plist dist/MacSync.app/Contents/Info.plist
-          plutil -lint dist/MacSync.app/Contents/Info.plist
-          codesign --force --sign - dist/MacSync.app
-          ditto -c -k --sequesterRsrc --keepParent dist/MacSync.app dist/MacSync-prototype.zip
-      - uses: actions/upload-artifact@v6
-        with:
-          name: MacSync-macos15-prototype
-          path: dist/MacSync-prototype.zip
-          retention-days: 7
-      - name: Capture production SwiftUI components with AppKit
-        env:
-          MACSYNC_UI_PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
-        run: swift test --skip-build --filter MacSyncUIPreviewTests
-      - name: Check 48 PNG artifacts
-        env:
-          PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
-        run: |
-          set -euo pipefail
-          for component in folders summary audit schedule; do
-            for appearance in light dark; do
-              file="$PREVIEW_DIR/$component-$appearance.png"
-              test -s "$file"
-              sips -g pixelWidth -g pixelHeight "$file"
-              test "$(sips -g pixelWidth "$file" | awk '/pixelWidth:/{print $2}')" = 1680
-              test "$(sips -g pixelHeight "$file" | awk '/pixelHeight:/{print $2}')" = 840
-            done
-          done
-          for page in overview folders schedule audit history settings; do
-            for appearance in light dark; do
-              file="$PREVIEW_DIR/page-$page-$appearance.png"
-              test -s "$file"
-              test "$(sips -g pixelWidth "$file" | awk '/pixelWidth:/{print $2}')" = 2360
-              test "$(sips -g pixelHeight "$file" | awk '/pixelHeight:/{print $2}')" = 1640
-              file="$PREVIEW_DIR/compact-$page-$appearance.png"
-              test -s "$file"
-              test "$(sips -g pixelWidth "$file" | awk '/pixelWidth:/{print $2}')" = 2040
-              test "$(sips -g pixelHeight "$file" | awk '/pixelHeight:/{print $2}')" = 1440
-              file="$PREVIEW_DIR/minimum-$page-$appearance.png"
-              test -s "$file"
-              test "$(sips -g pixelWidth "$file" | awk '/pixelWidth:/{print $2}')" = 1960
-              test "$(sips -g pixelHeight "$file" | awk '/pixelHeight:/{print $2}')" = 1320
-            done
-          done
-          for appearance in light dark; do
-            for spec in idle:2360:1640 compact-idle:2040:1440; do
-              IFS=: read -r variant width height <<< "$spec"
-              file="$PREVIEW_DIR/$variant-audit-$appearance.png"
-              test -s "$file"
-              test "$(sips -g pixelWidth "$file" | awk '/pixelWidth:/{print $2}')" = "$width"
-              test "$(sips -g pixelHeight "$file" | awk '/pixelHeight:/{print $2}')" = "$height"
-            done
-          done
-          test "$(find "$PREVIEW_DIR" -maxdepth 1 -name '*.png' | wc -l | tr -d ' ')" = 48
-      - uses: actions/upload-artifact@v6
-        with:
-          name: MacSync-UI-Previews
-          path: ${{ runner.temp }}/macsync-ui-previews/*.png
-          if-no-files-found: error
-          retention-days: 7
+      - name: Targeted SQLite and safety tests
+        run: swift test --filter OperationalSafetyTests

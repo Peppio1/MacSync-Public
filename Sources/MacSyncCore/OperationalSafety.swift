@@ -260,11 +260,34 @@ public enum ArchiveDatabaseSafety {
             throw JournalError.database("Database SQLite non integro: operazioni bloccate")
         }
     }
-    private static func requireAbsent(_ url: URL) throws {
+    // Diagnostic branch only. All checks keep their fail-closed semantics.
+    private static func requireAbsent(_ url: URL, phase: String) throws {
         var info = stat()
-        let rc = url.path.withCString { lstat($0,&info) }
-        guard rc != 0, errno == ENOENT else {
-            throw JournalError.database("Percorso backup o file ausiliario già esistente/non accessibile")
+        let (rc, code) = url.path.withCString { path -> (Int32,Int32) in
+            let result = lstat(path,&info)
+            return (result,result == 0 ? 0 : errno)
+        }
+        let size = rc == 0 ? String(info.st_size) : "-"
+        print("SQLITE_DIAG phase=\(phase) file=\(url.lastPathComponent) lstat=\(rc) errno=\(code) size=\(size)")
+        guard rc != 0, code == ENOENT else {
+            throw JournalError.database("SQLITE_DIAG blocked phase=\(phase) file=\(url.lastPathComponent) lstat=\(rc) errno=\(code) size=\(size)")
+        }
+    }
+    private static func observeStage(_ file: URL, phase: String) {
+        for suffix in ["","-wal","-shm","-journal"] {
+            var info = stat()
+            let (rc,code) = (file.path+suffix).withCString { p -> (Int32,Int32) in
+                let result = lstat(p,&info)
+                return (result,result == 0 ? 0 : errno)
+            }
+            let size = rc == 0 ? String(info.st_size) : "-"
+            print("SQLITE_DIAG observe=\(phase) file=\(file.lastPathComponent+suffix) lstat=\(rc) errno=\(code) size=\(size)")
+        }
+        if let handle = try? FileHandle(forReadingFrom:file) {
+            defer { try? handle.close() }
+            if let data = try? handle.read(upToCount:100), data.count >= 100 {
+                print("SQLITE_DIAG header phase=\(phase) read=\(data[19]) write=\(data[18])")
+            }
         }
     }
 
@@ -277,8 +300,8 @@ public enum ArchiveDatabaseSafety {
             throw JournalError.database("Percorso backup non valido")
         }
         let suffixes = ["-wal","-shm","-journal"]
-        try requireAbsent(target)
-        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:target.path+suffix)) }
+        try requireAbsent(target,phase:"target-preflight")
+        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:target.path+suffix),phase:"target-preflight") }
 
         // Own a private staging directory on the same filesystem as the
         // final backup. SQLite may create/delete its own sidecars here.
@@ -306,12 +329,20 @@ public enum ArchiveDatabaseSafety {
         defer { sqlite3_close(src) }
         do {
             let dst = try open(tmp,flags:SQLITE_OPEN_READWRITE)
-            defer { sqlite3_close(dst) }
+            defer {
+                let closeCode = sqlite3_close(dst)
+                print("SQLITE_DIAG destination-close rc=\(closeCode)")
+                observeStage(tmp,phase:"after-close")
+            }
+            print("SQLITE_DIAG version=\(String(cString:sqlite3_libversion()))")
+            observeStage(tmp,phase:"before-backup")
             guard let backup = sqlite3_backup_init(dst,"main",src,"main") else {
                 throw JournalError.database("Backup SQLite non inizializzato")
             }
             let result = sqlite3_backup_step(backup,-1)
             let finish = sqlite3_backup_finish(backup)
+            print("SQLITE_DIAG backup-step=\(result) backup-finish=\(finish)")
+            observeStage(tmp,phase:"after-backup")
             guard result == SQLITE_DONE, finish == SQLITE_OK else {
                 throw JournalError.database("Backup SQLite non completato (codici \(result), \(finish))")
             }
@@ -331,12 +362,15 @@ public enum ArchiveDatabaseSafety {
                   String(cString:name).lowercased() == "delete",
                   sqlite3_step(mode) == SQLITE_DONE
             else { throw JournalError.database("Modalità del backup SQLite non autonoma") }
+            print("SQLITE_DIAG journal-mode=delete")
+            observeStage(tmp,phase:"after-mode")
         }
         // Validate the closed SQLite file, not a snapshot that still
         // depends on private sidecars. Recheck after read-only verification.
-        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:tmp.path+suffix)) }
+        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:tmp.path+suffix),phase:"closed-snapshot") }
         try verify(tmp,readOnly:true)
-        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:tmp.path+suffix)) }
+        observeStage(tmp,phase:"after-readonly-check")
+        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:tmp.path+suffix),phase:"verified-snapshot") }
         let header = try FileHandle(forReadingFrom:tmp)
         let bytes: Data
         do {
@@ -350,8 +384,8 @@ public enum ArchiveDatabaseSafety {
         // Do not use FileManager.moveItem/removeItem for SQLite artifacts:
         // publish exactly the verified main file via exclusive native rename.
         // No copy fallback, no overwrite, no deletion of other backups.
-        try requireAbsent(target)
-        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:target.path+suffix)) }
+        try requireAbsent(target,phase:"before-publish")
+        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:target.path+suffix),phase:"before-publish") }
         let rc = tmp.path.withCString { old in
             target.path.withCString { new in
                 renameatx_np(AT_FDCWD,old,AT_FDCWD,new,UInt32(RENAME_EXCL))
