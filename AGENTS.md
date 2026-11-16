@@ -197,3 +197,8 @@ Menu laterale Panoramica, Cartelle, Pianificazione, Verifica archivio, Registro 
 ### v0.13 — revisione annullamento (candidata)
 
 Il test storico confronta le date con tolleranza 1 ms, mantenendo tutte le verifiche sui conteggi e aggiungendo il controllo della data di fine. Inventario iniziale interrompibile cooperativamente: scan cancellato non produce nuove cancellazioni; transazione di riconciliazione della singola sorgente annullata se lo stop precede il commit. Le sorgenti già confermate restano registrate. Confronto preliminare e manutenzione temporanei ora accettano cancellazione; le rimozioni già eseguite non vengono annullate. Nessun arresto forzato di una syscall SMB bloccante. Nuovi test e CI devono confermare. Le anteprime a dimensione finestra sono composizioni sintetiche dei componenti condivisi, non screenshot integrali delle pagine runtime. Il collaudo UI interattivo e SMB reale rimane necessario.
+
+
+### v0.13.1 — UI/UX candidate
+
+Refine shared light/dark surfaces, sidebar, typography, metric tiles, folder drop areas, interval shortcuts, stop button appearance, audit controls and history badges. Preserve existing action callbacks, sync schedule ranges and persistent safety settings; no core algorithm/schema changes. Window-size fixtures remain synthetic compositions, not screenshots of all live runtime pages. Validate macOS rendering, accessibility and operational controls before merging.

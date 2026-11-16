@@ -50,15 +50,16 @@ final class MacSyncUIPreviewTests: XCTestCase {
                         HStack {
                             Text("Prossimo ciclo tra 15 minuti").foregroundStyle(.secondary)
                             Spacer()
-                            Button("Interrompi copie") {}
+                            Button("Interrompi copie") {}.buttonStyle(MacSyncStopStyle())
                             Button("Disattiva sincronizzazione automatica") {}
                         }
                     }
                     MacSyncPanel("Avanzamento e riepilogo", icon: "chart.bar.xaxis") {
                         summaryExample
-                        ProgressView(value: 0.52)
+                        ProgressView(value: 0.52).tint(Color.accentColor)
                         Text("52% · 24 file di 46 · 12 MB/s").font(.caption)
                     }
+                    HStack(alignment: .top, spacing: 14) {
                     MacSyncPanel("Ultimo ciclo", icon: "clock") {
                         Text("Durata: 5 min 18 s · Completato")
                         Button("Storico e dettagli…") {}
@@ -66,6 +67,7 @@ final class MacSyncUIPreviewTests: XCTestCase {
                     MacSyncPanel("Disponibilità delle destinazioni", icon: "folder") {
                         Label("Cartella_1: disponibile", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
                         Label("Cartella_2: disponibile", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                    }
                     }
                 case .folders:
                     MacSyncPanel("Coppie unidirezionali", icon: "folder") { folderExample }
@@ -94,7 +96,7 @@ final class MacSyncUIPreviewTests: XCTestCase {
                     MacSyncPanel("Verifica completa", icon: "checkmark.shield", accent: true) {
                         Toggle("Modalità diagnostica (nessun riallineamento)", isOn: .constant(true))
                         auditExample
-                        Button("Annulla verifica") {}
+                        Button("Annulla verifica") {}.buttonStyle(MacSyncStopStyle())
                     }
                     MacSyncPanel("Archivio già copiato", icon: "checkmark.seal") {
                         Button("Verifica file già presenti") {}
@@ -102,7 +104,7 @@ final class MacSyncUIPreviewTests: XCTestCase {
                     }
                     MacSyncPanel("Manutenzione temporanei", icon: "wrench.and.screwdriver") {
                         Button("Verifica file temporanei") {}
-                        Button("Interrompi manutenzione") {}
+                        Button("Interrompi manutenzione") {}.buttonStyle(MacSyncStopStyle())
                     }
                 case .history:
                     MacSyncPanel("Registro e dettagli", icon: "list.bullet.rectangle") {
@@ -113,7 +115,12 @@ final class MacSyncUIPreviewTests: XCTestCase {
                         }
                         ForEach(1...5, id: \.self) { n in
                             Divider()
-                            Text("UPLOAD · success · Cartella_1").font(.caption.bold())
+                            HStack {
+                                MacSyncLogBadge(level: n == 4 ? "warning" : n == 5 ? "error" : "success")
+                                Text("UPLOAD").font(.caption.bold())
+                                Spacer()
+                                Text("Cartella_1").font(.caption).foregroundStyle(.secondary)
+                            }
                             Text("Esempio/foto-\(n).jpg").font(.caption)
                             Text("Dati dimostrativi").font(.caption2).foregroundStyle(.secondary)
                         }

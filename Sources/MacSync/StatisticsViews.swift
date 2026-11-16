@@ -10,7 +10,7 @@ func elapsedText(_ seconds: Double) -> String {
 private func sizeText(_ n:Int64) -> String {
     ByteCountFormatter.string(fromByteCount:n,countStyle:.file)
 }
-private func stateText(_ state:String)->String {
+func macSyncCycleState(_ state:String)->String {
     let base = state.replacingOccurrences(of:"_history_incomplete",with:"")
     let labels = ["completed":"Completata","partial":"Con errori o rinvii","interrupted":"Interrotta",
         "suspended":"Sospesa","running":"In corso"]
@@ -30,7 +30,7 @@ struct LiveSyncPanel: View {
                         if p.planned > 0 { Text("\(Int(p.fraction*100))%").monospacedDigit().bold() }
                     }.font(.headline)
                     if p.planned > 0 {
-                        ProgressView(value:p.fraction)
+                        ProgressView(value:p.fraction).tint(Color.accentColor)
                         Text("\(p.processed) / \(p.planned) operazioni elaborate (stima del lavoro iniziale)")
                     } else { ProgressView().controlSize(.small) }
                     HStack {
@@ -40,13 +40,13 @@ struct LiveSyncPanel: View {
                     }
                     Text("Velocità media copia: " + SyncLiveProgress.formatRate(p.meanCopyRate))
                     if !p.currentFile.isEmpty {
-                        Text(p.currentFile).lineLimit(1).truncationMode(.middle)
+                        Text(p.currentFile).lineLimit(1).truncationMode(.middle).help(p.currentFile)
                     }
                 }
             } else {
                 if let cycle = copy.lastRecordedCycle {
                     HStack {
-                        Label(stateText(cycle.state),systemImage:cycle.state == "completed" ? "checkmark.circle" : "clock")
+                        Label(macSyncCycleState(cycle.state),systemImage:cycle.state == "completed" ? "checkmark.circle" : "clock")
                         Spacer()
                         if cycle.state == "completed" { Text("100%").bold() }
                     }.font(.headline)
@@ -63,7 +63,7 @@ struct LiveSyncPanel: View {
                 }
             }
             if !copy.historyWarning.isEmpty { Text(copy.historyWarning).foregroundStyle(.orange) }
-        }.font(.caption).padding(10)
+        }.font(.system(size: 13)).padding(14)
             .frame(maxWidth:.infinity,alignment:.leading)
             .background(Color.secondary.opacity(0.07)).cornerRadius(8)
     }
@@ -77,7 +77,7 @@ struct AuditProgressView: View {
             VStack(alignment:.leading,spacing:6) {
                 Text(progress.phase).font(.headline)
                 if progress.total > 0 && !progress.phase.hasPrefix("Analisi") {
-                    ProgressView(value:min(0.99,Double(progress.compared)/Double(progress.total)))
+                    ProgressView(value:min(0.99,Double(progress.compared)/Double(progress.total))).tint(Color.accentColor)
                     Text("\(progress.compared) / \(progress.total) elementi confrontati")
                 } else { ProgressView().controlSize(.small) }
                 Text("File rilevati: \(progress.scannedFiles) · Cartelle: \(progress.scannedDirectories)")
@@ -89,7 +89,7 @@ struct AuditProgressView: View {
                     Text("Letti \(sizeText(progress.bytesRead)) · Media lettura locale + SMB: \(SyncLiveProgress.formatRate(Double(progress.bytesRead)/elapsed))")
                 }
                 if !progress.currentPath.isEmpty { Text(progress.currentPath).lineLimit(1).truncationMode(.middle) }
-            }.font(.caption)
+            }.font(.system(size: 13))
         }
     }
 }
@@ -219,7 +219,7 @@ struct SyncHistorySheet: View {
             Picker("Periodo",selection:$selected) {
                 Text("Sessione corrente").tag("session")
                 ForEach(cycles) { cycle in
-                    Text(cycle.started.formatted(date:.abbreviated,time:.standard) + " — " + stateText(cycle.state)).tag(cycle.id)
+                    Text(cycle.started.formatted(date:.abbreviated,time:.standard) + " — " + macSyncCycleState(cycle.state)).tag(cycle.id)
                 }
             }
             if moreCycles { Button("Carica altri cicli") { loadCycles(reset:false) }.disabled(busy) }
@@ -425,7 +425,7 @@ struct ArchiveAuditPanel:View {
                 Picker("Metodo",selection:$copy.auditSettings.mode) {
                     Text("Rapida (metadati)").tag(ArchiveAuditMode.quick)
                     Text("Approfondita (SHA-256)").tag(ArchiveAuditMode.deep)
-                }
+                }.pickerStyle(.segmented)
                 Toggle("Accoda copie e aggiornamenti per riallineare",isOn:$copy.auditSettings.repair)
                 Toggle("Programma verifica automatica",isOn:$copy.auditSettings.enabled)
                 if copy.auditSettings.enabled {
@@ -452,8 +452,8 @@ struct ArchiveAuditPanel:View {
             Text("Non elimina elementi presenti solo sul server. SHA-256 può leggere l'intero archivio via VPN. Il riallineamento resta soggetto alla normale coda e ai controlli di sicurezza.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
-                if copy.auditBusy { Button("Annulla verifica"){copy.cancelArchiveAudit()} }
-                else { Button("Esegui verifica adesso"){copy.startArchiveAudit(sources:model.configuredPairs(),interactive:true)}
+                if copy.auditBusy { Button("Annulla verifica"){copy.cancelArchiveAudit()}.buttonStyle(MacSyncStopStyle()) }
+                else { Button("Esegui verifica adesso"){copy.startArchiveAudit(sources:model.configuredPairs(),interactive:true)}.buttonStyle(.borderedProminent)
                     .disabled(copy.maintaining || copy.seedBusy || !model.monitoring) }
                 Spacer()
                 Button("Ultimo risultato…"){selectedFinding=nil;showFindings=true}.disabled(copy.auditReport==nil)

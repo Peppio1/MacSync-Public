@@ -228,27 +228,36 @@ struct FolderDropZone: View {
     let choose: () -> Void
     let onFolderDropped: (URL) -> Void
     @State private var isTargeted = false
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                Label(title, systemImage: "folder")
-                    .font(.caption.bold())
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: title == "Destinazione" ? "externaldrive.connected.to.line.below" : "folder")
+                    .foregroundStyle(MacSyncColors.blue(scheme))
+                    .font(.system(size: 17, weight: .medium))
+                Text(title).font(.subheadline.weight(.semibold))
                 Spacer()
                 Button("Sfoglia…", action: choose)
-                    .font(.caption)
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
             }
-            Text(path.isEmpty
-                 ? "Trascina qui una cartella oppure premi Sfoglia…"
-                 : path)
-                .font(.caption2)
-                .foregroundStyle(path.isEmpty ? .secondary : .primary)
+            if !path.isEmpty {
+                Text(URL(fileURLWithPath: path).lastPathComponent)
+                    .font(.system(size: 15, weight: .semibold))
+                    .lineLimit(1)
+            }
+            Text(path.isEmpty ? "Trascina qui una cartella" : path)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
                 .lineLimit(2)
+                .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, minHeight: 75)
-        .background(isTargeted ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.08))
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 108, alignment: .topLeading)
+        .help(path.isEmpty ? "Scegli o trascina una cartella" : path)
+        .background(isTargeted ? MacSyncColors.blue(scheme).opacity(0.14) : MacSyncColors.inset(scheme))
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10)
             .strokeBorder(isTargeted ? Color.accentColor : Color.gray.opacity(0.3),
@@ -282,22 +291,42 @@ struct SyncSummaryMetric: View {
     let title: String
     let count: Int
     let symbol: String
+    @Environment(\.colorScheme) private var scheme
+
+    private var tone: Color {
+        switch title {
+        case "Nuovi": return MacSyncColors.green(scheme)
+        case "Aggiornati": return MacSyncColors.blue(scheme)
+        case "Eliminati": return MacSyncColors.orange(scheme)
+        case "Recuperabili": return MacSyncColors.blue(scheme)
+        case "Errori": return count > 0 ? MacSyncColors.red(scheme) : Color.secondary
+        default: return Color.secondary
+        }
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Label(title, systemImage: symbol)
-                .font(.caption)
+        VStack(alignment: .leading, spacing: 10) {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(tone)
+                .frame(width: 28, height: 28)
+                .background(tone.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+            Text(count.formatted())
+                .font(.system(size: 28, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(tone)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(count.formatted())
-                .font(.title2.bold())
-                .monospacedDigit()
         }
-        .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
         .padding(12)
-        .background(Color.secondary.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .frame(maxWidth: .infinity, minHeight: 108, alignment: .leading)
+        .background(MacSyncColors.inset(scheme), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(MacSyncColors.line(scheme), lineWidth: 1))
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -362,11 +391,11 @@ private struct MacSyncConfigurationView: View {
                     HStack {
                         Label("Operazioni in corso o pianificate", systemImage: "clock").font(.caption)
                         Spacer()
-                        if copy.seedBusy { Button("Annulla SHA-256") { copy.cancelSeedVerification() } }
-                        if copy.auditBusy { Button("Annulla verifica") { copy.cancelArchiveAudit() } }
-                        if copy.maintaining && !copy.auditBusy { Button("Interrompi manutenzione") { copy.cancelMaintenance() } }
-                        if model.scanProgress != nil { Button("Annulla scansione") { runtime.stopCopiesForCurrentLaunch(); model.stopMonitoring() } }
-                        if copy.active { Button("Interrompi copie") { runtime.stopCopiesForCurrentLaunch() } }
+                        if copy.seedBusy { Button("Annulla SHA-256") { copy.cancelSeedVerification() }.buttonStyle(MacSyncStopStyle()) }
+                        if copy.auditBusy { Button("Annulla verifica") { copy.cancelArchiveAudit() }.buttonStyle(MacSyncStopStyle()) }
+                        if copy.maintaining && !copy.auditBusy { Button("Interrompi manutenzione") { copy.cancelMaintenance() }.buttonStyle(MacSyncStopStyle()) }
+                        if model.scanProgress != nil { Button("Annulla scansione") { runtime.stopCopiesForCurrentLaunch(); model.stopMonitoring() }.buttonStyle(MacSyncStopStyle()) }
+                        if copy.active { Button("Interrompi copie") { runtime.stopCopiesForCurrentLaunch() }.buttonStyle(MacSyncStopStyle()) }
                     }.padding(10).background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
                 }
                 switch page {
@@ -400,8 +429,8 @@ private struct MacSyncConfigurationView: View {
             MacSyncPanel("Stato della sincronizzazione", icon: "arrow.triangle.2.circlepath", accent: true) {
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 7) {
-                        Text("Sincronizzazione di prova")
-                            .font(.headline)
+                        Text(copy.active ? "Sincronizzazione pianificata" : "Sincronizzazione di prova")
+                            .font(.system(size: 19, weight: .semibold))
                         Text(copy.status)
                             .font(.caption)
                             .foregroundStyle(copy.active ? .green : .secondary)
@@ -409,7 +438,7 @@ private struct MacSyncConfigurationView: View {
                     }
                     Spacer()
                     if copy.active {
-                        Button("Interrompi copie") { runtime.stopCopiesForCurrentLaunch() }
+                        Button("Interrompi copie") { runtime.stopCopiesForCurrentLaunch() }.buttonStyle(MacSyncStopStyle())
                     } else {
                         Button("Avvia copie di prova") {
                             // A manual session may explicitly permit mirror
@@ -418,7 +447,7 @@ private struct MacSyncConfigurationView: View {
                             runtime.stopCopiesForCurrentLaunch()
                             copy.start(sources: model.configuredPairs(),
                                        schedule: settings.schedule)
-                        }.disabled(copy.seedBusy || copy.maintaining || model.scanProgress != nil || !model.monitoring)
+                        }.buttonStyle(.borderedProminent).disabled(copy.seedBusy || copy.maintaining || model.scanProgress != nil || !model.monitoring)
                     }
                 }
                 Text(runtime.automaticStatus).font(.caption).foregroundStyle(.secondary)
@@ -446,7 +475,7 @@ private struct MacSyncConfigurationView: View {
                           systemImage: "list.bullet.rectangle")
                     Spacer()
                     if model.scanProgress != nil {
-                        Button("Annulla scansione") { runtime.stopCopiesForCurrentLaunch(); model.stopMonitoring() }
+                        Button("Annulla scansione") { runtime.stopCopiesForCurrentLaunch(); model.stopMonitoring() }.buttonStyle(MacSyncStopStyle())
                     } else {
                         Button("Rileggi Sorgenti") { model.startMonitoring() }.disabled(copy.active || copy.maintaining || copy.seedBusy)
                     }
@@ -481,9 +510,12 @@ private struct MacSyncConfigurationView: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }
             }
+            HStack(alignment: .top, spacing: 14) {
             MacSyncPanel("Ultimo ciclo", icon: "clock", accent: false) {
 
                 if let cycle = copy.lastRecordedCycle {
+                    Label(macSyncCycleState(cycle.state), systemImage: cycle.state == "completed" ? "checkmark.circle.fill" : "clock").font(.subheadline.weight(.semibold))
+                        .foregroundStyle(cycle.state == "completed" ? Color.green : Color.primary)
                     Text("Inizio: " + cycle.started.formatted(date: .abbreviated, time: .standard))
                     Text("Fine: " + (cycle.ended?.formatted(date: .abbreviated, time: .standard) ?? "—"))
                     Text("Durata: " + (cycle.seconds.map(elapsedText) ?? "—"))
@@ -493,13 +525,13 @@ private struct MacSyncConfigurationView: View {
             MacSyncPanel("Disponibilità delle destinazioni", icon: "folder", accent: false) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("Disponibilità delle destinazioni").font(.headline)
+                        Text("Ultimo controllo").font(.subheadline.weight(.medium))
                         Spacer()
                         if let checked = destinations.lastCheckedAt {
                             Text(checked.formatted(date: .omitted, time: .shortened))
                                 .font(.caption2).foregroundStyle(.secondary)
                         } else {
-                            Text("In attesa della prima sincronizzazione")
+                            Text("Non ancora eseguito")
                                 .font(.caption2).foregroundStyle(.secondary)
                         }
                     }
@@ -519,15 +551,16 @@ private struct MacSyncConfigurationView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            }
         }
     }
     private var foldersPage: some View {
         VStack(alignment: .leading, spacing: 14) {
             MacSyncPanel("Cartella_1", icon: "folder", accent: false) {
-                pair(1, title: "Sorgente → Destinazione")
+                pair(1, title: model.folderPath(slot: 1, destination: false).isEmpty || model.folderPath(slot: 1, destination: true).isEmpty ? "Configurazione incompleta" : "Sorgente → Destinazione")
             }
             MacSyncPanel("Cartella_2", icon: "folder", accent: false) {
-                pair(2, title: "Sorgente → Destinazione")
+                pair(2, title: model.folderPath(slot: 2, destination: false).isEmpty || model.folderPath(slot: 2, destination: true).isEmpty ? "Configurazione incompleta" : "Sorgente → Destinazione")
             }
             MacSyncPanel("Connessione", icon: "network", accent: false) {
                 Text("Le destinazioni possono essere locali o condivisioni SMB già montate. MacSync utilizza le credenziali conservate da macOS.")
@@ -642,9 +675,11 @@ private struct MacSyncConfigurationView: View {
                         ), displayedComponents: .hourAndMinute)
                         .disabled(copy.active || copy.seedBusy || copy.maintaining)
                     }
-                    Text(settings.schedule.summary)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Label(settings.schedule.summary, systemImage: "calendar.badge.clock")
+                        .font(.system(size: 16, weight: .semibold))
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
                     if let next = copy.nextScheduledRun ?? runtime.nextAutomaticAttempt {
                         Text("Prossimo controllo e sincronizzazione: "
                              + next.formatted(date: .abbreviated, time: .shortened))
@@ -698,7 +733,7 @@ private struct MacSyncConfigurationView: View {
 
                 HStack(spacing: 10) {
                     if copy.seedBusy {
-                        Button("Annulla verifica") { copy.cancelSeedVerification() }
+                        Button("Annulla verifica") { copy.cancelSeedVerification() }.buttonStyle(MacSyncStopStyle())
                     } else {
                         Button("Verifica file già presenti") {
                             copy.verifySeededFiles(sources: model.configuredPairs())
@@ -793,16 +828,20 @@ private struct MacSyncConfigurationView: View {
                 }
                 List(copy.recentEntries, id: \.id) { entry in
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("\(entry.action.uppercased()) · \(entry.level) · \(entry.rootID)")
-                            .font(.caption.bold())
+                        HStack(spacing: 8) {
+                            MacSyncLogBadge(level: entry.level)
+                            Text(entry.action.uppercased()).font(.system(size: 12, weight: .semibold))
+                            Spacer()
+                            Text(entry.rootID).font(.caption).foregroundStyle(.secondary)
+                        }
                         Text(entry.relativePath.isEmpty ? entry.message :
                             entry.relativePath + " — " + entry.message)
-                            .font(.caption)
+                            .font(.system(size: 13))
                             .lineLimit(3)
                         Text("\(entry.timestamp.formatted()) · \(entry.bytes) byte · \(String(format: "%.2f", entry.durationSeconds)) s")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
-                }.frame(minHeight: 320)
+                }.frame(minHeight: 360)
                 HStack {
                     Button("Aggiorna") { copy.refresh() }
                     Button("Esporta TSV…") { copy.exportLog() }
@@ -943,7 +982,7 @@ private struct MacSyncConfigurationView: View {
                 }
             }
             MacSyncPanel("Informazioni", icon: "info.circle", accent: false) {
-                Text("MacSync · v0.13 — candidato").font(.headline)
+                Text("MacSync · v0.13.1 — candidato").font(.headline)
                 Text("Usare solo archivi di prova finché il collaudo SMB non è completato.").foregroundStyle(.orange)
                 Button("Esporta registro…") { copy.exportLog() }
             }
@@ -977,23 +1016,106 @@ enum MacSyncPage: String, CaseIterable, Identifiable {
     }
 }
 
+// Shared UI tokens for both themes. Use explicit surfaces so inactive AppKit
+// preview windows do not inherit the darker system under-page background.
+enum MacSyncColors {
+    static func canvas(_ s: ColorScheme) -> Color {
+        s == .dark ? Color(red: 0.10, green: 0.12, blue: 0.15) : Color(red: 0.95, green: 0.96, blue: 0.98)
+    }
+    static func sidebar(_ s: ColorScheme) -> Color {
+        s == .dark ? Color(red: 0.12, green: 0.14, blue: 0.18) : Color(red: 0.91, green: 0.94, blue: 0.97)
+    }
+    static func panel(_ s: ColorScheme) -> Color {
+        s == .dark ? Color(red: 0.15, green: 0.18, blue: 0.22) : .white
+    }
+    static func inset(_ s: ColorScheme) -> Color {
+        s == .dark ? Color(red: 0.18, green: 0.21, blue: 0.26) : Color(red: 0.96, green: 0.97, blue: 0.99)
+    }
+    static func line(_ s: ColorScheme) -> Color {
+        s == .dark ? .white.opacity(0.11) : Color(red: 0.82, green: 0.86, blue: 0.91)
+    }
+    static func blue(_ s: ColorScheme) -> Color {
+        s == .dark ? Color(red: 0.47, green: 0.72, blue: 1) : Color(red: 0.10, green: 0.34, blue: 0.72)
+    }
+    static func green(_ s: ColorScheme) -> Color {
+        s == .dark ? Color(red: 0.36, green: 0.86, blue: 0.59) : Color(red: 0.07, green: 0.45, blue: 0.28)
+    }
+    static func orange(_ s: ColorScheme) -> Color {
+        s == .dark ? Color(red: 1, green: 0.72, blue: 0.38) : Color(red: 0.64, green: 0.32, blue: 0.05)
+    }
+    static func red(_ s: ColorScheme) -> Color {
+        s == .dark ? Color(red: 1, green: 0.52, blue: 0.52) : Color(red: 0.70, green: 0.16, blue: 0.19)
+    }
+}
+
+struct MacSyncStopStyle: ButtonStyle {
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.isEnabled) private var enabled
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 12, weight: .semibold))
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .foregroundStyle(MacSyncColors.red(scheme))
+            .background(MacSyncColors.red(scheme).opacity(configuration.isPressed ? 0.20 : 0.08), in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(MacSyncColors.red(scheme).opacity(0.32), lineWidth: 1))
+            .opacity(enabled ? 1 : 0.45)
+    }
+}
+
+struct MacSyncLogBadge: View {
+    let level: String
+    @Environment(\.colorScheme) private var scheme
+    private var label: String {
+        switch level {
+        case "success": return "Completato"
+        case "warning": return "Avviso"
+        case "error": return "Errore"
+        case "info": return "Info"
+        default: return level
+        }
+    }
+    private var tone: Color {
+        switch level {
+        case "success": return MacSyncColors.green(scheme)
+        case "warning": return MacSyncColors.orange(scheme)
+        case "error": return MacSyncColors.red(scheme)
+        default: return MacSyncColors.blue(scheme)
+        }
+    }
+    var body: some View {
+        Text(label).font(.system(size: 11, weight: .semibold))
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .foregroundStyle(tone)
+            .background(tone.opacity(0.12), in: Capsule())
+    }
+}
+
 struct MacSyncPanel<Content: View>: View {
     let title: String
     let icon: String
     let accent: Bool
     let content: Content
+    @Environment(\.colorScheme) private var scheme
     init(_ title: String, icon: String, accent: Bool = false, @ViewBuilder content: () -> Content) {
         self.title = title; self.icon = icon; self.accent = accent; self.content = content()
     }
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(title, systemImage: icon).font(.headline).foregroundStyle(accent ? Color.accentColor : Color.primary)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(MacSyncColors.blue(scheme))
+                    .frame(width: 32, height: 32)
+                    .background(MacSyncColors.blue(scheme).opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+                Text(title).font(.system(size: 16, weight: .semibold))
+            }
             content
         }
-        .padding(16)
+        .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(accent ? Color.accentColor.opacity(0.07) : Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.primary.opacity(0.09), lineWidth: 1))
+        .background(MacSyncColors.panel(scheme), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12)
+            .strokeBorder(accent ? MacSyncColors.blue(scheme).opacity(0.48) : MacSyncColors.line(scheme), lineWidth: 1))
     }
 }
 
@@ -1002,46 +1124,76 @@ struct MacSyncSectionShell<Content: View>: View {
     let monitoring: Bool
     let next: Date?
     let content: Content
+    @Environment(\.colorScheme) private var scheme
     init(page: Binding<MacSyncPage>, monitoring: Bool, next: Date?, @ViewBuilder content: () -> Content) {
         self._page = page; self.monitoring = monitoring; self.next = next; self.content = content()
     }
     var body: some View {
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 8) {
-                Label("MacSync", systemImage: "arrow.triangle.2.circlepath")
-                    .font(.title2.bold()).foregroundStyle(Color.accentColor).padding(.bottom, 16)
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 9) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 19, weight: .semibold))
+                        .foregroundStyle(MacSyncColors.blue(scheme))
+                        .frame(width: 36, height: 36)
+                        .background(MacSyncColors.blue(scheme).opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("MacSync").font(.system(size: 21, weight: .bold))
+                        Text("Sincronizzazione").font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                }.padding(.bottom, 20)
                 ForEach(MacSyncPage.allCases) { item in
                     Button { page = item } label: {
-                        Label(item.rawValue, systemImage: item.icon)
-                            .font(.system(size: 13, weight: page == item ? .semibold : .regular))
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(10)
-                            .foregroundStyle(page == item ? Color.white : Color.primary)
-                            .background(page == item ? Color.accentColor : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                        HStack(spacing: 10) {
+                            Image(systemName: item.icon).frame(width: 20)
+                            Text(item.rawValue)
+                            Spacer(minLength: 0)
+                        }
+                        .font(.system(size: 14, weight: page == item ? .semibold : .regular))
+                        .padding(.horizontal, 11).padding(.vertical, 11)
+                        .foregroundStyle(page == item ? MacSyncColors.blue(scheme) : Color.primary)
+                        .background(page == item ? MacSyncColors.blue(scheme).opacity(0.14) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                        .contentShape(Rectangle())
                     }.buttonStyle(.plain).accessibilityAddTraits(page == item ? .isSelected : [])
                 }
                 Spacer()
+                Divider()
                 Label(monitoring ? "Monitor attivo" : "Monitor fermo", systemImage: monitoring ? "checkmark.circle.fill" : "pause.circle")
-                    .font(.caption).foregroundStyle(monitoring ? Color.green : Color.orange)
-            }.padding(14).frame(width: 205).frame(maxHeight: .infinity)
-                .background(Color(nsColor: .underPageBackgroundColor))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(monitoring ? MacSyncColors.green(scheme) : MacSyncColors.orange(scheme))
+                    .padding(.vertical, 6)
+            }.padding(16).frame(width: 220).frame(maxHeight: .infinity)
+                .background(MacSyncColors.sidebar(scheme))
             Divider()
             VStack(spacing: 0) {
                 HStack {
-                    Text("MacSync").font(.headline)
+                    Label(page.rawValue, systemImage: page.icon).font(.subheadline.weight(.medium))
                     Spacer()
-                    if let next { Label("Prossimo ciclo: " + next.formatted(date: .omitted, time: .shortened), systemImage: "clock").font(.caption) }
-                }.padding(16)
+                    if let next {
+                        Label("Prossimo ciclo: " + next.formatted(date: .omitted, time: .shortened), systemImage: "clock")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(MacSyncColors.blue(scheme))
+                    }
+                }.padding(.horizontal, 24).padding(.vertical, 15)
+                    .background(MacSyncColors.panel(scheme))
                 Divider()
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        Text(page.rawValue).font(.largeTitle.bold())
-                        Text(page.subtitle).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(page.rawValue).font(.system(size: 30, weight: .bold))
+                            Text(page.subtitle).font(.system(size: 14)).foregroundStyle(.secondary)
+                        }
+                        .padding(.bottom, 4)
                         content
-                    }.padding(22).frame(maxWidth: .infinity, alignment: .leading)
+                    }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(nsColor: .windowBackgroundColor))
+                .background(MacSyncColors.canvas(scheme))
         }
+        .font(.system(size: 13))
+        .tint(MacSyncColors.blue(scheme))
+        .toggleStyle(.switch)
+        .controlSize(.regular)
     }
 }
 
@@ -1051,6 +1203,7 @@ struct SyncIntervalEditor: View {
     let value: Int
     let apply: (Int) -> Void
     @State private var draft = ""
+    @Environment(\.colorScheme) private var scheme
     private var parsed: Int? {
         guard let n = Int(draft.trimmingCharacters(in: .whitespacesAndNewlines)), range.contains(n) else { return nil }
         return n
@@ -1065,7 +1218,12 @@ struct SyncIntervalEditor: View {
                 Text("Ogni")
                 Button { commit(max(range.lowerBound, (parsed ?? value) - 1)) } label: { Image(systemName: "minus") }
                     .disabled((parsed ?? value) <= range.lowerBound)
-                TextField("Intervallo", text: $draft).textFieldStyle(.roundedBorder).frame(width: 70)
+                TextField("Intervallo", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                    .multilineTextAlignment(.center)
+                    .frame(width: 76)
+                    .accessibilityLabel("Intervallo in " + unit)
                     .onSubmit { if let parsed { commit(parsed) } }
                 Button { commit(min(range.upperBound, (parsed ?? value) + 1)) } label: { Image(systemName: "plus") }
                     .disabled((parsed ?? value) >= range.upperBound)
@@ -1076,7 +1234,16 @@ struct SyncIntervalEditor: View {
             }
             HStack {
                 ForEach(unit == "minuti" ? [5, 10, 15, 20, 30, 45] : [1, 2, 4, 8, 12], id: \.self) { n in
-                    Button("\(n)") { commit(n) }.buttonStyle(.bordered)
+                    Button { commit(n) } label: {
+                        Text("\(n)")
+                            .font(.system(size: 13, weight: n == value ? .semibold : .regular))
+                            .frame(minWidth: 26)
+                            .padding(.horizontal, 8).padding(.vertical, 6)
+                            .foregroundStyle(n == value ? MacSyncColors.blue(scheme) : Color.primary)
+                            .background(n == value ? MacSyncColors.blue(scheme).opacity(0.15) : MacSyncColors.inset(scheme), in: RoundedRectangle(cornerRadius: 7))
+                            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(MacSyncColors.line(scheme), lineWidth: 1))
+                    }.buttonStyle(.plain)
+                        .accessibilityAddTraits(n == value ? .isSelected : [])
                         .disabled(!range.contains(n))
                 }
             }
@@ -1105,7 +1272,7 @@ private struct MacSyncStatusMenu: View {
             Text(runtime.automaticStatus)
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            if copy.active { Button("Interrompi copie") { runtime.stopCopiesForCurrentLaunch() } }
+            if copy.active { Button("Interrompi copie") { runtime.stopCopiesForCurrentLaunch() }.buttonStyle(MacSyncStopStyle()) }
             Button("Apri configurazione…") {
                 openWindow(id: "configuration")
                 NSApplication.shared.activate(ignoringOtherApps: true)
