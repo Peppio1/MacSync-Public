@@ -35,7 +35,7 @@ struct MacSyncLinearProgress: View {
 struct LiveSyncPanel: View {
     @ObservedObject var copy: MountedCopyController
     var body: some View {
-        VStack(alignment:.leading,spacing:8) {
+        VStack(alignment:.leading,spacing:5) {
             if let p = copy.liveProgress {
                 TimelineView(.periodic(from:p.started,by:1)) { ctx in
                     let elapsed = max(0,ctx.date.timeIntervalSince(p.started))
@@ -48,18 +48,24 @@ struct LiveSyncPanel: View {
                         MacSyncLinearProgress(value:p.fraction)
                         Text("\(p.processed) / \(p.planned) operazioni elaborate (stima del lavoro iniziale)")
                     } else { ProgressView().controlSize(.small) }
-                    HStack {
-                        Text("Inizio: \(macSyncClock(p.started, seconds: true))")
-                        Spacer()
-                        Text("Tempo: \(elapsedText(elapsed))").monospacedDigit()
-                    }
-                    HStack {
-                        Text("Velocità media copia").foregroundStyle(.secondary)
-                        Spacer()
-                        Text(SyncLiveProgress.formatRate(p.meanCopyRate)).font(.system(size: 19, weight: .semibold)).monospacedDigit()
+                    HStack(alignment: .top, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Inizio").font(.caption).foregroundStyle(.secondary)
+                            Text(macSyncClock(p.started, seconds: true)).monospacedDigit()
+                        }
+                        Spacer(minLength: 0)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Tempo trascorso").font(.caption).foregroundStyle(.secondary)
+                            Text(elapsedText(elapsed)).monospacedDigit().font(.system(size: 16, weight: .semibold))
+                        }
+                        Spacer(minLength: 0)
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text("Velocità media copia").font(.caption).foregroundStyle(.secondary)
+                            Text(SyncLiveProgress.formatRate(p.meanCopyRate)).font(.system(size: 16, weight: .semibold)).monospacedDigit()
+                        }
                     }
                     if !p.currentFile.isEmpty {
-                        Text(p.currentFile).lineLimit(1).truncationMode(.middle).help(p.currentFile)
+                        Text("File: " + p.currentFile).frame(maxWidth: .infinity, alignment: .leading).lineLimit(1).truncationMode(.middle).help(p.currentFile)
                     }
                 }
             } else {
@@ -82,7 +88,7 @@ struct LiveSyncPanel: View {
                 }
             }
             if !copy.historyWarning.isEmpty { Text(copy.historyWarning).foregroundStyle(.orange) }
-        }.font(.system(size: 13)).padding(14)
+        }.font(.system(size: 13)).padding(10)
             .frame(maxWidth:.infinity,alignment:.leading)
             .background(Color.secondary.opacity(0.07)).cornerRadius(8)
     }
@@ -93,7 +99,7 @@ struct AuditProgressView: View {
     var body: some View {
         TimelineView(.periodic(from:progress.started,by:1)) { ctx in
             let elapsed = max(0.001,ctx.date.timeIntervalSince(progress.started))
-            VStack(alignment:.leading,spacing:6) {
+            VStack(alignment:.leading,spacing:4) {
                 Text(progress.phase).font(.headline)
                 if progress.total > 0 && !progress.phase.hasPrefix("Analisi") {
                     HStack {
@@ -110,7 +116,7 @@ struct AuditProgressView: View {
                 if progress.bytesRead > 0 {
                     Text("Letti \(sizeText(progress.bytesRead)) · Media lettura locale + SMB: \(SyncLiveProgress.formatRate(Double(progress.bytesRead)/elapsed))")
                 }
-                if !progress.currentPath.isEmpty { Text(progress.currentPath).lineLimit(1).truncationMode(.middle) }
+                if !progress.currentPath.isEmpty { Text(progress.currentPath).lineLimit(1).truncationMode(.middle).help(progress.currentPath) }
             }.font(.system(size: 13))
         }
     }

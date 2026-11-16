@@ -22,7 +22,7 @@ jobs:
         env:
           MACSYNC_UI_PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
         run: swift test --filter MacSyncUIPreviewTests
-      - name: Check twenty PNG artifacts
+      - name: Check 32 PNG artifacts
         env:
           PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
         run: |
@@ -42,6 +42,10 @@ jobs:
               test -s "$file"
               test "$(sips -g pixelWidth "$file" | awk '/pixelWidth:/{print $2}')" = 2360
               test "$(sips -g pixelHeight "$file" | awk '/pixelHeight:/{print $2}')" = 1640
+              file="$PREVIEW_DIR/compact-$page-$appearance.png"
+              test -s "$file"
+              test "$(sips -g pixelWidth "$file" | awk '/pixelWidth:/{print $2}')" = 2040
+              test "$(sips -g pixelHeight "$file" | awk '/pixelHeight:/{print $2}')" = 1440
             done
           done
       - uses: actions/upload-artifact@v6

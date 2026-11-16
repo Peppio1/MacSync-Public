@@ -39,6 +39,7 @@ final class MacSyncUIPreviewTests: XCTestCase {
                     let screen = MacSyncConfigurationView(model: runtime.model, copy: runtime.copy, runtime: runtime, settings: runtime.settings, destinations: runtime.destinations, initialPage: page, previewScheme: scheme)
                         .allowsHitTesting(false)
                     try Self.render(screen, name: "page-\(pageKey(page))-\(suffix)", scheme: scheme, directory: directory, width: 1180, height: 820)
+                    try Self.render(screen, name: "compact-\(pageKey(page))-\(suffix)", scheme: scheme, directory: directory, width: 1020, height: 720)
                 }
             }
         }
