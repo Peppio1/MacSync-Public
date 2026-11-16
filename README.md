@@ -264,3 +264,8 @@ Menu laterale Panoramica, Cartelle, Pianificazione, Verifica archivio, Registro 
 ### v0.13 — revisione annullamento (candidata)
 
 Il test storico confronta le date con tolleranza 1 ms, mantenendo tutte le verifiche sui conteggi e aggiungendo il controllo della data di fine. Inventario iniziale interrompibile cooperativamente: scan cancellato non produce nuove cancellazioni; transazione di riconciliazione della singola sorgente annullata se lo stop precede il commit. Le sorgenti già confermate restano registrate. Confronto preliminare e manutenzione temporanei ora accettano cancellazione; le rimozioni già eseguite non vengono annullate. Nessun arresto forzato di una syscall SMB bloccante. Nuovi test e CI devono confermare. Le anteprime a dimensione finestra sono composizioni sintetiche dei componenti condivisi, non screenshot integrali delle pagine runtime. Il collaudo UI interattivo e SMB reale rimane necessario.
+
+
+### v0.13.1 — CI consolidation
+
+The pre-restyling baseline c9dacb5 passed 136 functional tests, with one rendering test skipped intentionally, zero logged Swift warnings and a successful release build (run 43906964134, attempt 2). Automatic main CI now uses one macOS runner for functional tests, release packaging and the 20 PNG previews; the preview step reuses the existing debug test binary with `swift test --skip-build --filter MacSyncUIPreviewTests`. The separate macOS UI Preview workflow remains manual-only. No cache or runner architecture change. The UI revision and new combined pipeline remain candidates pending CI and inspection; the previews are synthetic fixtures, not complete runtime interaction tests.

@@ -202,3 +202,8 @@ Il test storico confronta le date con tolleranza 1 ms, mantenendo tutte le verif
 ### v0.13.1 — UI/UX candidate
 
 Refine shared light/dark surfaces, sidebar, typography, metric tiles, folder drop areas, interval shortcuts, stop button appearance, audit controls and history badges. Preserve existing action callbacks, sync schedule ranges and persistent safety settings; no core algorithm/schema changes. Window-size fixtures remain synthetic compositions, not screenshots of all live runtime pages. Validate macOS rendering, accessibility and operational controls before merging.
+
+
+### v0.13.1 — CI consolidation
+
+The pre-restyling baseline c9dacb5 passed 136 functional tests, with one rendering test skipped intentionally, zero logged Swift warnings and a successful release build (run 43906964134, attempt 2). Automatic main CI now uses one macOS runner for functional tests, release packaging and the 20 PNG previews; the preview step reuses the existing debug test binary with `swift test --skip-build --filter MacSyncUIPreviewTests`. The separate macOS UI Preview workflow remains manual-only. No cache or runner architecture change. The UI revision and new combined pipeline remain candidates pending CI and inspection; the previews are synthetic fixtures, not complete runtime interaction tests.
