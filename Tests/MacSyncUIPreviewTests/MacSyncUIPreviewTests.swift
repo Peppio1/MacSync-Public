@@ -4,6 +4,20 @@ import XCTest
 import MacSyncCore
 @testable import MacSync
 
+/// Collect preference values from the hosted SwiftUI hierarchy during layout.
+private final class AuditBoundsCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: CGRect] = [:]
+    func update(_ frames: [String: CGRect]) {
+        lock.lock(); defer { lock.unlock() }
+        values = frames
+    }
+    func snapshot() -> [String: CGRect] {
+        lock.lock(); defer { lock.unlock() }
+        return values
+    }
+}
+
 /// Renders the actual configuration view with a preview-only runtime. All interactions are disabled; synthetic history is stored in a temporary SQLite database, never the real app archive.
 final class MacSyncUIPreviewTests: XCTestCase {
     func testWindowLayoutPolicy() async {
@@ -148,6 +162,7 @@ final class MacSyncUIPreviewTests: XCTestCase {
             ? Color(red: 0.13, green: 0.13, blue: 0.14)
             : Color(red: 0.96, green: 0.96, blue: 0.97)
         // Full-page captures measure exact usable content bounds.
+        let auditBounds = AuditBoundsCapture()
         let canvas = Group {
             if name.hasPrefix("page-") || name.hasPrefix("compact-") || name.hasPrefix("minimum-") || name.hasPrefix("idle-") {
                 view
@@ -162,6 +177,8 @@ final class MacSyncUIPreviewTests: XCTestCase {
         .frame(width: CGFloat(width), height: CGFloat(height), alignment: .topLeading)
         .background(background)
         .environment(\.colorScheme, scheme)
+        .coordinateSpace(name: "macsync-audit-capture")
+        .onPreferenceChange(AuditPreviewBoundsKey.self) { auditBounds.update($0) }
         // Synthetic fixture window; no MacSync runtime is started.
         _ = NSApplication.shared
         let rect = NSRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height))
@@ -182,6 +199,22 @@ final class MacSyncUIPreviewTests: XCTestCase {
         host.displayIfNeeded()
         XCTAssertEqual(host.bounds.width, CGFloat(width), accuracy: 0.5, "Unexpected host width: \(name)")
         XCTAssertEqual(host.bounds.height, CGFloat(height), accuracy: 0.5, "Unexpected host height: \(name)")
+        if name.contains("-audit-") {
+            let frames = auditBounds.snapshot()
+            let idle = name.contains("idle-")
+            let required = idle ? ["operation","start","maintenance"] : ["operation","progress","cancel","maintenance"]
+            let viewport = CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)).insetBy(dx: -1, dy: -1)
+            for id in required {
+                let frame = try XCTUnwrap(frames[id], "Missing visible audit component \(id): \(name)")
+                XCTAssertGreaterThan(frame.width, 1, "Zero width \(id): \(name)")
+                XCTAssertGreaterThan(frame.height, 1, "Zero height \(id): \(name)")
+                XCTAssertTrue(viewport.contains(frame), "Clipped audit component \(id): \(name), \(frame)")
+            }
+            let panel = try XCTUnwrap(frames["operation"])
+            let button = try XCTUnwrap(frames[idle ? "start" : "cancel"])
+            XCTAssertTrue(panel.insetBy(dx: -1, dy: -1).contains(button), "Audit action outside operation panel: \(name)")
+            print("Audit layout verified: \(name) — \(required.joined(separator: ", "))")
+        }
         let bitmap = try XCTUnwrap(NSBitmapImageRep(
             bitmapDataPlanes: nil, pixelsWide: width * 2, pixelsHigh: height * 2,
             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,

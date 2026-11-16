@@ -441,6 +441,29 @@ private struct HistoryDetailsSheet:View {
     }
 }
 
+/// Preview-only geometry markers. The screenshot test checks the actual
+/// layout, not the existence of an unused view declaration.
+struct AuditPreviewBoundsKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] { [:] }
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func auditPreviewBounds(_ id: String, enabled: Bool) -> some View {
+        if enabled {
+            self.background {
+                GeometryReader { proxy in
+                    Color.clear.preference(key: AuditPreviewBoundsKey.self,
+                        value: [id: proxy.frame(in: .named("macsync-audit-capture"))])
+                }
+            }
+        } else { self }
+    }
+}
+
 struct ArchiveAuditPanel: View {
     @ObservedObject var copy: MountedCopyController
     @ObservedObject var runtime: MacSyncRuntime
@@ -460,10 +483,11 @@ struct ArchiveAuditPanel: View {
             HStack(alignment: .top, spacing: layout.compact ? 8 : 12) {
                 configuration.frame(maxWidth: .infinity, alignment: .topLeading)
                 VStack(alignment: .leading, spacing: layout.compact ? 8 : 12) {
+                    operation
                     lastResult
                 }.frame(maxWidth: .infinity, alignment: .topLeading)
             }.fixedSize(horizontal: false, vertical: true)
-            maintenance
+            maintenance.auditPreviewBounds("maintenance", enabled: runtime.previewOnly)
         }
         .onChange(of: copy.auditSettings) { value in
             if value.mode == .quick { recognize = false }
@@ -544,6 +568,7 @@ struct ArchiveAuditPanel: View {
         MacSyncPanel("Stato e avanzamento", icon: "arrow.triangle.2.circlepath", accent: true, compact: layout.compact) {
             if let p = copy.auditProgress {
                 CompactArchiveAuditProgress(progress: p)
+                    .auditPreviewBounds("progress", enabled: runtime.previewOnly)
             } else {
                 Text(copy.auditBusy ? "Verifica in corso" : copy.seedBusy ? "Conferma in corso" : "Nessuna verifica in corso")
                     .font(.subheadline.weight(.semibold))
@@ -561,6 +586,7 @@ struct ArchiveAuditPanel: View {
                 Spacer(minLength: 0)
                 if copy.auditBusy {
                     Button("Annulla verifica") { copy.cancelArchiveAudit() }.buttonStyle(MacSyncStopStyle())
+                        .auditPreviewBounds("cancel", enabled: runtime.previewOnly)
                 } else if copy.seedBusy {
                     Button("Annulla conferma") { copy.cancelSeedVerification() }.buttonStyle(MacSyncStopStyle())
                 } else if copy.active {
@@ -571,9 +597,10 @@ struct ArchiveAuditPanel: View {
                         copy.startArchiveAudit(sources: model.configuredPairs(), interactive: true, recognizeExisting: recognize)
                     }.buttonStyle(.borderedProminent)
                         .disabled(busy || !model.monitoring || copy.liveProgress != nil || copy.seedReady)
+                        .auditPreviewBounds("start", enabled: runtime.previewOnly)
                 }
             }
-        }
+        }.auditPreviewBounds("operation", enabled: runtime.previewOnly)
     }
 
     private var lastResult: some View {

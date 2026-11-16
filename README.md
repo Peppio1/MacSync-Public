@@ -306,3 +306,8 @@ Rollback `rollback-v0.13.6` retains d00ccf6bbd2e653f1435b38550d180da3e6d2165 (14
 ### v0.13.8 — adaptive desktop polish candidate
 
 Rollback `rollback-v0.13.7` retains 979f8a0a3ab1c6011ae248e12314b0979a56c248. Reviewed prior full-page light/dark standard and compact renders. Adaptive presentation measured from usable window geometry; compact dashboard, aligned folder/settings panels, explicit accent/green toggle presentation with native accessibility representation, larger standard audit text and metrics, fixed history filters/detail/footer with flexible scrollable Table. No change to core copy/audit logic, persisted configuration or SQLite. Full-page captures now use exact window content dimensions rather than a padded demonstration header. Added minimum 980×660 captures for every page (48 total) and layout policy test; visual QA, native keyboard/VoiceOver, actual SMB and interactive validation still pending. Scroll fallback retained for other pages in exceptionally expanded states.
+
+
+### v0.13.9 — restore audit operation panel
+
+Rollback `rollback-v0.13.8` retains 59b83323e497aa66ef3825a4d38924f5fe5c21aa. Restores the omitted operation view above latest audit results; retains the approved responsive layout and all other pages. The preview-only SwiftUI geometry preference reports the actual panel, progress, active cancel or idle start button, and maintenance frames. The existing native render test asserts their presence and viewport containment at every captured audit size and appearance. No sync engine, configuration or database change. New native captures and checks pending CI; real UI interaction and SMB validation remain separate.
