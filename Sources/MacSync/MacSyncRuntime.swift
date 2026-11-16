@@ -14,6 +14,8 @@ final class MacSyncRuntime: ObservableObject {
     let settings: SyncSettingsController
     let destinations = DestinationStatusController()
 
+    @Published private(set) var savingSchedule = false
+    @Published private(set) var folderConfigurationBusy = false
     @Published private(set) var automaticStatus = "Copie automatiche disabilitate"
     @Published private(set) var nextAutomaticAttempt: Date?
 
@@ -33,9 +35,9 @@ final class MacSyncRuntime: ObservableObject {
         copy = MountedCopyController(previewOnly: previewOnly)
         settings = SyncSettingsController(previewOnly: previewOnly)
         guard !previewOnly else {
-            automaticStatus = "Copie automatiche abilitate — dati dimostrativi"
+            automaticStatus = "Copie automatiche abilitate"
             nextAutomaticAttempt = Date().addingTimeInterval(900)
-            destinations.update(["photo-uploads": .ready, "photo-editing": .ready], checkedAt: Date())
+            destinations.update(["photo-uploads": .ready, "photo-editing": .ready, "demo-third": .ready], checkedAt: Date())
             return
         }
         if Bundle.main.bundleURL.pathExtension.lowercased() == "app" {
@@ -102,7 +104,7 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     func resumeAutomaticCopies() {
-        guard copy.automaticCopiesEnabled, !copy.active, !copy.seedBusy, !copy.maintaining, !copy.interruptionRequested, copy.liveProgress == nil else { return }
+        guard !savingSchedule, !folderConfigurationBusy, copy.automaticCopiesEnabled, !copy.active, !copy.seedBusy, !copy.maintaining, !copy.interruptionRequested, copy.liveProgress == nil else { return }
         configurationRevision += 1
         suspendedUntilNextLaunch = false
         automaticStatus = "Copie automatiche abilitate: attendo il prossimo ciclo"
@@ -111,6 +113,7 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     func onAutomaticPreferenceChanged(_ enabled: Bool) {
+        guard !savingSchedule, !folderConfigurationBusy else { return }
         configurationRevision += 1
         copy.setAutomaticCopiesEnabled(enabled)
         if copy.automaticCopiesEnabled {
@@ -119,7 +122,27 @@ final class MacSyncRuntime: ObservableObject {
         } else {
             automaticStatus = "Copie automatiche disabilitate"
         }
-        scheduleNextAutomaticAttempt()
+        autoTimer?.invalidate(); autoTimer = nil; nextAutomaticAttempt = nil
+        if copy.automaticCopiesEnabled { copy.afterWorkerStopped { [weak self] in self?.scheduleNextAutomaticAttempt() } }
+    }
+
+    func saveSchedule(_ schedule: SyncSchedule) {
+        guard !previewOnly, schedule.isValid, !folderConfigurationBusy, !savingSchedule, !copy.seedBusy, !copy.maintaining, !copy.auditBusy else { return }
+        let resume = copy.automaticCopiesEnabled && !suspendedUntilNextLaunch
+        savingSchedule = true
+        configurationRevision += 1
+        autoTimer?.invalidate(); autoTimer = nil; nextAutomaticAttempt = nil
+        copy.stop()
+        let revision = configurationRevision
+        copy.afterWorkerStopped { [weak self] in
+            guard let self else { return }
+            guard self.configurationRevision == revision else { self.savingSchedule = false; return }
+            self.settings.schedule = schedule
+            self.suspendedUntilNextLaunch = !resume
+            self.savingSchedule = false
+            self.automaticStatus = resume ? "Frequenza aggiornata: pianificazione riavviata" : "Frequenza aggiornata"
+            self.scheduleNextAutomaticAttempt()
+        }
     }
 
     func onScheduleChanged() {
@@ -135,6 +158,20 @@ final class MacSyncRuntime: ObservableObject {
             pendingAlerts.removeAll()
             outages = ConnectionOutageTracker()
             persistOutages()
+        }
+    }
+
+    func editFolderConfiguration(_ edit: @escaping @MainActor () -> Void) {
+        guard !previewOnly, !folderConfigurationBusy, !savingSchedule, !copy.active, copy.liveProgress == nil, !copy.interruptionRequested, !copy.maintaining, !copy.seedBusy else { return }
+        folderConfigurationBusy = true
+        stopAllOperations()
+        copy.invalidateSeedReport()
+        onFolderConfigurationChanged()
+        copy.afterWorkerStopped { [weak self] in
+            guard let self else { return }
+            edit()
+            if self.model.configuredPairs().contains(where:{ !$0.path.isEmpty }) { self.model.startMonitoring() }
+            self.folderConfigurationBusy = false
         }
     }
 
@@ -218,7 +255,7 @@ final class MacSyncRuntime: ObservableObject {
         autoTimer?.invalidate()
         autoTimer = nil
         nextAutomaticAttempt = nil
-        guard !suspendedUntilNextLaunch,
+        guard !savingSchedule, !folderConfigurationBusy, !suspendedUntilNextLaunch,
               copy.automaticCopiesEnabled,
               !copy.active, !copy.interruptionRequested, copy.liveProgress == nil else { return }
         let schedule = settings.schedule
@@ -246,7 +283,7 @@ final class MacSyncRuntime: ObservableObject {
     /// probes SMB. Once armed, the copy worker owns all subsequent slots,
     /// including offline checks, retries and notifications.
     private func activateAutomaticSession(at slot: Date) {
-        guard !suspendedUntilNextLaunch,
+        guard !savingSchedule, !folderConfigurationBusy, !suspendedUntilNextLaunch,
               copy.automaticCopiesEnabled, !copy.active else { return }
         guard model.monitoring else {
             automaticStatus = "Attendo il monitoraggio delle sorgenti"

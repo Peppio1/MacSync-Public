@@ -36,7 +36,7 @@ public final class LocalMonitorService {
         self.update = onUpdate
     }
 
-    public func start(roots: [MonitorRoot], databasePath: String, allowSourceRebinding: Bool = false) {
+    public func start(roots: [MonitorRoot], databasePath: String, allowSourceRebinding: Bool = false, retireInactiveRoots: Bool = false) {
         let request = SeedVerificationCancellation()
         requestLock.lock()
         scanRequest?.cancel()
@@ -51,6 +51,10 @@ public final class LocalMonitorService {
             do {
                 let checked = try self.validateRoots(roots)
                 let store = try LocalInventory(path: databasePath)
+                if retireInactiveRoots {
+                    guard !request.isCancelled else { throw SeedVerificationError.cancelled }
+                    try store.retireInactiveRoots(keeping:Set(checked.map(\.id)))
+                }
                 for root in checked {
                     guard !request.isCancelled else { throw SeedVerificationError.cancelled }
                     if let existing = try store.rootPath(rootID: root.id),

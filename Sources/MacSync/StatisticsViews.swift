@@ -114,7 +114,7 @@ struct AuditProgressView: View {
                     Text("Velocità media scansione: \(Int(Double(progress.scannedFiles)/elapsed)) file/s")
                 }
                 if progress.bytesRead > 0 {
-                    Text("Letti \(sizeText(progress.bytesRead)) · Media lettura locale + SMB: \(SyncLiveProgress.formatRate(Double(progress.bytesRead)/elapsed))")
+                    Text("Letti \(sizeText(progress.bytesRead)) · Velocità media: \(SyncLiveProgress.formatRate(Double(progress.bytesRead)/elapsed))")
                 }
                 if !progress.currentPath.isEmpty { Text(progress.currentPath).lineLimit(1).truncationMode(.middle).help(progress.currentPath) }
             }.font(.system(size: 13))
@@ -487,7 +487,7 @@ struct ArchiveAuditPanel:View {
                 Spacer()
                 Button("Ultimo risultato…"){selectedFinding=nil;showFindings=true}.disabled(copy.auditReport==nil)
             }
-            Text(copy.auditStatus).font(.caption)
+            if copy.auditProgress == nil { Text(copy.auditStatus).font(.caption) }
             if let p=copy.auditProgress { AuditProgressView(progress:p) }
             if let report=copy.auditReport {
                 LazyVGrid(columns:Array(repeating:GridItem(.flexible()),count:2),spacing:6) {

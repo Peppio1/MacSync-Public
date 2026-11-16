@@ -12,6 +12,8 @@ final class MacSyncViewModel: ObservableObject {
     @Published var photoEditing = UserDefaults.standard.string(forKey: "MacSync.photoEditing") ?? ""
     @Published var destinationUploads = UserDefaults.standard.string(forKey: "MacSync.targetUploads") ?? ""
     @Published var destinationEditing = UserDefaults.standard.string(forKey: "MacSync.targetEditing") ?? ""
+    @Published private(set) var commonPlan: CommonFolderPlan?
+    @Published private(set) var configurationInvalid = false
     @Published var message = "Monitoraggio non configurato"
     @Published var monitoring = false
     @Published var pendingCount = 0
@@ -32,13 +34,18 @@ final class MacSyncViewModel: ObservableObject {
             photoEditing = "/Example/iMac/Foto_caricate"
             destinationUploads = "/Example/Server/Foto_da_editare"
             destinationEditing = "/Example/Server/Foto_caricate"
+            commonPlan = CommonFolderPlan(sources: [.init(id: "photo-uploads", path: photoUploads), .init(id: "photo-editing", path: photoEditing), .init(id: "demo-third", path: "/Example/iMac/Progetti_PSD")], parent: "/Example/Server/Condivisione_Foto", expected: VolumeFingerprint(fileSystem: "smbfs", mountPath: "/Example/Server", mountSource: "//example/share"))
             monitoring = true; pendingCount = 46
             message = "Inventario locale disponibile — dati dimostrativi"
             return
         }
+        if let bytes = UserDefaults.standard.data(forKey: "MacSync.commonFolders.v1") {
+            if let saved = try? JSONDecoder().decode(CommonFolderPlan.self, from: bytes), saved.isValid { commonPlan = saved }
+            else { configurationInvalid = true; message = "Configurazione non valida: copie bloccate" }
+        }
         DispatchQueue.main.async { [weak self] in
-            if self?.photoUploads.isEmpty == false || self?.photoEditing.isEmpty == false {
-                self?.startMonitoring()
+            if let self, !self.configurationInvalid, !self.configuredPairs().filter({ !$0.path.isEmpty }).isEmpty {
+                self.startMonitoring()
             }
         }
     }
@@ -81,12 +88,90 @@ final class MacSyncViewModel: ObservableObject {
     func configuredPairs() -> [(
         id: String, path: String, destination: String, expected: VolumeFingerprint?
     )] {
-        [
+        if configurationInvalid { return [] }
+        if let plan = commonPlan {
+            return plan.sources.map { ($0.id, $0.path, plan.target(for: $0), plan.expected) }
+        }
+        return [
             (id: "photo-uploads", path: photoUploads,
              destination: destinationUploads, expected: expectedVolume(slot: 1)),
             (id: "photo-editing", path: photoEditing,
              destination: destinationEditing, expected: expectedVolume(slot: 2))
         ]
+    }
+
+    var editableCommonPlan: CommonFolderPlan {
+        if let commonPlan { return commonPlan }
+        let legacy = configuredPairs().filter { !$0.path.isEmpty }
+        let sources = legacy.map { CommonFolderSource(id: $0.id, path: $0.path) }
+        if let first = legacy.first, !first.destination.isEmpty, let expected = first.expected {
+            let parent = URL(fileURLWithPath: first.destination).deletingLastPathComponent().path
+            let proposed = CommonFolderPlan(sources: sources, parent: parent, expected: expected)
+            if proposed.isValid && zip(sources,legacy).allSatisfy({ source, pair in
+                proposed.target(for: source) == pair.destination && pair.expected == expected
+            }) { return proposed }
+        }
+        return CommonFolderPlan(sources: sources)
+    }
+    var usesLegacyPairs: Bool {
+        commonPlan == nil && configuredPairs().contains { !$0.destination.isEmpty } && editableCommonPlan.parent.isEmpty
+    }
+
+    func pickCommonFolders(destination: Bool) -> [URL] {
+        let panel = NSOpenPanel()
+        panel.title = destination ? "Seleziona destinazione" : "Aggiungi sorgenti"
+        panel.canChooseDirectories = true; panel.canChooseFiles = false
+        panel.allowsMultipleSelection = !destination
+        return panel.runModal() == .OK ? panel.urls : []
+    }
+
+    /// Invoked only after copy and audit workers have stopped. The only
+    /// remote writes are explicitly confirmed creation of missing child dirs.
+    /// Old root IDs stay stable only if both actual paths and volume match.
+    func applyCommonFolders(add urls: [URL] = [], parent newParent: URL? = nil, remove id: String? = nil) -> Bool {
+        do {
+            let old = configuredPairs()
+            var plan = editableCommonPlan
+            if let id { plan.sources.removeAll { $0.id == id } }
+            for url in urls {
+                let path = url.standardizedFileURL.resolvingSymlinksInPath()
+                guard url.isFileURL, try path.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true,
+                      !(try VolumeFingerprint.read(at: path)).isNetworkVolume else { throw MountedCopyError.invalidMapping }
+                if !plan.sources.contains(where: { $0.path == path.path }) {
+                    plan.sources.append(CommonFolderSource(path: path.path))
+                }
+            }
+            if let newParent {
+                guard newParent.isFileURL else { throw MountedCopyError.invalidMapping }
+                let resolved = newParent.standardizedFileURL.resolvingSymlinksInPath()
+                guard try resolved.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else { throw MountedCopyError.rootUnavailable }
+                plan.parent = resolved.path
+                plan.expected = try VolumeFingerprint.read(at: resolved)
+            }
+            guard plan.isValid else { throw MountedCopyError.invalidMapping }
+            // Preserve original IDs only for unchanged source/target bindings.
+            plan.sources = plan.sources.map { source in
+                guard let previous = old.first(where:{$0.id == source.id}) else { return source }
+                if previous.path == source.path && previous.destination == plan.target(for:source) && previous.expected == plan.expected { return source }
+                return CommonFolderSource(path:source.path)
+            }
+            let alert = NSAlert()
+            alert.messageText = "Salvare la configurazione delle cartelle?"
+            alert.informativeText = "Ogni sorgente verrà associata a una sottocartella omonima della destinazione. Le sottocartelle mancanti verranno create. Le associazioni modificate saranno indicizzate nuovamente. I job delle associazioni rimosse o sostituite verranno ritirati dall'inventario locale. Nessun file sarà eliminato dalle cartelle. La sincronizzazione automatica e le cancellazioni dovranno essere riattivate esplicitamente."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle:"Salva"); alert.addButton(withTitle:"Annulla")
+            guard alert.runModal() == .alertFirstButtonReturn else { return false }
+            try plan.prepareTargetDirectories()
+            let bytes = try JSONEncoder().encode(plan)
+            UserDefaults.standard.set(bytes,forKey:"MacSync.commonFolders.v1")
+            configurationInvalid = false
+            commonPlan = plan
+            if plan.sources.isEmpty { stopMonitoring(); monitoring = false; pendingCount = 0; message = "Aggiungi almeno una sorgente" }
+            return true
+        } catch {
+            message = "Configurazione non salvata: " + error.localizedDescription
+            return false
+        }
     }
 
     func chooseFolder(slot: Int, destination: Bool) {
@@ -205,12 +290,17 @@ final class MacSyncViewModel: ObservableObject {
     }
 
     func startMonitoring(allowSourceRebinding: Bool = false) {
+        guard !configurationInvalid else { return }
         var roots: [MonitorRoot] = []
+        if let plan = commonPlan {
+            roots = plan.sources.map { MonitorRoot(id:$0.id,url:URL(fileURLWithPath:$0.path)) }
+        } else {
         if !photoUploads.isEmpty {
             roots.append(MonitorRoot(id: "photo-uploads", url: URL(fileURLWithPath: photoUploads)))
         }
         if !photoEditing.isEmpty {
             roots.append(MonitorRoot(id: "photo-editing", url: URL(fileURLWithPath: photoEditing)))
+        }
         }
         guard !roots.isEmpty else { message = "Seleziona una Sorgente"; return }
         do {
@@ -218,7 +308,7 @@ final class MacSyncViewModel: ObservableObject {
             monitoring = false
             message = "Controllo delle Sorgenti locali…"
             service.start(
-                roots: roots, databasePath: db, allowSourceRebinding: allowSourceRebinding
+                roots: roots, databasePath: db, allowSourceRebinding: allowSourceRebinding, retireInactiveRoots: commonPlan != nil
             )
         } catch {
             message = "Errore monitoraggio: " + error.localizedDescription
@@ -229,6 +319,13 @@ final class MacSyncViewModel: ObservableObject {
     func stopMonitoring() {
         service.stop()
     }
+}
+
+private final class FolderDropCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var urls: [URL] = []
+    func append(_ url: URL) { lock.lock(); defer { lock.unlock() }; urls.append(url) }
+    func values() -> [URL] { lock.lock(); defer { lock.unlock() }; return urls }
 }
 
 struct FolderDropZone: View {
@@ -347,6 +444,9 @@ struct MacSyncConfigurationView: View {
     @State private var logOperation = "all"
     @State private var logFolder = "all"
     @State private var logPeriod = "all"
+    @State private var draftSchedule: SyncSchedule
+    @State private var intervalText: String
+    @State private var sourcePage = 0
 
     init(model: MacSyncViewModel, copy: MountedCopyController, runtime: MacSyncRuntime, settings: SyncSettingsController, destinations: DestinationStatusController, initialPage: MacSyncPage = .overview, previewScheme: ColorScheme? = nil) {
         self.model = model; self.copy = copy; self.runtime = runtime
@@ -355,6 +455,8 @@ struct MacSyncConfigurationView: View {
         self._loginAtStartup = StateObject(wrappedValue: LaunchAtLoginController(previewOnly: runtime.previewOnly))
         self._selectedLog = State(initialValue: runtime.previewOnly && initialPage == .history ? copy.recentEntries.first?.id : nil)
         self.previewScheme = previewScheme
+        self._draftSchedule = State(initialValue: settings.schedule)
+        self._intervalText = State(initialValue: String(settings.schedule.interval))
     }
 
     private func picker(_ slot: Int, destination: Bool) -> some View {
@@ -408,11 +510,8 @@ struct MacSyncConfigurationView: View {
     @AppStorage("MacSync.appearance") private var appearance = "system"
 
     var body: some View {
-        MacSyncSectionShell(page: $page, monitoring: model.monitoring, next: copy.nextScheduledRun ?? runtime.nextAutomaticAttempt, activity: globalActivity, controls: AnyView(HStack(spacing: 8) {
-            globalControls
-            Button("Ferma tutto") { runtime.stopAllOperations() }.buttonStyle(MacSyncStopStyle())
-        })) {
-            VStack(alignment: .leading, spacing: 16) {
+        MacSyncSectionShell(page: $page, monitoring: model.monitoring, next: copy.nextScheduledRun ?? runtime.nextAutomaticAttempt, showHeader: page == .folders, activity: nil, controls: AnyView(automaticSwitch)) {
+            VStack(alignment: .leading, spacing: 10) {
                 switch page {
                 case .overview: overviewPage
                 case .folders: foldersPage
@@ -423,6 +522,7 @@ struct MacSyncConfigurationView: View {
                 }
             }
         }
+        .disabled(runtime.folderConfigurationBusy)
         .preferredColorScheme(previewScheme ?? (appearance == "light" ? .light : appearance == "dark" ? .dark : nil))
         .environment(\.locale, Locale(identifier: "it_IT"))
         .frame(minWidth: 980, minHeight: 660)
@@ -466,57 +566,40 @@ struct MacSyncConfigurationView: View {
 
     @Environment(\.colorScheme) private var scheme
 
+    private var automaticSwitch: some View {
+        HStack(spacing: 10) {
+            Text("Sincronizzazione automatica").font(.subheadline.weight(.semibold))
+            Toggle("Sincronizzazione automatica",isOn: Binding(get:{ copy.automaticCopiesEnabled },set:{ runtime.onAutomaticPreferenceChanged($0) }))
+                .labelsHidden().toggleStyle(.switch).tint(.green)
+                .disabled(runtime.savingSchedule || copy.seedBusy || copy.maintaining || copy.interruptionRequested)
+            Text(copy.automaticCopiesEnabled ? "Attiva" : "Disattivata").font(.subheadline.weight(.semibold))
+                .foregroundStyle(copy.automaticCopiesEnabled ? MacSyncColors.green(scheme) : Color.secondary)
+        }
+    }
+
     private var overviewPage: some View {
         VStack(alignment: .leading, spacing: 12) {
-            MacSyncPanel("Stato operativo", icon: "arrow.triangle.2.circlepath", accent: true) {
-                HStack(alignment: .top, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(globalActivity).font(.system(size: 20, weight: .semibold))
-                        Text(copy.status).font(.callout).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Text(runtime.automaticStatus).font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer(minLength: 8)
-                    VStack(alignment: .trailing, spacing: 6) {
-                        if copy.active {
-                            Button(copy.automaticSession ? "Sospendi automatismo" : "Ferma copie programmate") {
-                                runtime.stopCopiesForCurrentLaunch()
-                            }.buttonStyle(.bordered)
-                        } else {
-                            Button("Avvia copie di prova") {
-                                runtime.stopCopiesForCurrentLaunch()
-                                copy.start(sources: model.configuredPairs(), schedule: settings.schedule)
-                            }.buttonStyle(.borderedProminent)
-                                .disabled(copy.seedBusy || copy.maintaining || copy.liveProgress != nil || copy.interruptionRequested || model.scanProgress != nil || !model.monitoring)
-                        }
-                        Menu("Comandi") {
-                            if copy.automaticCopiesEnabled && !copy.active && runtime.nextAutomaticAttempt != nil {
-                                Button("Sospendi automatismo") { runtime.stopCopiesForCurrentLaunch() }
-                            }
-                            if copy.automaticCopiesEnabled && !copy.active && runtime.nextAutomaticAttempt == nil {
-                                Button("Riattiva copie automatiche") { runtime.resumeAutomaticCopies() }
-                                    .disabled(copy.seedBusy || copy.maintaining || copy.interruptionRequested || copy.liveProgress != nil || !model.monitoring)
-                            }
-                            if copy.automaticCopiesEnabled {
-                                Button("Disattiva sincronizzazione automatica") { runtime.onAutomaticPreferenceChanged(false) }
-                                    .disabled(copy.seedBusy || copy.maintaining)
-                            }
-                            Divider()
-                            Button("Rileggi sorgenti") { model.startMonitoring() }
-                                .disabled(copy.active || copy.maintaining || copy.seedBusy)
-                        }.menuStyle(.borderlessButton).fixedSize()
-                    }
-                }
-                if copy.interruptionRequested {
-                    Text("Attendo il prossimo punto sicuro. Le operazioni non completate rimangono in coda.").font(.caption).foregroundStyle(.secondary)
-                }
-            }
             MacSyncPanel("Operazione corrente", icon: "arrow.left.arrow.right") {
+                HStack {
+                    Text(globalActivity).font(.subheadline.weight(.semibold))
+                    Spacer()
+                    globalControls
+                    if !copy.active && copy.liveProgress == nil && !copy.maintaining && !copy.seedBusy && model.scanProgress == nil {
+                        Button("Avvia sincronizzazione") { runtime.stopCopiesForCurrentLaunch(); copy.start(sources:model.configuredPairs(),schedule:settings.schedule) }.buttonStyle(.borderedProminent).disabled(!model.monitoring || runtime.savingSchedule)
+                    }
+                    Menu("Comandi") {
+                        Button("Ferma tutto") { runtime.stopAllOperations() }
+                        Button("Rileggi sorgenti") { model.startMonitoring() }.disabled(copy.active || copy.maintaining || copy.seedBusy || copy.interruptionRequested)
+                        if copy.automaticCopiesEnabled && !copy.active && runtime.nextAutomaticAttempt == nil { Button("Riattiva automatismo") { runtime.resumeAutomaticCopies() } }
+                    }.menuStyle(.borderlessButton).fixedSize()
+                }
                 HStack {
                     Label("\(model.pendingCount.formatted()) operazioni in coda", systemImage: "list.bullet.rectangle").font(.subheadline.weight(.medium))
                     Spacer()
-                    Text(model.message).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(model.message)
+                    if let next = copy.nextScheduledRun ?? runtime.nextAutomaticAttempt { Text("Prossimo: " + macSyncDateTime(next)).font(.caption).foregroundStyle(Color.accentColor) }
+                }
+                if copy.interruptionRequested { Text("Interruzione richiesta: attendo il punto sicuro. La coda viene conservata.").font(.caption) }
+                if !model.message.isEmpty { Text(model.message).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(model.message)
                 }
                 if let scan = model.scanProgress { AuditProgressView(progress: scan) }
                 if copy.liveProgress != nil {
@@ -527,7 +610,7 @@ struct MacSyncConfigurationView: View {
                 }
             }
             MacSyncPanel("Riepilogo sessione", icon: "chart.bar.xaxis") {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 94), spacing: 8)], spacing: 8) {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 6), spacing: 8) {
                     ForEach(HistoryMetric.main) { metric in
                         Button {
                             initialMetric = metric; showSummary = true
@@ -565,8 +648,10 @@ struct MacSyncConfigurationView: View {
                     }
                 }
                 MacSyncPanel("Destinazioni", icon: "folder") {
-                    destinationRow(1, state: destinations.first)
-                    destinationRow(2, state: destinations.second)
+                    let pairs = model.configuredPairs().filter { !$0.path.isEmpty }
+                    Text("\(pairs.filter { destinations.state(for:$0.id).isReady }.count) / \(pairs.count) destinazioni pronte").font(.subheadline.weight(.semibold))
+                    ForEach(Array(pairs.prefix(3).enumerated()),id: \.offset) { item in destinationLine(item.element.destination, state:destinations.state(for:item.element.id)) }
+                    if pairs.count > 3 { Button("Mostra tutte le cartelle…") { page = .folders } }
                     Text("Ultimo controllo: " + (destinations.lastCheckedAt.map { macSyncClock($0) } ?? "non eseguito"))
                         .font(.caption).foregroundStyle(.secondary)
                     Text("Controllo prima di ogni ciclo, senza verifiche di rete extra.").font(.caption).foregroundStyle(.secondary)
@@ -575,180 +660,207 @@ struct MacSyncConfigurationView: View {
         }
     }
 
-    private func destinationRow(_ slot: Int, state: DestinationAvailability) -> some View {
-        let path = model.folderPath(slot: slot, destination: true)
-        let name = path.isEmpty ? "Cartella_\(slot)" : URL(fileURLWithPath: path).lastPathComponent
-        let description = !path.isEmpty && destinations.lastCheckedAt == nil ? "Non ancora verificata" : state.description
-        return HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Image(systemName: state.isReady ? "checkmark.circle.fill" : "exclamationmark.circle")
-                .foregroundStyle(state.isReady ? MacSyncColors.green(scheme) : MacSyncColors.orange(scheme))
-            Text(name).font(.caption.weight(.semibold)).lineLimit(1).truncationMode(.middle)
-            Spacer(minLength: 4)
-            Text(description).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-        }.help(name + ": " + description)
+    private func destinationLine(_ path: String, state: DestinationAvailability) -> some View {
+        let name = path.isEmpty ? "Non configurata" : URL(fileURLWithPath:path).lastPathComponent
+        return HStack(spacing: 6) {
+            Text(name).font(.caption.weight(.semibold)).lineLimit(1)
+            Spacer(minLength:4)
+            Text(state.description).font(.caption).foregroundStyle(state.isReady ? MacSyncColors.green(scheme) : Color.secondary).lineLimit(2)
+        }.help(path + ": " + state.description)
+    }
+
+    private var folderEditAllowed: Bool {
+        !copy.active && copy.liveProgress == nil && !copy.interruptionRequested && !copy.seedBusy && !copy.maintaining && !copy.auditBusy && !runtime.savingSchedule && !runtime.folderConfigurationBusy
+    }
+    private func changeFolders(add: [URL] = [], parent: URL? = nil, remove: String? = nil) {
+        guard folderEditAllowed, !runtime.previewOnly else { return }
+        runtime.editFolderConfiguration {
+            _ = model.applyCommonFolders(add:add,parent:parent,remove:remove)
+        }
+    }
+    private func folderDrop(_ providers: [NSItemProvider], target: Bool) -> Bool {
+        guard folderEditAllowed else { return false }
+        let candidates = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
+        guard !candidates.isEmpty, !target || candidates.count == 1 else { return false }
+        let group = DispatchGroup()
+        let collector = FolderDropCollector()
+        for provider in candidates {
+            group.enter()
+            provider.loadItem(forTypeIdentifier:UTType.fileURL.identifier,options:nil) { item,_ in
+                defer { group.leave() }
+                let url: URL?
+                if let value = item as? URL { url = value }
+                else if let value = item as? Data { url = URL(dataRepresentation:value,relativeTo:nil) }
+                else if let value = item as? String { url = URL(string:value) }
+                else { url = nil }
+                if let url { collector.append(url) }
+            }
+        }
+        group.notify(queue:.main) {
+            let urls = collector.values().sorted { $0.path < $1.path }
+            guard urls.count == candidates.count else { return }
+            if target { changeFolders(parent:urls.first) } else { changeFolders(add:urls) }
+        }
+        return true
     }
 
     private var foldersPage: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            MacSyncPanel("Coppie sorgente → destinazione", icon: "folder") {
-                pair(1, title: "Cartella_1")
-                Divider()
-                pair(2, title: "Cartella_2")
-            }
-            MacSyncPanel("Connessione", icon: "network") {
-                HStack(alignment: .top, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        destinationRow(1, state: destinations.first)
-                        destinationRow(2, state: destinations.second)
-                        Text("Ultimo controllo: " + (destinations.lastCheckedAt.map { macSyncClock($0) } ?? "non eseguito")).font(.caption).foregroundStyle(.secondary)
-                    }.frame(maxWidth: .infinity, alignment: .leading)
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Direzione unica: iMac → destinazione").font(.subheadline.weight(.semibold))
-                        Text("Cartelle locali o condivisioni SMB già montate. MacSync usa le credenziali di macOS.").font(.caption).foregroundStyle(.secondary)
-                    }.frame(maxWidth: .infinity, alignment: .leading)
+        let plan = model.editableCommonPlan
+        let lastPage = max(0,(plan.sources.count-1)/4)
+        let current = min(sourcePage,lastPage)
+        return VStack(alignment:.leading,spacing:12) {
+            if model.usesLegacyPairs { Text("Configurazione precedente conservata. Seleziona una destinazione comune per passare al nuovo sistema.").font(.caption).foregroundStyle(.orange) }
+            MacSyncPanel("Cartelle di sincronizzazione",icon:"folder") {
+                HStack(alignment:.top,spacing:12) {
+                    VStack(alignment:.leading,spacing:8) {
+                        HStack {
+                            Text("Sorgenti").font(.headline)
+                            Spacer()
+                            Button("Aggiungi sorgente") {
+                                let selected = model.pickCommonFolders(destination:false)
+                                if !selected.isEmpty { changeFolders(add:selected) }
+                            }.disabled(!folderEditAllowed).help("Aggiungi sorgente")
+                        }
+                        if plan.sources.isEmpty {
+                            VStack(spacing:6) {
+                                Image(systemName:"folder.badge.plus").font(.system(size:32)).foregroundStyle(Color.accentColor)
+                                Text("Trascina qui le cartelle sorgenti").font(.callout)
+                            }.frame(maxWidth:.infinity,minHeight:142)
+                                .overlay(RoundedRectangle(cornerRadius:8).strokeBorder(Color.secondary.opacity(0.5),style:StrokeStyle(lineWidth:1,dash:[5,4])))
+                        } else {
+                            ForEach(Array(plan.sources.dropFirst(current*4).prefix(4))) { source in
+                                HStack {
+                                    VStack(alignment:.leading,spacing:3) {
+                                        Text(source.name).font(.subheadline.weight(.semibold))
+                                        Text(source.path).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                                    }
+                                    Spacer(minLength:4)
+                                    Menu {
+                                        Button("Mostra nel Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath:source.path)]) }
+                                        Button("Rimuovi sorgente") { changeFolders(remove:source.id) }.disabled(!folderEditAllowed)
+                                    } label: { Image(systemName:"ellipsis.circle") }.menuStyle(.borderlessButton).fixedSize()
+                                }.padding(8).background(MacSyncColors.inset(scheme),in:RoundedRectangle(cornerRadius:8)).help(source.path)
+                            }
+                            if lastPage > 0 {
+                                HStack {
+                                    Button("Precedente") { sourcePage = max(0,current-1) }.disabled(current == 0)
+                                    Spacer(); Text("\(current+1) di \(lastPage+1)").font(.caption); Spacer()
+                                    Button("Successiva") { sourcePage = min(lastPage,current+1) }.disabled(current == lastPage)
+                                }
+                            }
+                        }
+                    }.padding(10).frame(maxWidth:.infinity,alignment:.topLeading)
+                    .background(MacSyncColors.canvas(scheme),in:RoundedRectangle(cornerRadius:10))
+                    .onDrop(of:[UTType.fileURL.identifier],isTargeted:nil) { folderDrop($0,target:false) }
+                    Image(systemName:"arrow.right.circle").font(.system(size:26)).foregroundStyle(Color.accentColor).padding(.top,42)
+                    VStack(alignment:.leading,spacing:8) {
+                        HStack {
+                            Text("Destinazione").font(.headline); Spacer()
+                            Button(plan.parent.isEmpty ? "Aggiungi destinazione" : "Modifica") {
+                                if let url = model.pickCommonFolders(destination:true).first { changeFolders(parent:url) }
+                            }.disabled(!folderEditAllowed).help("Seleziona destinazione")
+                        }
+                        if plan.parent.isEmpty {
+                            VStack(spacing:6) {
+                                Image(systemName:"folder.badge.plus").font(.system(size:32)).foregroundStyle(Color.accentColor)
+                                Text("Trascina qui la destinazione").font(.callout)
+                            }.frame(maxWidth:.infinity,minHeight:142)
+                                .overlay(RoundedRectangle(cornerRadius:8).strokeBorder(Color.secondary.opacity(0.5),style:StrokeStyle(lineWidth:1,dash:[5,4])))
+                        } else {
+                            VStack(alignment:.leading,spacing:4) {
+                                Text(URL(fileURLWithPath:plan.parent).lastPathComponent).font(.subheadline.weight(.semibold))
+                                Text(plan.parent).font(.caption).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
+                            }.frame(maxWidth:.infinity,alignment:.leading).padding(10).background(MacSyncColors.inset(scheme),in:RoundedRectangle(cornerRadius:8)).help(plan.parent)
+                            Text("Ogni sorgente viene sincronizzata nella sottocartella omonima.").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }.padding(10).frame(maxWidth:.infinity,alignment:.topLeading)
+                    .background(MacSyncColors.canvas(scheme),in:RoundedRectangle(cornerRadius:10))
+                    .onDrop(of:[UTType.fileURL.identifier],isTargeted:nil) { folderDrop($0,target:true) }
                 }
+                if !folderEditAllowed { Text("Ferma le copie e attendi il termine delle operazioni per modificare le cartelle.").font(.caption).foregroundStyle(.secondary) }
             }
+            MacSyncPanel("Connessione",icon:"network") {
+                let pairs = model.configuredPairs().filter{!$0.path.isEmpty}
+                Text("\(pairs.filter{destinations.state(for:$0.id).isReady}.count) / \(pairs.count) destinazioni pronte").font(.subheadline.weight(.semibold))
+                ForEach(Array(pairs.dropFirst(current*4).prefix(4).enumerated()),id:\.offset) { item in
+                    destinationLine(item.element.destination,state:destinations.state(for:item.element.id))
+                }
+                Text("Ultimo controllo: " + (destinations.lastCheckedAt.map {macSyncClock($0)} ?? "non eseguito")).font(.caption).foregroundStyle(.secondary)
+                Text("Direzione unica: sorgenti → destinazione.").font(.caption).foregroundStyle(.secondary)
+            }
+            Text(model.message).font(.caption).foregroundStyle(.secondary).lineLimit(2).help(model.message)
         }
+    }
+
+    private var editedSchedule: SyncSchedule? {
+        var plan = draftSchedule
+        if plan.frequency == .minutes || plan.frequency == .hours {
+            guard let n = Int(intervalText.trimmingCharacters(in:.whitespacesAndNewlines)) else { return nil }
+            plan.interval = n
+        }
+        return plan.isValid ? plan : nil
     }
     private var schedulePage: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top, spacing: 12) {
-            MacSyncPanel("Sincronizzazione automatica", icon: "calendar", accent: true) {
-                    MacSyncSwitchRow(
-                        "Avvia automaticamente le copie e gli aggiornamenti",
-                        isOn: Binding(
-                            get: { copy.automaticCopiesEnabled },
-                            set: { runtime.onAutomaticPreferenceChanged($0) }
-                        )
-                    )
-                    .disabled(copy.seedBusy || copy.maintaining)
-                    Text(runtime.automaticStatus)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text("Richiede una conferma iniziale. Attende monitoraggio e destinazioni corrette; le cancellazioni richiedono autorizzazione separata.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-            }
-            MacSyncPanel("Destinazione offline", icon: "wifi.slash", accent: false) {
-                VStack(alignment: .leading, spacing: 9) {
-                    MacSyncSwitchRow("Notifiche disconnessione",
-                           isOn: Binding(
-                                get: { settings.alertPolicy.enabled },
-                                set: { runtime.onAlertPolicyChanged($0) }
-                           ))
-                    if settings.alertPolicy.enabled {
-                        Stepper(
-                            "Avvisa dopo \(settings.alertPolicy.afterHours) "
-                                + (settings.alertPolicy.afterHours == 1 ? "ora" : "ore"),
-                            value: Binding(
-                                get: { settings.alertPolicy.afterHours },
-                                set: { newValue in
-                                    settings.alertPolicy.afterHours = newValue
-                                }
-                            ), in: 1...168
-                        )
-                        Text(settings.notificationPermissionStatus)
-                            .font(.caption2).foregroundStyle(.secondary)
+        VStack(alignment:.leading,spacing:12) {
+            MacSyncPanel("Frequenza",icon:"clock") {
+                Picker("Ripetizione",selection:$draftSchedule.frequency) {
+                    Text("Minuti").tag(SyncSchedule.Frequency.minutes)
+                    Text("Ore").tag(SyncSchedule.Frequency.hours)
+                    Text("Giornaliera").tag(SyncSchedule.Frequency.daily)
+                    Text("Settimanale").tag(SyncSchedule.Frequency.weekly)
+                }.pickerStyle(.segmented)
+                if draftSchedule.frequency == .minutes || draftSchedule.frequency == .hours {
+                    let range = draftSchedule.frequency == .minutes ? 1...59 : 1...23
+                    HStack {
+                        Text("Ogni")
+                        Button("−") { intervalText = String(max(range.lowerBound,max(range.lowerBound,min(range.upperBound,Int(intervalText) ?? range.lowerBound))-1)) }
+                        TextField("Intervallo",text:$intervalText).frame(width:76).textFieldStyle(.roundedBorder).multilineTextAlignment(.center)
+                        Button("+") { intervalText = String(min(range.upperBound,max(range.lowerBound,min(range.upperBound,Int(intervalText) ?? range.lowerBound))+1)) }
+                        Text(draftSchedule.frequency == .minutes ? "minuti" : "ore")
+                        Spacer()
                     }
-                    Text("Soglia dalla prima indisponibilità. Avviso una sola volta per disconnessione, al controllo pianificato successivo. Default: disattivato.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-            }
-            }
-            MacSyncPanel("Frequenza", icon: "clock", accent: false) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Picker("Ripetizione", selection: Binding(
-                        get: { settings.schedule.frequency },
-                        set: { value in
-                            settings.updateScheduleFrequency(value)
-                            runtime.onScheduleChanged()
+                    HStack {
+                        ForEach(draftSchedule.frequency == .minutes ? [5,10,15,20,30,45] : [1,2,4,8,12],id:\.self) { n in
+                            Button(String(n)) { intervalText = String(n) }.tint(Int(intervalText) == n ? Color.accentColor : Color.secondary)
                         }
-                    )) {
-                        Text("Minuti").tag(SyncSchedule.Frequency.minutes)
-                        Text("Ore").tag(SyncSchedule.Frequency.hours)
-                        Text("Ogni giorno").tag(SyncSchedule.Frequency.daily)
-                        Text("Giorno della settimana").tag(SyncSchedule.Frequency.weekly)
                     }
-                    .pickerStyle(.segmented)
-                    .disabled(copy.active || copy.seedBusy || copy.maintaining)
-                    if settings.schedule.frequency == .minutes ||
-                       settings.schedule.frequency == .hours {
-                         SyncIntervalEditor(
-                             range: settings.schedule.frequency == .minutes ? 1...59 : 1...23,
-                             unit: settings.schedule.frequency == .minutes ? "minuti" : "ore",
-                             value: settings.schedule.interval,
-                             apply: { value in
-                                 guard !copy.active, !copy.seedBusy, !copy.maintaining else { return }
-                                 var plan = settings.schedule
-                                 plan.interval = value
-                                 guard plan.isValid else { return }
-                                 settings.schedule = plan
-                                 runtime.onScheduleChanged()
-                             }
-                         )
-                         .disabled(copy.active || copy.seedBusy || copy.maintaining)
-                    } else {
-                        if settings.schedule.frequency == .weekly {
-                            Picker("Giorno", selection: Binding(
-                                get: { settings.schedule.weekday },
-                                set: { value in
-                                    var plan = settings.schedule
-                                    plan.weekday = value
-                                    settings.schedule = plan
-                                    runtime.onScheduleChanged()
-                                }
-                            )) {
-                                Text("Lunedì").tag(2)
-                                Text("Martedì").tag(3)
-                                Text("Mercoledì").tag(4)
-                                Text("Giovedì").tag(5)
-                                Text("Venerdì").tag(6)
-                                Text("Sabato").tag(7)
-                                Text("Domenica").tag(1)
-                            }
-                            .disabled(copy.active || copy.seedBusy || copy.maintaining)
+                    if editedSchedule == nil { Text("Inserisci un intervallo da \(range.lowerBound) a \(range.upperBound).").font(.caption).foregroundStyle(.orange) }
+                } else {
+                    if draftSchedule.frequency == .weekly {
+                        Picker("Giorno",selection:$draftSchedule.weekday) {
+                            ForEach([2,3,4,5,6,7,1],id:\.self) { day in Text(Calendar(identifier:.gregorian).weekdaySymbols[day-1]).tag(day) }
                         }
-                        DatePicker("Orario", selection: Binding(
-                            get: {
-                                var parts = Calendar.current.dateComponents(
-                                    [.year, .month, .day], from: Date()
-                                )
-                                parts.hour = settings.schedule.hour
-                                parts.minute = settings.schedule.minute
-                                return Calendar.current.date(from: parts) ?? Date()
-                            },
-                            set: { value in
-                                let time = Calendar.current.dateComponents(
-                                    [.hour, .minute], from: value
-                                )
-                                var plan = settings.schedule
-                                plan.hour = time.hour ?? 9
-                                plan.minute = time.minute ?? 0
-                                settings.schedule = plan
-                                runtime.onScheduleChanged()
-                            }
-                        ), displayedComponents: .hourAndMinute)
-                        .disabled(copy.active || copy.seedBusy || copy.maintaining)
                     }
-                    Label(settings.schedule.summary, systemImage: "calendar.badge.clock")
-                        .font(.system(size: 16, weight: .semibold))
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-                    if let next = copy.nextScheduledRun ?? runtime.nextAutomaticAttempt {
-                        Text("Prossimo controllo e sincronizzazione: "
-                             + macSyncDateTime(next))
-                            .font(.caption2).foregroundStyle(.secondary)
+                    HStack {
+                        Picker("Ora",selection:$draftSchedule.hour) { ForEach(0...23,id:\.self) { Text(String(format:"%02d",$0)).tag($0) } }.frame(width:160)
+                        Picker("Minuti",selection:$draftSchedule.minute) { ForEach(0...59,id:\.self) { Text(String(format:"%02d",$0)).tag($0) } }.frame(width:160)
                     }
-                    Text("La destinazione SMB è verificata prima di ogni ciclo. Ferma le copie per modificare la frequenza.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
                 }
+                HStack {
+                    Text(editedSchedule?.summary ?? "Intervallo non valido").font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Button("Salva") { if let plan = editedSchedule { runtime.saveSchedule(plan) } }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(editedSchedule == nil || editedSchedule == settings.schedule || runtime.savingSchedule || copy.seedBusy || copy.maintaining || copy.auditBusy)
+                }
+                if runtime.savingSchedule { Text("Attendo l'arresto sicuro del ciclo prima di applicare la frequenza…").font(.caption) }
+                else if editedSchedule != settings.schedule { Text("Modifiche non salvate").font(.caption).foregroundStyle(.orange) }
+                Text("Frequenza attuale: " + settings.schedule.summary).font(.caption).foregroundStyle(.secondary)
             }
-        }
+            MacSyncPanel("Destinazione offline",icon:"wifi.slash") {
+                MacSyncSwitchRow("Notifiche disconnessione",isOn:Binding(get:{settings.alertPolicy.enabled},set:{runtime.onAlertPolicyChanged($0)}))
+                if settings.alertPolicy.enabled {
+                    Stepper("Avvisa dopo \(settings.alertPolicy.afterHours) ore",value:$settings.alertPolicy.afterHours,in:1...168)
+                    Text(settings.notificationPermissionStatus).font(.caption).foregroundStyle(.secondary)
+                }
+                Text("Avviso una sola volta per disconnessione, al controllo pianificato successivo alla soglia.").font(.caption).foregroundStyle(.secondary)
+            }
+        }.onChange(of:draftSchedule.frequency) { frequency in
+            if frequency == .minutes && !(1...59).contains(Int(intervalText) ?? 0) {intervalText = "5"}
+            if frequency == .hours && !(1...23).contains(Int(intervalText) ?? 0) {intervalText = "1"}
+        }.onChange(of:settings.schedule) { plan in draftSchedule = plan; intervalText = String(plan.interval) }
     }
+
     private var auditPage: some View {
         VStack(alignment: .leading, spacing: 14) {
             MacSyncPanel("Verifica completa", icon: "checkmark.shield", accent: true) {
@@ -788,7 +900,7 @@ struct MacSyncConfigurationView: View {
                                 MacSyncLinearProgress(value:min(0.99,Double(copy.seedInspectedCount)/Double(copy.seedTotalJobs)))
                                 Text("Job analizzati: \(copy.seedInspectedCount) / \(copy.seedTotalJobs)")
                             }
-                            Text("Tempo: " + elapsedText(elapsed) + " · Lettura media locale + SMB: " +
+                            Text("Tempo: " + elapsedText(elapsed) + " · Velocità media: " +
                                 SyncLiveProgress.formatRate(Double(copy.seedReadBytes)/elapsed))
                             if !copy.seedCurrentPath.isEmpty {
                                 Text(copy.seedCurrentPath).lineLimit(1).truncationMode(.middle)
@@ -814,10 +926,12 @@ struct MacSyncConfigurationView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 Button("Anteprima iniziale — sola lettura") { copy.preview(sources: model.configuredPairs()) }
-                    .disabled(copy.active || copy.seedBusy || copy.maintaining)
+                    .disabled(copy.active || copy.seedBusy || copy.maintaining || copy.interruptionRequested || runtime.savingSchedule)
                 Text(copy.previewStatus).font(.caption).foregroundStyle(.secondary)
             }
             MacSyncPanel("Manutenzione temporanei", icon: "wrench.and.screwdriver", accent: false) {
+                Text("Individua e rimuove i file temporanei lasciati da copie interrotte. Usala quando necessario, dopo aver fermato le copie.").font(.caption).foregroundStyle(.secondary)
+                if copy.maintaining && !copy.auditBusy { Button("Annulla manutenzione") { copy.cancelMaintenance() }.buttonStyle(MacSyncStopStyle()) }
                 VStack(alignment: .leading, spacing: 8) {
                     Button("Verifica file temporanei") {
                         copy.inspectStaging(sources: model.configuredPairs())
@@ -882,7 +996,7 @@ struct MacSyncConfigurationView: View {
             }
             Text("Ultimi 300 eventi. TSV: ricerca ed esito (max 5.000 eventi); gli altri filtri valgono solo per la tabella.").font(.caption).foregroundStyle(.secondary)
             Table(visibleLog.map { LogRow(entry: $0) }, selection: $selectedLog) {
-                TableColumn("Ora") { row in let entry = row.entry; Text(macSyncClock(entry.timestamp, seconds: true)).monospacedDigit().help(macSyncDateTime(entry.timestamp)) }.width(min: 65, ideal: 78)
+                TableColumn("Data e ora") { row in Text(macSyncDateTime(row.entry.timestamp)).monospacedDigit().font(.caption) }.width(min: 124, ideal: 145)
                 TableColumn("Esito") { row in let entry = row.entry; MacSyncLogBadge(level: entry.level, interrupted: macSyncWasInterrupted(entry)) }.width(min: 76, ideal: 105)
                 TableColumn("Operazione") { row in let entry = row.entry; Text(macSyncAction(entry.action)).lineLimit(1) }.width(min: 78, ideal: 108)
                 TableColumn("File / dettaglio") { row in let entry = row.entry; Text(entry.relativePath.isEmpty ? entry.message : entry.relativePath).lineLimit(1).truncationMode(.middle).help(entry.relativePath.isEmpty ? entry.message : entry.relativePath) }
@@ -899,12 +1013,22 @@ struct MacSyncConfigurationView: View {
                         }
                     }
                     Text(macSyncDateTime(entry.timestamp) + " · " + macSyncRootName(entry.rootID) + " · " + String(format: "%.2f s", entry.durationSeconds)).font(.caption).foregroundStyle(.secondary)
-                    if !entry.relativePath.isEmpty { Text(entry.relativePath).textSelection(.enabled) }
-                    Text(entry.message).textSelection(.enabled)
+                    if !entry.relativePath.isEmpty { Text(entry.relativePath).lineLimit(2).help(entry.relativePath).textSelection(.enabled) }
+                    Text(entry.message).lineLimit(3).help(entry.message).textSelection(.enabled)
                 }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
             } else {
                 Text(visibleLog.isEmpty ? "Nessun evento corrispondente ai filtri." : "Seleziona una riga per consultare il dettaglio completo.").font(.caption).foregroundStyle(.secondary)
+            }
+            Divider()
+            HStack {
+                Text("Eventi visualizzati: \(visibleLog.count)").font(.caption.weight(.medium))
+                Spacer()
+                Text("Completati: \(visibleLog.filter { $0.level == "success" }.count)").font(.caption).foregroundStyle(MacSyncColors.green(scheme))
+                Spacer()
+                Text("Avvisi: \(visibleLog.filter { $0.level == "warning" }.count)").font(.caption)
+                Spacer()
+                Text("Errori: \(visibleLog.filter { $0.level == "error" }.count)").font(.caption).foregroundStyle(MacSyncColors.red(scheme))
             }
         }.onAppear { copy.refresh() }
     }
@@ -929,6 +1053,7 @@ struct MacSyncConfigurationView: View {
                             loginAtStartup.openSystemSettings()
                         }
                     }
+                    MacSyncSwitchRow("Notifiche disconnessione", isOn: Binding(get:{settings.alertPolicy.enabled},set:{runtime.onAlertPolicyChanged($0)}))
                     Text("L’avvio al login non abilita le cancellazioni.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -943,24 +1068,23 @@ struct MacSyncConfigurationView: View {
                 }.pickerStyle(.segmented)
             }
             }
-            MacSyncPanel("Cancellazioni, recupero e protezioni", icon: "shield", accent: false) {
+            HStack(alignment:.top,spacing:12) {
+            MacSyncPanel("Cancellazioni e recupero", icon: "arrow.triangle.2.circlepath") {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Cancellazioni speculari")
-                        .font(.headline)
                     MacSyncSwitchRow(
                         "Abilita cancellazioni speculari (autorizzazione persistente)",
                         isOn: Binding(get: { copy.mirrorEnabled }, set: {
                             copy.setMirrorEnabled($0, sources: model.configuredPairs())
                         })
                     )
-                    .disabled(copy.active || copy.seedBusy || copy.maintaining)
+                    .disabled(copy.active || copy.seedBusy || copy.maintaining || copy.interruptionRequested || runtime.savingSchedule)
 
                     if copy.mirrorEnabled {
                         MacSyncSwitchRow(
                             "Sposta i file eliminati nella cartella di recupero",
                             isOn: $copy.mirrorRecovery
                         )
-                        .disabled(copy.active || copy.seedBusy || copy.maintaining)
+                        .disabled(copy.active || copy.seedBusy || copy.maintaining || copy.interruptionRequested || runtime.savingSchedule)
 
                         if copy.mirrorRecovery {
                             HStack {
@@ -974,7 +1098,7 @@ struct MacSyncConfigurationView: View {
                                 }
                                 .labelsHidden()
                                 .frame(width: 210)
-                                .disabled(copy.active || copy.seedBusy || copy.maintaining)
+                                .disabled(copy.active || copy.seedBusy || copy.maintaining || copy.interruptionRequested || runtime.savingSchedule)
                             }
                             Text("Recupero gestito in .macsync-recovery nella destinazione. I file scaduti verranno rimossi nei cicli successivi, solo se la protezione del volume è valida.")
                                 .font(.caption2)
@@ -989,9 +1113,12 @@ struct MacSyncConfigurationView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    Divider()
+                    Text(copy.mirrorStatus).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                    Button("Apri cartella di recupero") { copy.revealRecoveryFolders(sources:model.configuredPairs()) }
+                }
+            }
+            MacSyncPanel("Protezioni facoltative",icon:"shield") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Protezioni facoltative — disattivate di default").font(.headline)
                         MacSyncSwitchRow("Limite numerico", isOn: $copy.mirrorProtections.absoluteEnabled)
                         Text("Blocca il ciclo se il numero di cancellazioni supera la soglia nella finestra mobile.").font(.caption).foregroundStyle(.secondary)
                         if copy.mirrorProtections.absoluteEnabled {
@@ -1024,31 +1151,24 @@ struct MacSyncConfigurationView: View {
                         if !copy.mirrorProtections.isValid {
                             Text("Valori consentiti: 1–1.000.000 elementi, 1–100%.").foregroundStyle(.orange)
                         }
-                        Text("Le soglie sono valutate per ciascuna coppia. Un'anomalia blocca tutta la sincronizzazione fino alla verifica manuale. Le protezioni tecniche non sono disattivabili.")
+                        Text("Un’anomalia blocca la sincronizzazione fino alla verifica manuale.")
                             .font(.caption2).foregroundStyle(.secondary)
                         Button("Esamina e rimuovi blocco di sicurezza…") {
                             copy.clearMirrorSafetyBlock()
                         }
                     }
-                    .disabled(copy.active || copy.seedBusy || copy.maintaining)
-                    Text(copy.mirrorStatus)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button("Apri cartella di recupero nel Finder") {
-                        copy.revealRecoveryFolders(sources: model.configuredPairs())
-                    }
-                    .font(.caption)
-                }
+                    .disabled(copy.active || copy.seedBusy || copy.maintaining || copy.interruptionRequested || runtime.savingSchedule)
+            }
             }
             MacSyncPanel("Informazioni", icon: "info.circle", accent: false) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("MacSync · v0.13.3 — candidato").font(.subheadline.weight(.semibold))
-                        Text("Solo archivi di prova fino al collaudo SMB.").font(.caption).foregroundStyle(.orange)
+                        Text("MacSync · v0.13.4").font(.subheadline.weight(.semibold))
+                        Text("Registro SQLite locale · Aggiornamenti manuali").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
                     Button("Esporta registro…") { copy.exportLog() }
+                    Button("Apri cartella app…") { NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL]) }
                 }
             }
         }
@@ -1231,11 +1351,12 @@ struct MacSyncSectionShell<Content: View>: View {
     let monitoring: Bool
     let next: Date?
     let activity: String?
+    let showHeader: Bool
     let controls: AnyView
     let content: Content
     @Environment(\.colorScheme) private var scheme
-    init(page: Binding<MacSyncPage>, monitoring: Bool, next: Date?, activity: String? = nil, controls: AnyView = AnyView(EmptyView()), @ViewBuilder content: () -> Content) {
-        self._page = page; self.monitoring = monitoring; self.next = next; self.activity = activity; self.controls = controls; self.content = content()
+    init(page: Binding<MacSyncPage>, monitoring: Bool, next: Date?, showHeader: Bool = false, activity: String? = nil, controls: AnyView = AnyView(EmptyView()), @ViewBuilder content: () -> Content) {
+        self._page = page; self.monitoring = monitoring; self.next = next; self.showHeader = showHeader; self.activity = activity; self.controls = controls; self.content = content()
     }
     var body: some View {
         HStack(spacing: 0) {
@@ -1275,8 +1396,8 @@ struct MacSyncSectionShell<Content: View>: View {
                 .background(MacSyncColors.sidebar(scheme))
             Divider()
             VStack(spacing: 0) {
+                if showHeader {
                 HStack {
-                    Label(activity ?? "Sincronizzazione", systemImage: monitoring ? "checkmark.circle" : "pause.circle").font(.subheadline.weight(.medium)).lineLimit(1)
                     controls
                     Spacer()
                     if let next {
@@ -1287,6 +1408,7 @@ struct MacSyncSectionShell<Content: View>: View {
                 }.padding(.horizontal, 16).padding(.vertical, 9)
                     .background(MacSyncColors.panel(scheme))
                 Divider()
+                }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
                         VStack(alignment: .leading, spacing: 3) {
@@ -1377,7 +1499,7 @@ private struct MacSyncStatusMenu: View {
             Text("MacSync").font(.headline)
             Text(model.monitoring ? "Sorgenti monitorate" : "Monitor non attivo")
                 .font(.caption).foregroundStyle(.secondary)
-            Text(copy.active ? "Copie di prova in esecuzione" : "Copie non attive")
+            Text(copy.active ? "Copie in esecuzione" : "Copie non attive")
                 .font(.caption).foregroundStyle(.secondary)
             Text(runtime.automaticStatus)
                 .font(.caption2).foregroundStyle(.secondary)

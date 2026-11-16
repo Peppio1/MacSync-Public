@@ -12,6 +12,24 @@ final class LocalInventoryTests: XCTestCase {
         return (base, source, database)
     }
 
+    func testRetiringRootsPreservesActiveQueueAndPhysicalFiles() throws {
+        let (base,root,db) = try temporaryFixture()
+        defer { try? FileManager.default.removeItem(at:base) }
+        try Data("one".utf8).write(to:root.appendingPathComponent("keep.jpg"))
+        let other = base.appendingPathComponent("other")
+        try FileManager.default.createDirectory(at:other,withIntermediateDirectories:false)
+        let file = other.appendingPathComponent("retired.jpg")
+        try Data("two".utf8).write(to:file)
+        let store = try LocalInventory(path:db.path)
+        _ = try store.reconcile(rootID:"keep",root:root)
+        _ = try store.reconcile(rootID:"retire",root:other)
+        try store.retireInactiveRoots(keeping:["keep"])
+        XCTAssertEqual(try store.itemCount(rootID:"keep"),1)
+        XCTAssertEqual(try store.itemCount(rootID:"retire"),0)
+        XCTAssertNil(try store.rootPath(rootID:"retire"))
+        XCTAssertEqual(try ChangeJournal(path:db.path).pending().map(\.rootID),["keep"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath:file.path))
+    }
     func testCancelledInventoryScanPreservesQueueAndCheckpoint() throws {
         let (base, root, db) = try temporaryFixture()
         defer { try? FileManager.default.removeItem(at: base) }

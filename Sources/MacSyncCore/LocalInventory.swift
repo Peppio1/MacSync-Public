@@ -312,6 +312,39 @@ public final class LocalInventory {
         }
     }
 
+    /// Retire only local inventory/unfinished jobs for explicitly removed
+    /// configuration roots. Never touches archive files or activity history.
+    public func retireInactiveRoots(keeping ids: Set<String>) throws {
+        guard !ids.isEmpty else { return }
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            let query = try prepare("SELECT root_id FROM watched_roots UNION SELECT root_id FROM file_inventory UNION SELECT root_id FROM change_queue WHERE completed=0;")
+            defer { sqlite3_finalize(query) }
+            var old: [String] = []
+            var code = sqlite3_step(query)
+            while code == SQLITE_ROW {
+                if let ptr = sqlite3_column_text(query,0) {
+                    let id = String(cString:ptr)
+                    if !ids.contains(id) { old.append(id) }
+                }
+                code = sqlite3_step(query)
+            }
+            guard code == SQLITE_DONE else { throw failure() }
+            for id in old {
+                for sql in ["DELETE FROM change_queue WHERE root_id=? AND completed=0;", "DELETE FROM file_inventory WHERE root_id=?;", "DELETE FROM watched_roots WHERE root_id=?;"] {
+                    let stmt = try prepare(sql)
+                    defer { sqlite3_finalize(stmt) }
+                    try bind(id,at:1,statement:stmt)
+                    guard sqlite3_step(stmt) == SQLITE_DONE else { throw failure() }
+                }
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
     public func pendingCount() throws -> Int {
         let statement = try prepare("SELECT COUNT(*) FROM change_queue WHERE completed=0;")
         defer { sqlite3_finalize(statement) }

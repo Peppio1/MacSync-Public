@@ -11,6 +11,10 @@ final class MountedCopyController: ObservableObject {
 
     init(previewOnly: Bool = false) {
         self.previewOnly = previewOnly
+        if !previewOnly {
+            UserDefaults.standard.set(automaticCopiesEnabled, forKey:"MacSync.autoCopiesEnabled.v2")
+            UserDefaults.standard.set(false, forKey:"MacSync.autoCopiesEnabled")
+        }
     }
 
     // Screenshot fixture: called only from the opt-in UI test. No real database access.
@@ -20,7 +24,7 @@ final class MountedCopyController: ObservableObject {
         mirrorEnabled = false; mirrorAuthorization = nil
         mirrorProtections = MirrorProtectionSettings(); mirrorRecovery = false; mirrorRetention = 30
         auditSettings = ArchiveAuditSettings()
-        status = "Archivio dimostrativo: destinazioni disponibili"
+        status = "Destinazioni disponibili"
         sessionStats = SyncDashboardStats(newFiles: 24, updatedFiles: 12, permanentlyDeleted: 1, movedToRecovery: 2, failed: 1, deferred: 4)
         lastCycleStats = sessionStats
         lastRecordedCycle = cycle
@@ -39,16 +43,16 @@ final class MountedCopyController: ObservableObject {
             progress.phase = "Verifica SHA-256"; progress.scannedFiles = 240; progress.scannedDirectories = 12
             progress.detectedBytes = 800000000; progress.compared = 96; progress.total = 240
             progress.bytesRead = 320000000; progress.currentPath = "Foto_caricate / IMG_0042.dng"
-            auditProgress = progress; auditStatus = "Verifica dimostrativa in corso"
+            auditProgress = progress; auditStatus = "Verifica in corso"
         }
     }
     @Published var status = "Copie ferme: puoi selezionare cartelle locali o SMB già montate."
     @Published var active = false
     @Published private(set) var nextScheduledRun: Date?
     var onConnectionCheck: (([String: DestinationAvailability], Date) -> Void)?
-    @Published var automaticCopiesEnabled = UserDefaults.standard.bool(forKey: "MacSync.autoCopiesEnabled") {
+    @Published var automaticCopiesEnabled = (UserDefaults.standard.object(forKey:"MacSync.autoCopiesEnabled.v2") as? Bool) ?? UserDefaults.standard.bool(forKey:"MacSync.autoCopiesEnabled") {
         didSet {
-            if !previewOnly { UserDefaults.standard.set(automaticCopiesEnabled, forKey: "MacSync.autoCopiesEnabled") }
+            if !previewOnly { UserDefaults.standard.set(automaticCopiesEnabled, forKey: "MacSync.autoCopiesEnabled.v2"); UserDefaults.standard.set(false, forKey:"MacSync.autoCopiesEnabled") }
         }
     }
     @Published private(set) var automaticSession = false
@@ -1240,6 +1244,11 @@ final class MountedCopyController: ObservableObject {
         guard let token = sessionCancellation, token.cancelCurrentCycle() else { return }
         interruptionRequested = true
         status = "Interruzione richiesta: attendo il prossimo punto sicuro."
+    }
+
+    /// Runs after the serial copy queue has drained, including any atomic transfer.
+    func afterWorkerStopped(_ completion: @escaping @MainActor () -> Void) {
+        queue.async { DispatchQueue.main.async { completion() } }
     }
 
     func stop() {

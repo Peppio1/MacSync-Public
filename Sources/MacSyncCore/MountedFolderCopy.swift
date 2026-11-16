@@ -53,6 +53,16 @@ public struct VolumeFingerprint: Equatable, Codable, Sendable {
         var info = statfs()
         let result = url.path.withCString { statfs($0, &info) }
         guard result == 0 else { throw MountedCopyError.rootUnavailable }
+        return fingerprint(from: &info)
+    }
+
+    public static func read(directoryDescriptor: Int32) throws -> VolumeFingerprint {
+        var info = statfs()
+        guard fstatfs(directoryDescriptor,&info) == 0 else { throw MountedCopyError.rootUnavailable }
+        return fingerprint(from:&info)
+    }
+
+    private static func fingerprint(from info: inout statfs) -> VolumeFingerprint {
         let fs = withUnsafePointer(to: &info.f_fstypename) { pointer in
             pointer.withMemoryRebound(to: CChar.self, capacity: 1) {
                 String(cString: $0)
