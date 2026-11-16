@@ -93,7 +93,7 @@ final class MacSyncUIPreviewTests: XCTestCase {
         host.displayIfNeeded()
         let bitmap = try XCTUnwrap(NSBitmapImageRep(
             bitmapDataPlanes: nil, pixelsWide: 1680, pixelsHigh: 840,
-            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
             colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
         ))
         bitmap.size = rect.size
