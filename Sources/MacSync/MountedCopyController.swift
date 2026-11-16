@@ -18,7 +18,7 @@ final class MountedCopyController: ObservableObject {
     }
 
     // Screenshot fixture: called only from the opt-in UI test. No real database access.
-    func populateScreenshotFixture(page: MacSyncPage, entries: [SyncLogEntry], cycle: SyncCycleRecord?) {
+    func populateScreenshotFixture(page: MacSyncPage, entries: [SyncLogEntry], cycle: SyncCycleRecord?, lastAudit: ArchiveAuditReport? = nil) {
         guard previewOnly else { return }
         automaticCopiesEnabled = true
         mirrorEnabled = false; mirrorAuthorization = nil
@@ -38,6 +38,8 @@ final class MountedCopyController: ObservableObject {
             progress.copiedBytes = 124000000; progress.copySeconds = 10
             liveProgress = progress
         } else if page == .audit {
+            auditReport = lastAudit
+            auditSettings.enabled = true; auditSettings.frequency = "weekly"; auditSettings.weekday = 2; auditSettings.hour = 8; auditSettings.minute = 0
             auditBusy = true; maintaining = true
             var progress = ArchiveAuditProgress(started: Date().addingTimeInterval(-30))
             progress.phase = "Verifica SHA-256"; progress.scannedFiles = 240; progress.scannedDirectories = 12

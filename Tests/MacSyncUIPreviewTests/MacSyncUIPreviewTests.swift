@@ -35,7 +35,25 @@ final class MacSyncUIPreviewTests: XCTestCase {
                     let now = Date()
                     try history.begin(id: "demo-cycle", sessionID: "demo-session", at: now.addingTimeInterval(-318))
                     try history.finish(id: "demo-cycle", at: now, seconds: 318, state: "partial")
-                    runtime.copy.populateScreenshotFixture(page: page, entries: try log.recent(), cycle: try history.cycles(limit: 1).first)
+                    var lastAudit: ArchiveAuditReport?
+                    if page == .audit {
+                        let source = scratch.appendingPathComponent("source").resolvingSymlinksInPath()
+                        let target = scratch.appendingPathComponent("target").resolvingSymlinksInPath()
+                        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+                        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+                        for (root, name, content) in [(source,"identico.dng","same"),(target,"identico.dng","same"),(source,"mancante.jpg","missing"),(source,"diverso.psd","new"),(target,"diverso.psd","old"),(target,"extra.jpg","extra")] {
+                            try Data(content.utf8).write(to: root.appendingPathComponent(name))
+                        }
+                        _ = try LocalInventory(path: db).reconcile(rootID: "preview", root: source)
+                        let mapping = try MountedFolderMapping(rootID: "preview", source: source, target: target)
+                        let report = try ArchiveAudit(journal: ChangeJournal(path: db), mappings: [mapping]).run(mode: .deep)
+                        XCTAssertEqual(report.count(.matching), 1)
+                        XCTAssertEqual(report.count(.missing), 1)
+                        XCTAssertEqual(report.count(.different), 1)
+                        XCTAssertEqual(report.count(.extra), 1)
+                        lastAudit = report
+                    }
+                    runtime.copy.populateScreenshotFixture(page: page, entries: try log.recent(), cycle: try history.cycles(limit: 1).first, lastAudit: lastAudit)
                     let screen = MacSyncConfigurationView(model: runtime.model, copy: runtime.copy, runtime: runtime, settings: runtime.settings, destinations: runtime.destinations, initialPage: page, previewScheme: scheme)
                         .allowsHitTesting(false)
                     try Self.render(screen, name: "page-\(pageKey(page))-\(suffix)", scheme: scheme, directory: directory, width: 1180, height: 820)

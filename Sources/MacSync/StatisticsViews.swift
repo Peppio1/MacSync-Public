@@ -440,131 +440,249 @@ private struct HistoryDetailsSheet:View {
     }
 }
 
-struct ArchiveAuditPanel:View {
-    @ObservedObject var copy:MountedCopyController
-    @ObservedObject var runtime:MacSyncRuntime
-    @ObservedObject var model:MacSyncViewModel
-    @State private var selectedFinding:AuditFindingKind?
-    @State private var showFindings=false
-    @State private var recognize=false
-    private var busy: Bool { copy.maintaining || copy.seedBusy || copy.interruptionRequested || runtime.savingSchedule }
-    var body:some View {
-        VStack(alignment:.leading,spacing:10) {
-            HStack(alignment:.top,spacing:10) {
-                VStack(alignment:.leading,spacing:10) {
-                    MacSyncPanel("Metodo di verifica",icon:"checkmark.shield") {
-                        Picker("Metodo",selection:$copy.auditSettings.mode) {
-                            Text("Rapida (metadati)").tag(ArchiveAuditMode.quick)
-                            Text("Approfondita (SHA-256)").tag(ArchiveAuditMode.deep)
-                        }.pickerStyle(.segmented).labelsHidden()
-                        Text(copy.auditSettings.mode == .quick ? "Confronta percorsi, dimensioni e date." : "Confronta il contenuto dei file; può leggere l’intero archivio via VPN.").font(.caption).foregroundStyle(.secondary)
-                    }.disabled(busy || copy.active)
-                    MacSyncPanel("Operazioni facoltative",icon:"slider.horizontal.3") {
-                        MacSyncSwitchRow("Accoda file mancanti e differenti",isOn:$copy.auditSettings.repair)
-                        Text("Prepara copie e aggiornamenti senza cancellare file.").font(.caption).foregroundStyle(.secondary)
-                        Divider()
-                        MacSyncSwitchRow("Riconosci i file già copiati",isOn:$recognize)
-                            .disabled(copy.auditSettings.mode != .deep)
-                        Text("Solo SHA-256, su richiesta manuale. Conferma separata per chiudere i job identici.").font(.caption).foregroundStyle(.secondary)
-                    }.disabled(busy || copy.active)
-                    MacSyncPanel("Programmazione",icon:"calendar") {
-                        MacSyncSwitchRow("Verifica automatica",isOn:$copy.auditSettings.enabled)
-                        if copy.auditSettings.enabled {
-                            Picker("Frequenza",selection:$copy.auditSettings.frequency) {
-                                Text("Giornaliera").tag("daily");Text("Settimanale").tag("weekly");Text("Mensile").tag("monthly")
-                            }
-                            if copy.auditSettings.frequency=="weekly" {
-                                Picker("Giorno",selection:$copy.auditSettings.weekday) {
-                                    ForEach(1...7,id:\.self){day in Text(Calendar.current.weekdaySymbols[day-1]).tag(day)}
-                                }
-                            } else if copy.auditSettings.frequency=="monthly" {
-                                Picker("Giorno",selection:$copy.auditSettings.monthDay) {
-                                    ForEach(1...28,id:\.self){Text(String($0)).tag($0)}
-                                }
-                            }
-                            HStack {
-                                Picker("Ora",selection:$copy.auditSettings.hour) { ForEach(0...23,id:\.self){Text(String(format:"%02d",$0)).tag($0)} }
-                                Picker("Minuti",selection:$copy.auditSettings.minute) { ForEach(0...59,id:\.self){Text(String(format:"%02d",$0)).tag($0)} }
-                            }
-                            if let next=runtime.nextAuditAt { Text("Prossima: \(macSyncDateTime(next))").font(.caption) }
-                        }
-                    }.disabled(busy || copy.active)
-                }.frame(maxWidth:.infinity,alignment:.topLeading)
-                VStack(alignment:.leading,spacing:10) {
-                    MacSyncPanel("Risultato ultima verifica",icon:"chart.bar.xaxis") {
-                        if let report=copy.auditReport {
-                            Text(macSyncDateTime(report.ended) + " · " + (report.mode == .deep ? "SHA-256" : "Rapida")).font(.caption).foregroundStyle(.secondary)
-                            Text("Elementi confrontati: \(report.findings.count)").font(.subheadline.weight(.medium))
-                            ForEach(AuditFindingKind.allCases,id:\.rawValue){kind in
-                                Button {
-                                    selectedFinding=kind;showFindings=true
-                                } label: {
-                                    HStack {
-                                        Text(kind.label).lineLimit(2)
-                                        Spacer(minLength:4)
-                                        Text(report.count(kind).formatted()).monospacedDigit().fontWeight(.semibold)
-                                    }
-                                }.buttonStyle(.plain)
-                            }
-                            Text("Durata: \(elapsedText(report.seconds)) · Accodati: \(report.queuedRepairs)").font(.caption)
-                            Button("Visualizza ultimo report…"){selectedFinding=nil;showFindings=true}
-                        } else {
-                            Text("Nessuna verifica completata").font(.caption).foregroundStyle(.secondary)
-                        }
-                        if copy.seedReady && !copy.seedBusy {
-                            Divider()
-                            Text("\(copy.seedVerifiedCount) file identici in coda").font(.subheadline.weight(.semibold))
-                            Text("Nessun file verrà modificato.").font(.caption).foregroundStyle(.secondary)
-                            Button("Conferma allineamento…") { copy.approveSeededFiles() }.buttonStyle(.borderedProminent).disabled(copy.active || busy)
-                            Button("Scarta riconoscimento") { copy.invalidateSeedReport() }.disabled(busy)
-                        }
-                        if copy.seedBusy {
-                            Text(copy.seedStatus).font(.caption)
-                            Button("Annulla conferma") { copy.cancelSeedVerification() }.buttonStyle(MacSyncStopStyle())
-                        } else if !copy.seedReady && copy.seedStatus.hasPrefix("Allineamento confermato") {
-                            Text(copy.seedStatus).font(.caption)
-                        }
-                    }
-                    MacSyncPanel("Manutenzione temporanei",icon:"wrench.and.screwdriver") {
-                        Text("Individua e rimuove file temporanei lasciati da copie interrotte. Usala a copie ferme.").font(.caption).foregroundStyle(.secondary)
-                        HStack {
-                            Button("Verifica") { copy.inspectStaging(sources:model.configuredPairs()) }
-                            Button("Pulisci…") { copy.cleanupStaging(sources:model.configuredPairs()) }
-                        }.disabled(copy.active || busy)
-                        if copy.maintaining && !copy.auditBusy { Button("Annulla manutenzione") { copy.cancelMaintenance() }.buttonStyle(MacSyncStopStyle()) }
-                        Text(copy.maintenanceStatus).font(.caption).foregroundStyle(.secondary).lineLimit(3).help(copy.maintenanceStatus)
-                    }
-                }.frame(maxWidth:.infinity,alignment:.topLeading)
+struct ArchiveAuditPanel: View {
+    @ObservedObject var copy: MountedCopyController
+    @ObservedObject var runtime: MacSyncRuntime
+    @ObservedObject var model: MacSyncViewModel
+    @State private var selectedFinding: AuditFindingKind?
+    @State private var showFindings = false
+    @State private var recognize = false
+
+    private var busy: Bool {
+        copy.maintaining || copy.seedBusy || copy.interruptionRequested || runtime.savingSchedule
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                configuration.frame(maxWidth: .infinity, alignment: .topLeading)
+                VStack(alignment: .leading, spacing: 10) {
+                    operation
+                    lastResult
+                }.frame(maxWidth: .infinity, alignment: .topLeading)
             }
-            MacSyncPanel("Verifica",icon:"arrow.triangle.2.circlepath",accent:true) {
-                HStack {
-                    Text(copy.auditSettings.repair ? (recognize ? "Verifica e riconoscimento" : "Verifica e riallineamento") : (recognize ? "Verifica e riconoscimento" : "Modalità diagnostica")).font(.subheadline.weight(.semibold))
-                    Spacer()
-                    if copy.auditBusy { Button("Annulla verifica"){copy.cancelArchiveAudit()}.buttonStyle(MacSyncStopStyle()) }
-                    else if copy.active {
-                        Button("Sospendi copie") { runtime.stopCopiesForCurrentLaunch() }
-                    } else {
-                        Button("Avvia verifica"){
-                            if recognize { runtime.stopCopiesForCurrentLaunch() }
-                            copy.startArchiveAudit(sources:model.configuredPairs(),interactive:true,recognizeExisting:recognize)
-                        }.buttonStyle(.borderedProminent).disabled(busy || !model.monitoring || copy.liveProgress != nil || copy.seedReady)
-                    }
-                }
-                if let p=copy.auditProgress { AuditProgressView(progress:p) }
-                else { Text(copy.auditStatus).font(.caption).foregroundStyle(.secondary).lineLimit(2).help(copy.auditStatus) }
-                if recognize && !copy.auditBusy { Text("Il riconoscimento sospende la pianificazione delle copie fino alla conferma e alla riattivazione manuale.").font(.caption).foregroundStyle(.secondary) }
-                Text("I file presenti solo nella destinazione vengono segnalati, mai eliminati.").font(.caption).foregroundStyle(.secondary)
-            }
+            maintenance
         }
-        .onChange(of:copy.auditSettings){value in
-            if value.mode == .quick { recognize=false }
+        .onChange(of: copy.auditSettings) { value in
+            if value.mode == .quick { recognize = false }
             runtime.scheduleArchiveAudit()
         }
-        .sheet(isPresented:$showFindings){
-            if let report=copy.auditReport { AuditResultSheet(model:model,report:report,kind:selectedFinding) }
+        .sheet(isPresented: $showFindings) {
+            if let report = copy.auditReport {
+                AuditResultSheet(model: model, report: report, kind: selectedFinding)
+            }
+        }
+    }
+
+    private var configuration: some View {
+        MacSyncPanel("Configurazione verifica", icon: "gearshape") {
+            Text("Metodo di verifica").font(.subheadline.weight(.semibold))
+            Picker("Metodo", selection: $copy.auditSettings.mode) {
+                Text("Rapida (metadati)").tag(ArchiveAuditMode.quick)
+                Text("Approfondita (SHA-256)").tag(ArchiveAuditMode.deep)
+            }.pickerStyle(.segmented).labelsHidden()
+            Text(copy.auditSettings.mode == .quick
+                ? "Confronta percorsi, dimensioni e date."
+                : "Confronta il contenuto dei file tramite SHA-256; può leggere l’intero archivio via VPN.")
+                .font(.caption).foregroundStyle(.secondary)
+            Divider()
+            MacSyncSwitchRow("Accoda file mancanti e differenti", isOn: $copy.auditSettings.repair)
+            Text("Prepara le copie e gli aggiornamenti necessari.").font(.caption).foregroundStyle(.secondary)
+            Divider()
+            MacSyncSwitchRow("Riconosci i file già copiati", isOn: $recognize)
+                .disabled(copy.auditSettings.mode != .deep)
+            Text("Solo SHA-256 e avvio manuale. Esclude dalla coda i file identici dopo conferma. Le copie rimangono sospese fino alla riattivazione manuale.")
+                .font(.caption).foregroundStyle(.secondary)
+            Divider()
+            MacSyncSwitchRow("Programma verifica automatica", isOn: $copy.auditSettings.enabled)
+            Text("Esegue periodicamente la verifica, senza riconoscimento automatico.").font(.caption).foregroundStyle(.secondary)
+            if copy.auditSettings.enabled {
+                scheduleControls
+                if let next = runtime.nextAuditAt {
+                    Text("Prossima: \(macSyncDateTime(next))").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Text("I file presenti solo nella destinazione sono segnalati, mai eliminati.")
+                .font(.caption).foregroundStyle(.secondary)
+        }.disabled(busy || copy.active)
+    }
+
+    private var scheduleControls: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Picker("Frequenza", selection: $copy.auditSettings.frequency) {
+                    Text("Giornaliera").tag("daily")
+                    Text("Settimanale").tag("weekly")
+                    Text("Mensile").tag("monthly")
+                }
+                if copy.auditSettings.frequency == "weekly" {
+                    Picker("Giorno", selection: $copy.auditSettings.weekday) {
+                        ForEach(1...7, id: \.self) { day in
+                            Text(Calendar.current.weekdaySymbols[day-1]).tag(day)
+                        }
+                    }
+                } else if copy.auditSettings.frequency == "monthly" {
+                    Picker("Giorno", selection: $copy.auditSettings.monthDay) {
+                        ForEach(1...28, id: \.self) { Text(String($0)).tag($0) }
+                    }
+                }
+            }
+            HStack {
+                Picker("Ora", selection: $copy.auditSettings.hour) {
+                    ForEach(0...23, id: \.self) { Text(String(format: "%02d", $0)).tag($0) }
+                }
+                Picker("Minuti", selection: $copy.auditSettings.minute) {
+                    ForEach(0...59, id: \.self) { Text(String(format: "%02d", $0)).tag($0) }
+                }
+            }
+        }.font(.caption)
+    }
+
+    private var operation: some View {
+        MacSyncPanel("Stato e avanzamento", icon: "arrow.triangle.2.circlepath", accent: true) {
+            if let p = copy.auditProgress {
+                CompactArchiveAuditProgress(progress: p)
+            } else {
+                Text(copy.auditBusy ? "Verifica in corso" : copy.seedBusy ? "Conferma in corso" : "Nessuna verifica in corso")
+                    .font(.subheadline.weight(.semibold))
+                Text(copy.auditStatus).font(.caption).foregroundStyle(.secondary).lineLimit(2).help(copy.auditStatus)
+            }
+            if copy.seedBusy {
+                Text(copy.seedStatus).font(.caption).lineLimit(3).help(copy.seedStatus)
+            }
+            HStack {
+                Spacer(minLength: 0)
+                if copy.auditBusy {
+                    Button("Annulla verifica") { copy.cancelArchiveAudit() }.buttonStyle(MacSyncStopStyle())
+                } else if copy.seedBusy {
+                    Button("Annulla conferma") { copy.cancelSeedVerification() }.buttonStyle(MacSyncStopStyle())
+                } else if copy.active {
+                    Button("Sospendi copie") { runtime.stopCopiesForCurrentLaunch() }
+                } else {
+                    Button("Avvia verifica") {
+                        if recognize { runtime.stopCopiesForCurrentLaunch() }
+                        copy.startArchiveAudit(sources: model.configuredPairs(), interactive: true, recognizeExisting: recognize)
+                    }.buttonStyle(.borderedProminent)
+                        .disabled(busy || !model.monitoring || copy.liveProgress != nil || copy.seedReady)
+                }
+            }
+        }
+    }
+
+    private var lastResult: some View {
+        MacSyncPanel("Ultima verifica", icon: "chart.bar.xaxis") {
+            if let report = copy.auditReport {
+                resultRow("Data e ora", macSyncDateTime(report.ended))
+                resultRow("Metodo", report.mode == .deep ? "SHA-256" : "Rapida (metadati)")
+                ForEach(AuditFindingKind.allCases, id: \.rawValue) { kind in
+                    Button {
+                        selectedFinding = kind; showFindings = true
+                    } label: {
+                        resultRow(kind.label, report.count(kind).formatted())
+                    }.buttonStyle(.plain).help("Mostra dettaglio")
+                }
+                resultRow("Durata", elapsedText(report.seconds))
+                resultRow("Accodati", report.queuedRepairs.formatted())
+                Button("Visualizza report…") {
+                    selectedFinding = nil; showFindings = true
+                }.frame(maxWidth: .infinity)
+            } else {
+                Text("Nessuna verifica completata").font(.caption).foregroundStyle(.secondary)
+                Button("Visualizza report…") {}.disabled(true)
+            }
+            if copy.seedReady && !copy.seedBusy {
+                Divider()
+                Text("\(copy.seedVerifiedCount) file identici in coda").font(.subheadline.weight(.semibold))
+                Text("Nessun file verrà modificato.").font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("Conferma allineamento…") { copy.approveSeededFiles() }
+                        .buttonStyle(.borderedProminent).disabled(copy.active || busy)
+                    Button("Scarta") { copy.invalidateSeedReport() }.disabled(busy)
+                }
+            } else if !copy.seedBusy && copy.seedStatus.hasPrefix("Allineamento confermato") {
+                Text(copy.seedStatus).font(.caption).lineLimit(3).help(copy.seedStatus)
+            }
+        }
+    }
+
+    private func resultRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(label).font(.caption).lineLimit(2)
+            Spacer(minLength: 4)
+            Text(value).font(.caption.weight(.semibold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.8)
+        }
+    }
+
+    private var maintenance: some View {
+        MacSyncPanel("Manutenzione temporanei", icon: "wrench.and.screwdriver") {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Individua e rimuove i file temporanei lasciati da copie interrotte. Usala a copie ferme.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text(copy.maintenanceStatus).font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(2).help(copy.maintenanceStatus)
+                }
+                Spacer(minLength: 4)
+                if copy.maintaining && !copy.auditBusy {
+                    Button("Annulla manutenzione") { copy.cancelMaintenance() }.buttonStyle(MacSyncStopStyle())
+                } else {
+                    HStack {
+                        Button("Verifica") { copy.inspectStaging(sources: model.configuredPairs()) }
+                        Button("Pulisci…") { copy.cleanupStaging(sources: model.configuredPairs()) }
+                    }.disabled(copy.active || busy)
+                }
+            }
         }
     }
 }
+
+/// Compact audit-only presentation. Inventory progress keeps its existing view.
+private struct CompactArchiveAuditProgress: View {
+    let progress: ArchiveAuditProgress
+    private var determinate: Bool {
+        progress.total > 0 && !progress.phase.hasPrefix("Analisi")
+    }
+    var body: some View {
+        TimelineView(.periodic(from: progress.started, by: 1)) { context in
+            let elapsed = max(0.001, context.date.timeIntervalSince(progress.started))
+            let fraction = determinate ? max(0, min(0.99, Double(progress.compared) / Double(progress.total))) : 0
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text(progress.phase).font(.subheadline.weight(.semibold))
+                    Spacer()
+                    if determinate { Text("\(Int(fraction * 100))%").monospacedDigit().bold() }
+                }
+                if determinate {
+                    MacSyncLinearProgress(value: fraction)
+                    Text("\(progress.compared) / \(progress.total) elementi confrontati").font(.caption)
+                } else { ProgressView().controlSize(.small) }
+                Divider()
+                HStack(alignment: .top, spacing: 5) {
+                    metric("Tempo trascorso", elapsedText(elapsed))
+                    Divider().frame(height: 32)
+                    metric("Velocità media", determinate
+                        ? SyncLiveProgress.formatRate(Double(progress.bytesRead) / elapsed)
+                        : "\(Int(Double(progress.scannedFiles) / elapsed)) file/s")
+                    Divider().frame(height: 32)
+                    metric("Dati letti", sizeText(progress.bytesRead))
+                }
+                Text("File: \(progress.scannedFiles) · Cartelle: \(progress.scannedDirectories) · \(sizeText(progress.detectedBytes))")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                if !progress.currentPath.isEmpty {
+                    Text("File corrente: " + progress.currentPath).font(.caption)
+                        .lineLimit(1).truncationMode(.middle).help(progress.currentPath)
+                }
+            }
+        }
+    }
+    private func metric(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.8)
+            Text(value).font(.system(size: 14, weight: .semibold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 private struct AuditResultSheet:View {
     @ObservedObject var model:MacSyncViewModel
     let report:ArchiveAuditReport
