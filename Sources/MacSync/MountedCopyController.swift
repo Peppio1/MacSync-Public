@@ -219,7 +219,8 @@ final class MountedCopyController: ObservableObject {
     private var mirrorCancellation: MirrorDeletionCancellation?
     private var sessionCancellation: MirrorDeletionCancellation?
 
-    private static func databaseURL() throws -> URL {
+    // Uses only Foundation filesystem APIs; no main-actor state.
+    nonisolated private static func databaseURL() throws -> URL {
         let support = try FileManager.default.url(
             for: .applicationSupportDirectory, in: .userDomainMask,
             appropriateFor: nil, create: true
@@ -705,7 +706,7 @@ final class MountedCopyController: ObservableObject {
                     )
                     // Only the SQLite activity table is pruned, never file
                     // inventory, queue, photographs, backups or staging.
-                    try? log.prune(retainNewest: 20_000, maxAgeDays: 90)
+                    _ = try? log.prune(retainNewest: 20_000, maxAgeDays: 90)
                     let result = (summary.interrupted
                         ? "Ciclo interrotto: " : "Ultimo ciclo: ") + "\(summary.copied) copie, "
                         + "\(summary.deferred) rimandate, \(summary.failed) errori, "

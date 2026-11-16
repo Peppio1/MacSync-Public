@@ -1,0 +1,52 @@
+name: macOS UI Preview
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'Package.swift'
+      - 'Sources/MacSync/**'
+      - 'Sources/MacSyncCore/ArchiveAudit.swift'
+      - 'Tests/MacSyncUIPreviewTests/**'
+      - '.github/workflows/macos-ui-preview.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macsync-ui-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  render:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Render production SwiftUI components
+        env:
+          MACSYNC_UI_PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
+        run: swift test --filter MacSyncUIPreviewTests
+      - name: Check six PNG artifacts
+        env:
+          PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
+        run: |
+          set -euo pipefail
+          for component in folders summary audit; do
+            for appearance in light dark; do
+              file="$PREVIEW_DIR/$component-$appearance.png"
+              test -s "$file"
+              sips -g pixelWidth -g pixelHeight "$file"
+              test "$(sips -g pixelWidth "$file" | awk '/pixelWidth:/{print $2}')" = 1680
+              test "$(sips -g pixelHeight "$file" | awk '/pixelHeight:/{print $2}')" = 840
+            done
+          done
+      - uses: actions/upload-artifact@v6
+        with:
+          name: MacSync-UI-Previews
+          path: ${{ runner.temp }}/macsync-ui-previews/*.png
+          if-no-files-found: error
+          retention-days: 7

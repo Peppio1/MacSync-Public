@@ -18,7 +18,8 @@ public enum SeedVerificationError: Error, LocalizedError {
     }
 }
 
-public final class SeedVerificationCancellation {
+// All mutable state is protected by the private NSLock.
+public final class SeedVerificationCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
 
@@ -38,7 +39,7 @@ public final class SeedVerificationCancellation {
 /// A conservative lstat fingerprint; a successful hash is valid only while
 /// both files retain these attributes. mtime + ctime protect against edits
 /// that preserve size and modification time.
-public struct SeedFileFingerprint: Equatable {
+public struct SeedFileFingerprint: Equatable, Sendable {
     public let device: UInt64
     public let inode: UInt64
     public let size: Int64
@@ -52,7 +53,7 @@ public struct SeedFileFingerprint: Equatable {
     }
 }
 
-public struct SeedVerifiedMatch {
+public struct SeedVerifiedMatch: Sendable {
     public let jobID: Int64
     public let rootID: String
     public let relativePath: String
@@ -61,7 +62,7 @@ public struct SeedVerifiedMatch {
     public let verifiedBytes: Int64
 }
 
-public struct SeedVerificationProgress {
+public struct SeedVerificationProgress: Sendable {
     public let inspected: Int
     public let verified: Int
     public let missingOrDifferent: Int
@@ -71,7 +72,7 @@ public struct SeedVerificationProgress {
     public let currentPath: String
 }
 
-public struct SeedVerificationReport {
+public struct SeedVerificationReport: Sendable {
     public let matches: [SeedVerifiedMatch]
     public let inspected: Int
     public let missingOrDifferent: Int

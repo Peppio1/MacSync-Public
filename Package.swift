@@ -19,6 +19,10 @@ let package = Package(
         .testTarget(
             name: "MacSyncCoreTests",
             dependencies: ["MacSyncCore"]
+        ),
+        .testTarget(
+            name: "MacSyncUIPreviewTests",
+            dependencies: ["MacSync", "MacSyncCore"]
         )
     ]
 )

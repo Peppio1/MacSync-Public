@@ -222,7 +222,7 @@ final class MacSyncViewModel: ObservableObject {
     }
 }
 
-private struct FolderDropZone: View {
+struct FolderDropZone: View {
     let title: String
     let path: String
     let choose: () -> Void
@@ -278,7 +278,7 @@ private struct FolderDropZone: View {
 }
 
 
-private struct SyncSummaryMetric: View {
+struct SyncSummaryMetric: View {
     let title: String
     let count: Int
     let symbol: String
