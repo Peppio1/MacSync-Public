@@ -73,13 +73,51 @@ final class MacSyncUIPreviewTests: XCTestCase {
         .frame(width: 840, height: 420, alignment: .topLeading)
         .background(background)
         .environment(\.colorScheme, scheme)
-        let renderer = ImageRenderer(content: canvas)
-        renderer.proposedSize = ProposedViewSize(width: 840, height: 420)
-        renderer.scale = 2
-        let image = try XCTUnwrap(renderer.cgImage, "SwiftUI did not produce an image for \(name)")
-        XCTAssertEqual(image.width, 1680)
-        XCTAssertEqual(image.height, 840)
-        let png = try XCTUnwrap(NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]))
+        // Synthetic fixture window; no MacSync runtime is started.
+        _ = NSApplication.shared
+        let rect = NSRect(x: 0, y: 0, width: 840, height: 420)
+        let host = NSHostingView(rootView: canvas)
+        host.frame = rect
+        let appearance = try XCTUnwrap(NSAppearance(named: scheme == .dark ? .darkAqua : .aqua))
+        let window = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.appearance = appearance
+        host.appearance = appearance
+        window.contentView = host
+        defer { window.orderOut(nil); window.contentView = nil; window.close() }
+        window.orderFrontRegardless()
+        host.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: 1680, pixelsHigh: 840,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ))
+        bitmap.size = rect.size
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+        XCTAssertEqual(bitmap.pixelsWide, 1680)
+        XCTAssertEqual(bitmap.pixelsHigh, 840)
+        var yellow = 0, red = 0, samples = 0
+        var darkest: CGFloat = 1, brightest: CGFloat = 0
+        for y in stride(from: 0, to: bitmap.pixelsHigh, by: 8) {
+            for x in stride(from: 0, to: bitmap.pixelsWide, by: 8) {
+                guard let c = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                samples += 1
+                let r = c.redComponent, g = c.greenComponent, b = c.blueComponent
+                let luminance = (r + g + b) / 3
+                darkest = min(darkest, luminance)
+                brightest = max(brightest, luminance)
+                if r > 0.8 && g > 0.55 && b < 0.2 { yellow += 1 }
+                if r > 0.75 && g < 0.4 && b < 0.4 { red += 1 }
+            }
+        }
+        XCTAssertGreaterThan(samples, 0)
+        XCTAssertGreaterThan(brightest - darkest, 0.15, "Blank capture: \(name)")
+        XCTAssertFalse(yellow > samples / 100 && red > samples / 500, "Unsupported control placeholder: \(name)")
+        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
         try png.write(to: directory.appendingPathComponent(name + ".png"), options: .atomic)
     }
 }

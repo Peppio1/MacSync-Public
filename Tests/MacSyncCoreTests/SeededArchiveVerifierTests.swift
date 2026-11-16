@@ -192,4 +192,72 @@ final class SeededArchiveVerifierTests: XCTestCase {
         ))
         XCTAssertEqual(try f.journal.pending().count, 40)
     }
+
+    func testSessionReopensJournalForExplicitApproval() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let src = f.source.appendingPathComponent("same.jpg")
+        let dst = f.target.appendingPathComponent("same.jpg")
+        try write("identical", to: src)
+        try write("identical", to: dst)
+        try initializeInventory(f)
+        let session = try SeededArchiveSession(database: f.db, mappings: [f.mapping])
+        let report = try session.verify()
+        XCTAssertEqual(report.verifiedCount, 1)
+        XCTAssertEqual(try f.journal.pending().count, 1)
+        let before = try SeededArchiveVerifier.fingerprint(dst)
+        XCTAssertEqual(try session.approve(report: report), 1)
+        XCTAssertTrue(try f.journal.pending().isEmpty)
+        XCTAssertEqual(try SeededArchiveVerifier.fingerprint(dst), before)
+    }
+
+    func testSessionRejectsNewDatabaseAtSamePath() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let db = f.base.appendingPathComponent("replaceable.sqlite")
+        func createDatabase(_ url: URL) throws {
+            let journal = try ChangeJournal(path: url.path)
+            _ = try journal.databaseIdentity()
+        }
+        try createDatabase(db)
+        let session = try SeededArchiveSession(database: db, mappings: [f.mapping])
+        let report = try session.verify()
+        try FileManager.default.moveItem(at: db, to: f.base.appendingPathComponent("previous.sqlite"))
+        try createDatabase(db)
+        XCTAssertThrowsError(try session.approve(report: report))
+        XCTAssertThrowsError(try session.verify())
+    }
+
+    func testSessionDoesNotAcknowledgeNewerEventAcrossConnections() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let src = f.source.appendingPathComponent("edited.jpg")
+        let dst = f.target.appendingPathComponent("edited.jpg")
+        try write("original", to: src)
+        try write("original", to: dst)
+        try initializeInventory(f)
+        let session = try SeededArchiveSession(database: f.db, mappings: [f.mapping])
+        let report = try session.verify()
+        XCTAssertEqual(report.verifiedCount, 1)
+        try write("changed contents", to: src)
+        let inventory = try LocalInventory(path: f.db.path)
+        _ = try inventory.reconcile(rootID: "photos", root: f.source, subtree: src)
+        XCTAssertEqual(try session.approve(report: report), 0)
+        XCTAssertTrue(try f.journal.pending().contains { $0.relativePath == "edited.jpg" })
+        XCTAssertEqual(try String(contentsOf: dst, encoding: .utf8), "original")
+    }
+
+    func testSessionApprovalCancellationLeavesQueueUnchanged() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        try write("identical", to: f.source.appendingPathComponent("same.jpg"))
+        try write("identical", to: f.target.appendingPathComponent("same.jpg"))
+        try initializeInventory(f)
+        let session = try SeededArchiveSession(database: f.db, mappings: [f.mapping])
+        let report = try session.verify()
+        let cancellation = SeedVerificationCancellation()
+        cancellation.cancel()
+        XCTAssertThrowsError(try session.approve(report: report, cancellation: cancellation))
+        XCTAssertEqual(try f.journal.pending().count, 1)
+    }
 }

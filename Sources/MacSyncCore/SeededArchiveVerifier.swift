@@ -298,3 +298,77 @@ public final class SeededArchiveVerifier {
         return Data(hash.finalize())
     }
 }
+
+
+/// Immutable handoff. The verifier and its SQLite connection live only inside
+/// each synchronous worker operation, never in the UI.
+public struct SeededArchiveSession: Sendable {
+    private let database: URL
+    private let mappings: [MountedFolderMapping]
+    private let databaseID: String
+    private let device: UInt64
+    private let inode: UInt64
+
+    public init(database: URL, mappings: [MountedFolderMapping]) throws {
+        let identity = try Self.fileIdentity(database)
+        let journal = try ChangeJournal(path: database.path)
+        let id = try journal.databaseIdentity()
+        let after = try Self.fileIdentity(database)
+        guard identity == after else { throw Self.changedDatabase() }
+        self.database = database
+        self.mappings = mappings
+        self.databaseID = id
+        self.device = identity.device
+        self.inode = identity.inode
+    }
+
+    private static func changedDatabase() -> JournalError {
+        .database("Database di sincronizzazione cambiato: ripetere la verifica SHA-256")
+    }
+
+    private static func fileIdentity(_ url: URL) throws -> (device: UInt64, inode: UInt64) {
+        var info = stat()
+        guard url.path.withCString({ lstat($0, &info) }) == 0,
+              (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG) else {
+            throw changedDatabase()
+        }
+        return (UInt64(bitPattern: Int64(info.st_dev)), UInt64(info.st_ino))
+    }
+
+    private func checkFileIdentity() throws {
+        let current = try Self.fileIdentity(database)
+        guard current.device == device, current.inode == inode else {
+            throw Self.changedDatabase()
+        }
+    }
+
+    private func openJournal() throws -> ChangeJournal {
+        try checkFileIdentity()
+        let journal = try ChangeJournal(path: database.path)
+        guard try journal.databaseIdentity() == databaseID else {
+            throw Self.changedDatabase()
+        }
+        try checkFileIdentity()
+        return journal
+    }
+
+    public func verify(
+        cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
+        progress: ((SeedVerificationProgress) -> Void)? = nil
+    ) throws -> SeedVerificationReport {
+        let journal = try openJournal()
+        let verifier = try SeededArchiveVerifier(journal: journal, mappings: mappings)
+        let report = try verifier.verify(cancellation: cancellation, progress: progress)
+        try checkFileIdentity()
+        return report
+    }
+
+    public func approve(
+        report: SeedVerificationReport,
+        cancellation: SeedVerificationCancellation = SeedVerificationCancellation()
+    ) throws -> Int {
+        let journal = try openJournal()
+        let verifier = try SeededArchiveVerifier(journal: journal, mappings: mappings)
+        return try verifier.approve(report: report, cancellation: cancellation)
+    }
+}

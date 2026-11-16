@@ -210,7 +210,7 @@ final class MountedCopyController: ObservableObject {
         auditStatus = "Annullamento richiesto"
     }
     private var seedReport: SeedVerificationReport?
-    private var seedVerifier: SeededArchiveVerifier?
+    private var seedSession: SeededArchiveSession?
     private var seedCancel: SeedVerificationCancellation?
     private var maintenanceCandidates: [(mapping: MountedFolderMapping, inspection: StagingInspection)] = []
 
@@ -823,25 +823,24 @@ final class MountedCopyController: ObservableObject {
             guard FileManager.default.fileExists(atPath: database.path) else {
                 throw JournalError.database("Avvia prima il monitoraggio locale")
             }
-            let journal = try ChangeJournal(path: database.path)
-            let verifier = try SeededArchiveVerifier(journal: journal, mappings: mappings)
             let cancellation = SeedVerificationCancellation()
             seedReport = nil
-            seedVerifier = nil
+            seedSession = nil
             seedCancel = cancellation
             seedReady = false
             seedBusy = true
             seedVerifiedCount = 0
             seedInspectedCount = 0
             seedReadBytes = 0
-            seedTotalJobs = try journal.plannedUploadCount()
+            seedTotalJobs = 0
             seedStartedAt = Date()
             seedCurrentPath = ""
             seedStatus = "Analisi SHA-256 in corso (lettura locale e SMB)…"
 
             queue.async { [weak self] in
                 do {
-                    let report = try verifier.verify(
+                    let session = try SeededArchiveSession(database: database, mappings: mappings)
+                    let report = try session.verify(
                         cancellation: cancellation,
                         progress: { p in
                             DispatchQueue.main.async { [weak self] in
@@ -864,7 +863,7 @@ final class MountedCopyController: ObservableObject {
                             return
                         }
                         self.seedReport = report
-                        self.seedVerifier = verifier
+                        self.seedSession = session
                         self.seedReady = !report.matches.isEmpty
                         self.seedVerifiedCount = report.verifiedCount
                         self.seedInspectedCount = report.inspected
@@ -880,7 +879,7 @@ final class MountedCopyController: ObservableObject {
                         self?.seedBusy = false
                         self?.seedReady = false
                         self?.seedReport = nil
-                        self?.seedVerifier = nil
+                        self?.seedSession = nil
                         self?.seedStatus = cancellation.isCancelled
                             ? "Verifica annullata; la coda è invariata"
                             : "Verifica non riuscita: " + error.localizedDescription
@@ -900,9 +899,10 @@ final class MountedCopyController: ObservableObject {
     /// Only verified matches can be acknowledged. No copy/delete is issued.
     func approveSeededFiles() {
         guard !active && !seedBusy && !maintaining,
-              let report = seedReport, let verifier = seedVerifier,
+              let report = seedReport, let session = seedSession,
               !report.matches.isEmpty else { return }
 
+        let previousCancellation = seedCancel
         let confirmation = NSAlert()
         confirmation.alertStyle = .warning
         confirmation.messageText = "Confermare \(report.matches.count) file già identici?"
@@ -914,7 +914,10 @@ final class MountedCopyController: ObservableObject {
         """
         confirmation.addButton(withTitle: "Conferma allineamento SQLite")
         confirmation.addButton(withTitle: "Annulla")
-        guard confirmation.runModal() == .alertFirstButtonReturn else { return }
+        guard confirmation.runModal() == .alertFirstButtonReturn,
+              !active && !seedBusy && !maintaining,
+              seedSession != nil, seedCancel === previousCancellation,
+              previousCancellation?.isCancelled == false else { return }
         let cancellation = SeedVerificationCancellation()
         seedCancel = cancellation
         seedBusy = true
@@ -924,7 +927,7 @@ final class MountedCopyController: ObservableObject {
         seedStatus = "Conferma in corso (senza modificare file)…"
         queue.async { [weak self] in
             do {
-                let acknowledged = try verifier.approve(
+                let acknowledged = try session.approve(
                     report: report, cancellation: cancellation
                 )
                 let db = try Self.databaseURL()
@@ -937,7 +940,7 @@ final class MountedCopyController: ObservableObject {
                     self?.seedBusy = false
                     self?.seedReady = false
                     self?.seedReport = nil
-                    self?.seedVerifier = nil
+                    self?.seedSession = nil
                     self?.seedStatus = "Allineamento confermato: \(acknowledged) job "
                         + "chiusi in SQLite; \(report.matches.count - acknowledged) "
                         + "rimasti in coda perché cambiati o non più validi. "
@@ -949,7 +952,7 @@ final class MountedCopyController: ObservableObject {
                     self?.seedBusy = false
                     self?.seedReady = false
                     self?.seedReport = nil
-                    self?.seedVerifier = nil
+                    self?.seedSession = nil
                     self?.seedStatus = cancellation.isCancelled
                         ? "Conferma annullata: nessun job SHA-256 modificato"
                         : "Conferma non riuscita: " + error.localizedDescription
@@ -961,7 +964,7 @@ final class MountedCopyController: ObservableObject {
     func invalidateSeedReport() {
         seedCancel?.cancel()
         seedReport = nil
-        seedVerifier = nil
+        seedSession = nil
         seedReady = false
         if !seedBusy {
             seedStatus = "Cartelle cambiate: eseguire una nuova verifica SHA-256"
