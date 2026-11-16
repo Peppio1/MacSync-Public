@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 import Darwin
+import SQLite3
 @testable import MacSyncCore
 
 final class OperationalSafetyTests: XCTestCase {
@@ -171,6 +172,54 @@ final class OperationalSafetyTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf:sidecar),other)
         XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath:base.path)
             .filter { $0.hasPrefix(".backup-") }.isEmpty)
+    }
+    func testVacuumBackupRetainsIdentityCompletedJobsAndAutoincrementSequence() throws {
+        let (base,_,_,db) = try fixture()
+        defer { try? FileManager.default.removeItem(at:base) }
+        let journal = try ChangeJournal(path:db.path)
+        let identity = try journal.databaseIdentity()
+        let completed = try journal.enqueue(rootID:"r",relativePath:"completed.jpg",kind:.upsert)
+        try journal.markCompleted(id:completed)
+        let pending = try journal.enqueue(rootID:"r",relativePath:"pending.jpg",kind:.upsert)
+        let removed = try journal.enqueue(rootID:"r",relativePath:"purged.jpg",kind:.upsert)
+        // Simulate a future legitimate purge leaving sqlite_sequence ahead
+        // of MAX(id). Reusing removed IDs after restore would be unsafe.
+        do {
+            var handle: OpaquePointer?
+            let rc = sqlite3_open_v2(db.path,&handle,SQLITE_OPEN_READWRITE,nil)
+            guard rc == SQLITE_OK, let handle else {
+                if let handle { sqlite3_close(handle) }
+                XCTFail("Cannot open test database: \(rc)"); return
+            }
+            defer { sqlite3_close(handle) }
+            sqlite3_busy_timeout(handle,5000)
+            XCTAssertEqual(sqlite3_exec(handle,"DELETE FROM change_queue WHERE id=\(removed);",nil,nil,nil),SQLITE_OK)
+        }
+        let target = base.appendingPathComponent("backup dell'archivio.sqlite")
+        try ArchiveDatabaseSafety.backup(db,to:target)
+        try ArchiveDatabaseSafety.verify(target,readOnly:true)
+        let restored = try ChangeJournal(path:target.path)
+        XCTAssertEqual(try restored.databaseIdentity(),identity)
+        XCTAssertEqual(try restored.pending(),try journal.pending())
+        XCTAssertEqual(try restored.pending().map(\.id),[pending])
+        let newID = try restored.enqueue(rootID:"r",relativePath:"restored.jpg",kind:.upsert)
+        XCTAssertGreaterThan(newID,removed)
+        XCTAssertEqual(try journal.pending().map(\.id),[pending])
+        // Explicit completed rows and the source WAL mode are preserved.
+        var handle: OpaquePointer?
+        let rc = sqlite3_open_v2(target.path,&handle,SQLITE_OPEN_READONLY,nil)
+        guard rc == SQLITE_OK, let handle else {
+            if let handle { sqlite3_close(handle) }
+            XCTFail("Cannot inspect restored database: \(rc)"); return
+        }
+        defer { sqlite3_close(handle) }
+        var statement: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(handle,"SELECT completed FROM change_queue WHERE id=\(completed);",-1,&statement,nil),SQLITE_OK)
+        defer { sqlite3_finalize(statement) }
+        XCTAssertEqual(sqlite3_step(statement),SQLITE_ROW)
+        XCTAssertEqual(sqlite3_column_int(statement,0),1)
+        let header = try Data(contentsOf:db).prefix(100)
+        XCTAssertEqual(Array(header.dropFirst(18).prefix(2)),[UInt8(2),UInt8(2)])
     }
     func testAnchoredDirectoryRefusesReplacementBeforeRemoval() throws {
         let (base,_,target,_) = try fixture()

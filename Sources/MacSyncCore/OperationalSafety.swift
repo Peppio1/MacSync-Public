@@ -260,16 +260,21 @@ public enum ArchiveDatabaseSafety {
             throw JournalError.database("Database SQLite non integro: operazioni bloccate")
         }
     }
-    private static func requireAbsent(_ url: URL) throws {
+    private static func requireAbsent(_ url: URL, phase: String) throws {
         var info = stat()
-        let rc = url.path.withCString { lstat($0,&info) }
-        guard rc != 0, errno == ENOENT else {
-            throw JournalError.database("Percorso backup o file ausiliario già esistente/non accessibile")
+        let (rc,code) = url.path.withCString { path -> (Int32,Int32) in
+            let result = lstat(path,&info)
+            return (result,result == 0 ? 0 : errno)
+        }
+        guard rc != 0, code == ENOENT else {
+            throw JournalError.database("Backup SQLite bloccato (\(phase)): \(url.lastPathComponent), lstat=\(rc), errno=\(code)")
         }
     }
 
-    /// sqlite3_backup includes committed WAL contents. Only publish a
-    /// verified standalone snapshot; never replace an existing backup.
+    /// VACUUM INTO produces a consistent, compact standalone snapshot,
+    /// including committed WAL data. The source is NOT vacuumed in place.
+    /// MacSync uses explicit IDs for operational records; implicit rowids
+    /// are not used as identifiers. Never replace an existing backup.
     public static func backup(_ source: URL, to target: URL) throws {
         try verify(source)
         guard source.isFileURL, target.isFileURL,
@@ -277,8 +282,8 @@ public enum ArchiveDatabaseSafety {
             throw JournalError.database("Percorso backup non valido")
         }
         let suffixes = ["-wal","-shm","-journal"]
-        try requireAbsent(target)
-        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:target.path+suffix)) }
+        try requireAbsent(target,phase:"destinazione iniziale")
+        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:target.path+suffix),phase:"destinazione iniziale") }
 
         // Own a private staging directory on the same filesystem as the
         // final backup. SQLite may create/delete its own sidecars here.
@@ -302,41 +307,42 @@ public enum ArchiveDatabaseSafety {
             throw JournalError.database("File temporaneo backup non creato (errno \(errno))")
         }
         Darwin.close(fd)
-        let src = try open(source,flags:SQLITE_OPEN_READWRITE)
-        defer { sqlite3_close(src) }
+        // VACUUM INTO permits a nonexistent or empty destination file.
+        // The exclusively created, mode-0600 file above is empty and lives
+        // inside our own directory. Bind its path instead of interpolating SQL.
         do {
-            let dst = try open(tmp,flags:SQLITE_OPEN_READWRITE)
-            defer { sqlite3_close(dst) }
-            guard let backup = sqlite3_backup_init(dst,"main",src,"main") else {
-                throw JournalError.database("Backup SQLite non inizializzato")
+            let src = try open(source,flags:SQLITE_OPEN_READWRITE)
+            var openConnection = true
+            defer { if openConnection { sqlite3_close(src) } }
+            do {
+                var statement: OpaquePointer?
+                let prepare = sqlite3_prepare_v2(src,"VACUUM main INTO ?;",-1,&statement,nil)
+                guard prepare == SQLITE_OK, let statement else {
+                    if let statement { sqlite3_finalize(statement) }
+                    throw JournalError.database("Preparazione VACUUM INTO non riuscita (codice \(prepare)): " + String(cString:sqlite3_errmsg(src)))
+                }
+                defer { sqlite3_finalize(statement) }
+                let transient = unsafeBitCast(-1,to:sqlite3_destructor_type.self)
+                let bind = tmp.path.withCString { sqlite3_bind_text(statement,1,$0,-1,transient) }
+                guard bind == SQLITE_OK else {
+                    throw JournalError.database("Percorso VACUUM INTO non associato (codice \(bind))")
+                }
+                let step = sqlite3_step(statement)
+                guard step == SQLITE_DONE else {
+                    throw JournalError.database("VACUUM INTO non riuscito (codice \(step)): " + String(cString:sqlite3_errmsg(src)))
+                }
             }
-            let result = sqlite3_backup_step(backup,-1)
-            let finish = sqlite3_backup_finish(backup)
-            guard result == SQLITE_DONE, finish == SQLITE_OK else {
-                throw JournalError.database("Backup SQLite non completato (codici \(result), \(finish))")
+            let closed = sqlite3_close(src)
+            guard closed == SQLITE_OK else {
+                throw JournalError.database("Chiusura connessione backup non riuscita (codice \(closed))")
             }
-            // sqlite3_backup can preserve the WAL format of the database
-            // header. Convert the destination ONLY to rollback-journal
-            // format before closing, so a standalone file is still valid
-            // when opened read-only or moved to another directory.
-            var mode: OpaquePointer?
-            let rc = sqlite3_prepare_v2(dst,"PRAGMA journal_mode=DELETE;",-1,&mode,nil)
-            guard rc == SQLITE_OK else {
-                if let mode { sqlite3_finalize(mode) }
-                throw JournalError.database("Impossibile rendere autonomo il backup SQLite (codice \(rc)): " + String(cString:sqlite3_errmsg(dst)))
-            }
-            defer { sqlite3_finalize(mode) }
-            guard sqlite3_step(mode) == SQLITE_ROW,
-                  let name = sqlite3_column_text(mode,0),
-                  String(cString:name).lowercased() == "delete",
-                  sqlite3_step(mode) == SQLITE_DONE
-            else { throw JournalError.database("Modalità del backup SQLite non autonoma") }
+            openConnection = false
         }
         // Validate the closed SQLite file, not a snapshot that still
         // depends on private sidecars. Recheck after read-only verification.
-        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:tmp.path+suffix)) }
+        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:tmp.path+suffix),phase:"snapshot chiuso") }
         try verify(tmp,readOnly:true)
-        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:tmp.path+suffix)) }
+        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:tmp.path+suffix),phase:"snapshot verificato") }
         let header = try FileHandle(forReadingFrom:tmp)
         let bytes: Data
         do {
@@ -347,11 +353,24 @@ public enum ArchiveDatabaseSafety {
             throw JournalError.database("Il backup SQLite non è autonomo")
         }
 
+        // Explicitly request a flush of the finished standalone file
+        // before exposing it. Do not modify or delete source sidecars.
+        let flushFD = tmp.path.withCString { Darwin.open($0,O_RDWR | O_NOFOLLOW | O_CLOEXEC) }
+        guard flushFD >= 0 else {
+            throw JournalError.database("Snapshot non accessibile per flush (errno \(errno))")
+        }
+        let flushResult = fsync(flushFD)
+        let flushError = errno
+        Darwin.close(flushFD)
+        guard flushResult == 0 else {
+            throw JournalError.database("Flush snapshot non riuscito (errno \(flushError))")
+        }
+
         // Do not use FileManager.moveItem/removeItem for SQLite artifacts:
         // publish exactly the verified main file via exclusive native rename.
         // No copy fallback, no overwrite, no deletion of other backups.
-        try requireAbsent(target)
-        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:target.path+suffix)) }
+        try requireAbsent(target,phase:"prima della pubblicazione")
+        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:target.path+suffix),phase:"prima della pubblicazione") }
         let rc = tmp.path.withCString { old in
             target.path.withCString { new in
                 renameatx_np(AT_FDCWD,old,AT_FDCWD,new,UInt32(RENAME_EXCL))
@@ -361,5 +380,6 @@ public enum ArchiveDatabaseSafety {
             throw JournalError.database("Pubblicazione esclusiva backup non riuscita (errno \(errno))")
         }
         try verify(target,readOnly:true)
+        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:target.path+suffix),phase:"backup pubblicato") }
     }
 }
