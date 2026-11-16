@@ -302,14 +302,13 @@ public enum ArchiveDatabaseSafety {
             }
             _ = stage.path.withCString { Darwin.rmdir($0) }
         }
-        let fd = tmp.path.withCString { Darwin.open($0,O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC,mode_t(0o600)) }
-        guard fd >= 0 else {
-            throw JournalError.database("File temporaneo backup non creato (errno \(errno))")
-        }
-        Darwin.close(fd)
-        // VACUUM INTO permits a nonexistent or empty destination file.
-        // The exclusively created, mode-0600 file above is empty and lives
-        // inside our own directory. Bind its path instead of interpolating SQL.
+        // Let SQLite create the snapshot itself. Some macOS SQLite builds
+        // reject a pre-created empty output file. The exclusive mode-0700
+        // staging directory protects the previously absent path; the final
+        // file is restricted to mode 0600 before publication.
+        try requireAbsent(tmp,phase:"prima di VACUUM INTO")
+        for suffix in suffixes { try requireAbsent(URL(fileURLWithPath:tmp.path+suffix),phase:"prima di VACUUM INTO") }
+        // Bind its path instead of interpolating SQL.
         do {
             let src = try open(source,flags:SQLITE_OPEN_READWRITE)
             var openConnection = true
@@ -358,6 +357,16 @@ public enum ArchiveDatabaseSafety {
         let flushFD = tmp.path.withCString { Darwin.open($0,O_RDWR | O_NOFOLLOW | O_CLOEXEC) }
         guard flushFD >= 0 else {
             throw JournalError.database("Snapshot non accessibile per flush (errno \(errno))")
+        }
+        // SQLite creates the file using its own default permissions.
+        // Restrict the verified regular file while still in private staging.
+        var snapshotStat = stat()
+        guard fstat(flushFD,&snapshotStat) == 0,
+              snapshotStat.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+              fchmod(flushFD,mode_t(0o600)) == 0 else {
+            let code = errno
+            Darwin.close(flushFD)
+            throw JournalError.database("Permessi snapshot non impostati (errno \(code))")
         }
         let flushResult = fsync(flushFD)
         let flushError = errno
