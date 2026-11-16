@@ -25,8 +25,10 @@ public enum StagingMaintenance {
     public static func inspect(
         mapping: MountedFolderMapping,
         now: Date = Date(),
-        minimumAge: TimeInterval = StagingMaintenance.minimumAge
+        minimumAge: TimeInterval = StagingMaintenance.minimumAge,
+        shouldContinue: () -> Bool = { true }
     ) throws -> StagingInspection {
+        guard shouldContinue() else { throw SeedVerificationError.cancelled }
         guard minimumAge >= StagingMaintenance.minimumAge else {
             throw MountedCopyError.unsafeFile
         }
@@ -42,6 +44,7 @@ public enum StagingMaintenance {
         var candidates: [StagingCandidate] = []
         var total: Int64 = 0
         for name in names {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
             guard isOwnedTemporaryName(name) else { continue }
             let location = stageDir.appendingPathComponent(name)
             guard let info = statInfo(location),
@@ -60,6 +63,7 @@ public enum StagingMaintenance {
             ))
         }
         try mapping.verify()
+        guard shouldContinue() else { throw SeedVerificationError.cancelled }
         return StagingInspection(
             candidates: candidates.sorted { $0.fileName < $1.fileName },
             totalBytes: total
@@ -74,9 +78,10 @@ public enum StagingMaintenance {
         mapping: MountedFolderMapping,
         inspected: StagingInspection,
         approved: Bool = false,
-        now: Date = Date()
+        now: Date = Date(),
+        shouldContinue: () -> Bool = { true }
     ) throws -> Int {
-        guard approved else { return 0 }
+        guard approved, shouldContinue() else { return 0 }
         try mapping.verify()
         let stageDir = mapping.target.appendingPathComponent(".macsync-staging")
         guard let directoryStat = statInfo(stageDir),
@@ -84,6 +89,7 @@ public enum StagingMaintenance {
         else { throw MountedCopyError.unsafeFile }
         var removed = 0
         for candidate in inspected.candidates {
+            guard shouldContinue() else { break }
             guard isOwnedTemporaryName(candidate.fileName) else { continue }
             try mapping.verify()
             let location = stageDir.appendingPathComponent(candidate.fileName)
@@ -98,6 +104,7 @@ public enum StagingMaintenance {
             )
             guard abs(modified.timeIntervalSince(candidate.modifiedAt)) <= 0.001,
                   now.timeIntervalSince(modified) >= minimumAge else { continue }
+            guard shouldContinue() else { break }
             try FileManager.default.removeItem(at: location)
             removed += 1
         }

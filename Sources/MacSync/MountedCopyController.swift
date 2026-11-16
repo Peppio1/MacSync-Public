@@ -212,6 +212,7 @@ final class MountedCopyController: ObservableObject {
     private var seedReport: SeedVerificationReport?
     private var seedSession: SeededArchiveSession?
     private var seedCancel: SeedVerificationCancellation?
+    private var maintenanceCancel: SeedVerificationCancellation?
     private var maintenanceCandidates: [(mapping: MountedFolderMapping, inspection: StagingInspection)] = []
 
     private let queue = DispatchQueue(label: "macsync.mounted.copy.serial", qos: .utility)
@@ -993,6 +994,9 @@ final class MountedCopyController: ObservableObject {
                 )
             }
             let db = try Self.databaseURL()
+            let cancel = SeedVerificationCancellation()
+            maintenanceCancel = cancel
+            maintaining = true
             previewStatus = "Confronto in sola lettura: scansione cartelle…"
             queue.async { [weak self] in
                 do {
@@ -1001,12 +1005,14 @@ final class MountedCopyController: ObservableObject {
                     var remoteOnly = 0
                     var collisions = 0
                     for mapping in mappings {
-                        let result = try MountedBootstrapPreview.inspect(mapping: mapping)
+                        guard !cancel.isCancelled else { throw SeedVerificationError.cancelled }
+                        let result = try MountedBootstrapPreview.inspect(mapping: mapping, shouldContinue: { !cancel.isCancelled })
                         matched += result.candidateMatches
                         differences += result.requiresCopyOrReview.count
                         remoteOnly += result.remoteOnlyPaths.count
                         collisions += result.macOSCaseCollisions.count
                     }
+                    guard !cancel.isCancelled else { throw SeedVerificationError.cancelled }
                     let summary =
                         "Anteprima (nessuna modifica): \(matched) match PRESUNTI per " +
                         "dimensione e data, \(differences) da verificare, " +
@@ -1016,13 +1022,16 @@ final class MountedCopyController: ObservableObject {
                         message: "Confronto in sola lettura terminato"
                     )
                     DispatchQueue.main.async { [weak self] in
-                        self?.previewStatus = summary
+                        self?.maintaining = false
+                        self?.maintenanceCancel = nil
+                        self?.previewStatus = cancel.isCancelled ? "Anteprima annullata" : summary
                         self?.refresh()
                     }
                 } catch {
                     DispatchQueue.main.async { [weak self] in
-                        self?.previewStatus = "Anteprima non riuscita: "
-                            + error.localizedDescription
+                        self?.maintaining = false
+                        self?.maintenanceCancel = nil
+                        self?.previewStatus = cancel.isCancelled ? "Anteprima annullata" : "Anteprima non riuscita: " + error.localizedDescription
                     }
                 }
             }
@@ -1033,10 +1042,15 @@ final class MountedCopyController: ObservableObject {
 
     /// Opt-in maintenance: display only MacSync-owned UUID partial files older
     /// than seven days. A separate explicit confirmation is required to clean.
+    func cancelMaintenance() {
+        guard maintaining, !auditBusy else { return }
+        maintenanceCancel?.cancel()
+    }
+
     func inspectStaging(sources: [(
         id: String, path: String, destination: String, expected: VolumeFingerprint?
     )]) {
-        guard !active && !maintaining else {
+        guard !active && !maintaining && !seedBusy else {
             maintenanceStatus = "Ferma prima le copie o la manutenzione in corso"
             return
         }
@@ -1053,13 +1067,15 @@ final class MountedCopyController: ObservableObject {
                     expectedTargetVolume: $0.expected
                 )
             }
+            let cancel = SeedVerificationCancellation()
+            maintenanceCancel = cancel
             maintaining = true
             maintenanceCandidates = []
             maintenanceStatus = "Verifica temporanei MacSync in corso…"
             queue.async { [weak self] in
                 do {
                     let candidates = try mappings.map {
-                        (mapping: $0, inspection: try StagingMaintenance.inspect(mapping: $0))
+                        (mapping: $0, inspection: try StagingMaintenance.inspect(mapping: $0, shouldContinue: { !cancel.isCancelled }))
                     }
                     let count = candidates.reduce(0) { $0 + $1.inspection.count }
                     let bytes = candidates.reduce(Int64(0)) {
@@ -1067,18 +1083,19 @@ final class MountedCopyController: ObservableObject {
                             ? Int64.max : $0 + $1.inspection.totalBytes
                     }
                     DispatchQueue.main.async { [weak self] in
-                        self?.maintenanceCandidates = candidates
+                        self?.maintenanceCandidates = cancel.isCancelled ? [] : candidates
                         self?.maintaining = false
-                        self?.maintenanceStatus = "Temporanei MacSync di oltre 7 giorni: "
+                        self?.maintenanceCancel = nil
+                        self?.maintenanceStatus = cancel.isCancelled ? "Verifica temporanei annullata" : ("Temporanei MacSync di oltre 7 giorni: "
                             + "\(count) file, "
                             + ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
-                            + ". Nessun file è stato cancellato."
+                            + ". Nessun file è stato cancellato.")
                     }
                 } catch {
                     DispatchQueue.main.async { [weak self] in
                         self?.maintaining = false
-                        self?.maintenanceStatus = "Verifica temporanei fallita: "
-                            + error.localizedDescription
+                        self?.maintenanceCancel = nil
+                        self?.maintenanceStatus = cancel.isCancelled ? "Verifica temporanei annullata" : "Verifica temporanei fallita: " + error.localizedDescription
                     }
                 }
             }
@@ -1091,7 +1108,7 @@ final class MountedCopyController: ObservableObject {
     func cleanupStaging(sources: [(
         id: String, path: String, destination: String, expected: VolumeFingerprint?
     )]) {
-        guard !active && !maintaining else {
+        guard !active && !maintaining && !seedBusy else {
             maintenanceStatus = "Ferma prima le copie"
             return
         }
@@ -1132,34 +1149,40 @@ final class MountedCopyController: ObservableObject {
             """
             approval.addButton(withTitle: "Elimina temporanei verificati")
             approval.addButton(withTitle: "Annulla")
-            guard approval.runModal() == .alertFirstButtonReturn else { return }
+            guard approval.runModal() == .alertFirstButtonReturn,
+                  !active, !maintaining, !seedBusy else { return }
 
+            let cancel = SeedVerificationCancellation()
+            maintenanceCancel = cancel
             maintaining = true
             maintenanceStatus = "Pulizia temporanei verificati in corso…"
             queue.async { [weak self] in
                 do {
                     var deleted = 0
                     for item in pending {
+                        guard !cancel.isCancelled else { break }
                         deleted += try StagingMaintenance.cleanup(
                             mapping: item.mapping, inspected: item.inspection,
-                            approved: true
+                            approved: true, shouldContinue: { !cancel.isCancelled }
                         )
                     }
                     let database = try Self.databaseURL()
                     try? SyncActivityLog(path: database.path).record(
                         level: .info, rootID: "app", action: "staging_cleanup",
-                        message: "Temporanei verificati eliminati: \(deleted)"
+                        message: (cancel.isCancelled ? "Pulizia interrotta: " : "Pulizia completata: ") + "\(deleted) temporanei eliminati"
                     )
                     DispatchQueue.main.async { [weak self] in
                         self?.maintaining = false
                         self?.maintenanceCandidates = []
-                        self?.maintenanceStatus = "Pulizia completata: "
-                            + "\(deleted) temporanei eliminati. Foto e backup invariati."
+                        self?.maintenanceCancel = nil
+                        self?.maintenanceStatus = (cancel.isCancelled ? "Pulizia interrotta: " : "Pulizia completata: ") + "\(deleted) temporanei eliminati. Foto e backup invariati."
                         self?.refresh()
                     }
                 } catch {
                     DispatchQueue.main.async { [weak self] in
                         self?.maintaining = false
+                        self?.maintenanceCancel = nil
+                        self?.maintenanceCandidates = []
                         self?.maintenanceStatus = "Pulizia temporanei interrotta: "
                             + error.localizedDescription
                     }
@@ -1171,6 +1194,7 @@ final class MountedCopyController: ObservableObject {
     }
 
     func stop() {
+        maintenanceCancel?.cancel()
         auditCancel?.cancel()
         sessionCancellation?.cancel()
         sessionCancellation = nil

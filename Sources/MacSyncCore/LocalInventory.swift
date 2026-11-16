@@ -335,12 +335,14 @@ public final class LocalInventory {
         root: URL,
         subtree: URL? = nil,
         eventID: UInt64? = nil,
+        shouldContinue: () -> Bool = { true },
         onItem: (TrackedItem) -> Void = { _ in }
     ) throws -> ReconciliationResult {
         guard !rootID.isEmpty else { throw JournalError.database("Missing root identifier") }
         let root = root.standardizedFileURL.resolvingSymlinksInPath()
         let target = (subtree ?? root).standardizedFileURL.resolvingSymlinksInPath()
-        let rows = try LocalScanner.scan(root: root, subtree: subtree,onItem:onItem)
+        let rows = try LocalScanner.scan(root: root, subtree: subtree, shouldContinue: shouldContinue, onItem: onItem)
+        guard shouldContinue() else { throw SeedVerificationError.cancelled }
         let fullScan = target.path == root.path
         let scope = fullScan ? "" : String(target.path.dropFirst(root.path.count + 1))
 
@@ -356,6 +358,7 @@ public final class LocalInventory {
             var upserts = 0
             var deletes = 0
             for row in rows {
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 if before[row.relativePath] != row {
                     try store(rootID: rootID, item: row)
                     try enqueue(rootID: rootID, relativePath: row.relativePath, kind: .upsert)
@@ -364,6 +367,7 @@ public final class LocalInventory {
             }
 
             for (path, _) in affected where seen[path] == nil {
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 try remove(rootID: rootID, relativePath: path)
                 try enqueue(rootID: rootID, relativePath: path, kind: .delete)
                 deletes += 1
@@ -375,6 +379,7 @@ public final class LocalInventory {
             if let eventID { checkpoint = max(prior ?? 0, eventID) }
             else { checkpoint = prior }
             try saveRoot(rootID: rootID, rootPath: root.path, eventID: checkpoint)
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
             try execute("COMMIT;")
             return ReconciliationResult(inspected: rows.count, queuedUpserts: upserts, queuedDeletes: deletes)
         } catch {

@@ -29,14 +29,21 @@ public final class LocalMonitorService {
     private var roots: [MonitorRoot] = []
     private var lastFullScan: Date?
     private var recoveryRequired = false
+    private let requestLock = NSLock()
+    private var scanRequest: SeedVerificationCancellation?
 
     public init(onUpdate: @escaping (MonitorUpdate) -> Void) {
         self.update = onUpdate
     }
 
     public func start(roots: [MonitorRoot], databasePath: String, allowSourceRebinding: Bool = false) {
+        let request = SeedVerificationCancellation()
+        requestLock.lock()
+        scanRequest?.cancel()
+        scanRequest = request
         queue.async { [self] in
             self.stopOnQueue()
+            guard !request.isCancelled else { self.report("Scansione annullata", active: false); return }
             guard !roots.isEmpty else {
                 self.report("Seleziona almeno una cartella locale", active: false)
                 return
@@ -45,6 +52,7 @@ public final class LocalMonitorService {
                 let checked = try self.validateRoots(roots)
                 let store = try LocalInventory(path: databasePath)
                 for root in checked {
+                    guard !request.isCancelled else { throw SeedVerificationError.cancelled }
                     if let existing = try store.rootPath(rootID: root.id),
                        existing != root.url.path {
                         guard allowSourceRebinding else {
@@ -67,7 +75,7 @@ public final class LocalMonitorService {
                 var lastUpdate = 0.0
                 self.update(MonitorUpdate(message:scan.phase,monitoring:false,pendingChanges:0,scanProgress:scan))
                 for root in checked {
-                    _ = try store.reconcile(rootID:root.id,root:root.url,onItem:{ item in
+                    _ = try store.reconcile(rootID:root.id,root:root.url,shouldContinue:{ !request.isCancelled },onItem:{ item in
                         if item.kind == "file" {
                             scan.scannedFiles += 1
                             let sum = scan.detectedBytes.addingReportingOverflow(max(0,item.size))
@@ -81,6 +89,7 @@ public final class LocalMonitorService {
                         }
                     })
                 }
+                guard !request.isCancelled else { throw SeedVerificationError.cancelled }
                 self.update(MonitorUpdate(message:"Inventario locale completato",monitoring:false,pendingChanges:0,scanProgress:scan))
                 self.lastFullScan = Date()
 
@@ -89,20 +98,25 @@ public final class LocalMonitorService {
                 }
                 try watcher.start(paths: checked.map { $0.url.path }, since: since)
                 self.watcher = watcher
+                guard !request.isCancelled else { throw SeedVerificationError.cancelled }
                 self.startHealthTimer()
                 self.report("Monitoraggio locale attivo", active: true)
             } catch {
                 self.stopOnQueue()
-                self.report("Monitoraggio sospeso: " + error.localizedDescription, active: false)
+                self.report(request.isCancelled ? "Scansione annullata" : "Monitoraggio sospeso: " + error.localizedDescription, active: false)
             }
         }
+        requestLock.unlock()
     }
 
     public func stop() {
+        requestLock.lock()
+        scanRequest?.cancel()
         queue.async { [self] in
             self.stopOnQueue()
             self.report("Monitoraggio locale arrestato", active: false)
         }
+        requestLock.unlock()
     }
 
     private func validateRoots(_ roots: [MonitorRoot]) throws -> [MonitorRoot] {

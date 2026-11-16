@@ -12,6 +12,24 @@ final class LocalInventoryTests: XCTestCase {
         return (base, source, database)
     }
 
+    func testCancelledInventoryScanPreservesQueueAndCheckpoint() throws {
+        let (base, root, db) = try temporaryFixture()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let file = root.appendingPathComponent("keep.jpg")
+        try Data("original".utf8).write(to: file)
+        let inventory = try LocalInventory(path: db.path)
+        _ = try inventory.reconcile(rootID: "photos", root: root, eventID: 100)
+        let before = try ChangeJournal(path: db.path).pending()
+        try FileManager.default.removeItem(at: file)
+        try Data("new".utf8).write(to: root.appendingPathComponent("new.jpg"))
+        let cancel = SeedVerificationCancellation()
+        XCTAssertThrowsError(try inventory.reconcile(rootID: "photos", root: root, eventID: 101,
+            shouldContinue: { !cancel.isCancelled }, onItem: { _ in cancel.cancel() }))
+        XCTAssertEqual(try inventory.lastEventID(rootID: "photos"), 100)
+        XCTAssertEqual(try inventory.itemCount(rootID: "photos"), 1)
+        XCTAssertEqual(try ChangeJournal(path: db.path).pending(), before)
+    }
+
     func testIncrementalChangesAndDeletionAreStored() throws {
         let (base, root, db) = try temporaryFixture()
         defer { try? FileManager.default.removeItem(at: base) }

@@ -135,7 +135,10 @@ final class ArchiveAuditAndHistoryTests:XCTestCase {
         XCTAssertEqual(totals.meanCopyRate,25)
         XCTAssertEqual(try reopened.events(cycleID:"cycle",kinds:[.deleted,.recovered]).count,2)
         let cycle=try XCTUnwrap(reopened.cycles().first)
-        XCTAssertEqual(cycle.started,start); XCTAssertEqual(cycle.seconds,20)
+        // SQLite stores Unix timestamps as REAL; Date uses a different epoch internally.
+        XCTAssertEqual(cycle.started.timeIntervalSince(start), 0, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(cycle.ended).timeIntervalSince(start.addingTimeInterval(20)), 0, accuracy: 0.001)
+        XCTAssertEqual(cycle.seconds,20)
         // Retention cascades details, not the operational queue.
         try reopened.prune(before:Date())
         XCTAssertTrue(try reopened.cycles().isEmpty)

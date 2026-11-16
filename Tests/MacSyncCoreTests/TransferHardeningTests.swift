@@ -14,6 +14,23 @@ final class TransferHardeningTests: XCTestCase {
         return (base, source, target, base.appendingPathComponent("journal.sqlite").path)
     }
 
+    func testCancelledStagingMaintenanceLeavesFilesIntact() throws {
+        let (base, source, target, _) = try fixture()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let stage = target.appendingPathComponent(".macsync-staging")
+        try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: true)
+        let temporary = stage.appendingPathComponent(UUID().uuidString + ".partial")
+        try Data("old".utf8).write(to: temporary)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-9 * 86_400)], ofItemAtPath: temporary.path)
+        let mapping = try MountedFolderMapping(rootID: "photos", source: source, target: target)
+        let inspected = try StagingMaintenance.inspect(mapping: mapping)
+        XCTAssertEqual(inspected.count, 1)
+        XCTAssertThrowsError(try StagingMaintenance.inspect(mapping: mapping, shouldContinue: { false }))
+        XCTAssertEqual(try StagingMaintenance.cleanup(mapping: mapping, inspected: inspected, approved: true, shouldContinue: { false }), 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: temporary.path))
+        XCTAssertThrowsError(try MountedBootstrapPreview.inspect(mapping: mapping, shouldContinue: { false }))
+    }
+
     func testCapacityPreflightPreventsAnyCopyWhenSpaceTooLow() throws {
         let (base, source, target, database) = try fixture()
         defer { try? FileManager.default.removeItem(at: base) }

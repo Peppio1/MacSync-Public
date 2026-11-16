@@ -358,13 +358,14 @@ private struct MacSyncConfigurationView: View {
     var body: some View {
         MacSyncSectionShell(page: $page, monitoring: model.monitoring, next: copy.nextScheduledRun ?? runtime.nextAutomaticAttempt) {
             VStack(alignment: .leading, spacing: 16) {
-                if copy.seedBusy || copy.auditBusy || copy.active || model.scanProgress != nil {
+                if copy.seedBusy || copy.auditBusy || copy.maintaining || copy.active || model.scanProgress != nil {
                     HStack {
                         Label("Operazioni in corso o pianificate", systemImage: "clock").font(.caption)
                         Spacer()
                         if copy.seedBusy { Button("Annulla SHA-256") { copy.cancelSeedVerification() } }
                         if copy.auditBusy { Button("Annulla verifica") { copy.cancelArchiveAudit() } }
-                        if model.scanProgress != nil { Button("Arresta monitoraggio") { model.stopMonitoring() } }
+                        if copy.maintaining && !copy.auditBusy { Button("Interrompi manutenzione") { copy.cancelMaintenance() } }
+                        if model.scanProgress != nil { Button("Annulla scansione") { runtime.stopCopiesForCurrentLaunch(); model.stopMonitoring() } }
                         if copy.active { Button("Interrompi copie") { runtime.stopCopiesForCurrentLaunch() } }
                     }.padding(10).background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
                 }
@@ -417,7 +418,7 @@ private struct MacSyncConfigurationView: View {
                             runtime.stopCopiesForCurrentLaunch()
                             copy.start(sources: model.configuredPairs(),
                                        schedule: settings.schedule)
-                        }
+                        }.disabled(copy.seedBusy || copy.maintaining || model.scanProgress != nil || !model.monitoring)
                     }
                 }
                 Text(runtime.automaticStatus).font(.caption).foregroundStyle(.secondary)
@@ -445,7 +446,7 @@ private struct MacSyncConfigurationView: View {
                           systemImage: "list.bullet.rectangle")
                     Spacer()
                     if model.scanProgress != nil {
-                        Button("Arresta monitoraggio") { model.stopMonitoring() }
+                        Button("Annulla scansione") { runtime.stopCopiesForCurrentLaunch(); model.stopMonitoring() }
                     } else {
                         Button("Rileggi Sorgenti") { model.startMonitoring() }.disabled(copy.active || copy.maintaining || copy.seedBusy)
                     }

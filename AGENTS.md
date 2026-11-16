@@ -192,3 +192,8 @@ Anteprime NSHostingView e cacheDisplay in finestra di test, dati sintetici, ness
 ## v0.13 — interfaccia candidata e pianificazione
 
 Menu laterale Panoramica, Cartelle, Pianificazione, Verifica archivio, Registro attività, Impostazioni; tema automatico/chiaro/scuro. Due coppie unidirezionali, controlli reali esistenti. Intervalli 1–59 minuti, 1–23 ore, default 5 minuti; inserimento numerico, +/- e scorciatoie, input non valido non salvato. Interruzione cooperativa obbligatoria per ogni operazione lunga, senza rollback di cancellazioni effettuate o abort forzato della pubblicazione atomica. Copertura completa di interruzioni, anteprime finestra v0.13 e CI da verificare. Nessun collaudo reale SMB eseguito.
+
+
+### v0.13 — revisione annullamento (candidata)
+
+Il test storico confronta le date con tolleranza 1 ms, mantenendo tutte le verifiche sui conteggi e aggiungendo il controllo della data di fine. Inventario iniziale interrompibile cooperativamente: scan cancellato non produce nuove cancellazioni; transazione di riconciliazione della singola sorgente annullata se lo stop precede il commit. Le sorgenti già confermate restano registrate. Confronto preliminare e manutenzione temporanei ora accettano cancellazione; le rimozioni già eseguite non vengono annullate. Nessun arresto forzato di una syscall SMB bloccante. Nuovi test e CI devono confermare. Le anteprime a dimensione finestra sono composizioni sintetiche dei componenti condivisi, non screenshot integrali delle pagine runtime. Il collaudo UI interattivo e SMB reale rimane necessario.
