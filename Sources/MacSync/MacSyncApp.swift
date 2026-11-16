@@ -828,7 +828,7 @@ struct MacSyncConfigurationView: View {
                 } else {
                     if draftSchedule.frequency == .weekly {
                         Picker("Giorno",selection:$draftSchedule.weekday) {
-                            ForEach([2,3,4,5,6,7,1],id:\.self) { day in Text(Calendar(identifier:.gregorian).weekdaySymbols[day-1]).tag(day) }
+                            ForEach([2,3,4,5,6,7,1],id:\.self) { day in Text(macSyncWeekdayName(day)).tag(day) }
                         }
                     }
                     HStack {
@@ -1081,7 +1081,7 @@ struct MacSyncConfigurationView: View {
             MacSyncPanel("Informazioni", icon: "info.circle", accent: false) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("MacSync · v0.13.6").font(.subheadline.weight(.semibold))
+                        Text("MacSync · v0.13.7").font(.subheadline.weight(.semibold))
                         Text("Registro SQLite locale · Aggiornamenti manuali").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -1200,29 +1200,38 @@ struct MacSyncPanel<Content: View>: View {
     let title: String
     let icon: String
     let accent: Bool
+    let compact: Bool
+    let fillHeight: Bool
     let content: Content
     @Environment(\.colorScheme) private var scheme
-    init(_ title: String, icon: String, accent: Bool = false, @ViewBuilder content: () -> Content) {
-        self.title = title; self.icon = icon; self.accent = accent; self.content = content()
+    init(_ title: String, icon: String, accent: Bool = false, compact: Bool = false, fillHeight: Bool = false, @ViewBuilder content: () -> Content) {
+        self.title = title; self.icon = icon; self.accent = accent; self.compact = compact; self.fillHeight = fillHeight; self.content = content()
     }
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: compact ? 5 : 8) {
             HStack(spacing: 8) {
                 Image(systemName: icon)
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(MacSyncColors.blue(scheme))
-                    .frame(width: 26, height: 26)
+                    .frame(width: compact ? 23 : 26, height: compact ? 23 : 26)
                     .background(MacSyncColors.blue(scheme).opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
                 Text(title).font(.system(size: 16, weight: .semibold))
             }
             content
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(compact ? 9 : 12)
+        .frame(maxWidth: .infinity, maxHeight: fillHeight ? .infinity : nil, alignment: .topLeading)
         .background(MacSyncColors.panel(scheme), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12)
             .strokeBorder(accent ? MacSyncColors.blue(scheme).opacity(0.48) : MacSyncColors.line(scheme), lineWidth: 1))
     }
+}
+
+/// Calendar weekday numbering is stable (Sunday=1, Monday=2).
+/// Do not use the runner's or machine's locale for Italian UI labels.
+func macSyncWeekdayName(_ day: Int) -> String {
+    let names = ["Domenica", "Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato"]
+    return (1...7).contains(day) ? names[day-1] : "—"
 }
 
 func macSyncClock(_ date: Date, seconds: Bool = false) -> String {

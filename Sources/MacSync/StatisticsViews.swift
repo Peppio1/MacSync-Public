@@ -453,14 +453,14 @@ struct ArchiveAuditPanel: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
                 configuration.frame(maxWidth: .infinity, alignment: .topLeading)
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 8) {
                     operation
                     lastResult
                 }.frame(maxWidth: .infinity, alignment: .topLeading)
-            }
+            }.fixedSize(horizontal: false, vertical: true)
             maintenance
         }
         .onChange(of: copy.auditSettings) { value in
@@ -475,7 +475,7 @@ struct ArchiveAuditPanel: View {
     }
 
     private var configuration: some View {
-        MacSyncPanel("Configurazione verifica", icon: "gearshape") {
+        MacSyncPanel("Configurazione verifica", icon: "gearshape", compact: true, fillHeight: true) {
             Text("Metodo di verifica").font(.subheadline.weight(.semibold))
             Picker("Metodo", selection: $copy.auditSettings.mode) {
                 Text("Rapida (metadati)").tag(ArchiveAuditMode.quick)
@@ -491,11 +491,11 @@ struct ArchiveAuditPanel: View {
             Divider()
             MacSyncSwitchRow("Riconosci i file già copiati", isOn: $recognize)
                 .disabled(copy.auditSettings.mode != .deep)
-            Text("Solo SHA-256 e avvio manuale. Esclude dalla coda i file identici dopo conferma. Le copie rimangono sospese fino alla riattivazione manuale.")
+            Text("SHA-256 manuale: chiude i job identici dopo conferma. Le copie restano sospese fino alla riattivazione manuale.")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
             MacSyncSwitchRow("Programma verifica automatica", isOn: $copy.auditSettings.enabled)
-            Text("Esegue periodicamente la verifica, senza riconoscimento automatico.").font(.caption).foregroundStyle(.secondary)
+            Text("Verifiche periodiche senza riconoscimento automatico.").font(.caption).foregroundStyle(.secondary)
             if copy.auditSettings.enabled {
                 scheduleControls
                 if let next = runtime.nextAuditAt {
@@ -517,8 +517,8 @@ struct ArchiveAuditPanel: View {
                 }
                 if copy.auditSettings.frequency == "weekly" {
                     Picker("Giorno", selection: $copy.auditSettings.weekday) {
-                        ForEach(1...7, id: \.self) { day in
-                            Text(Calendar.current.weekdaySymbols[day-1]).tag(day)
+                        ForEach([2,3,4,5,6,7,1], id: \.self) { day in
+                            Text(macSyncWeekdayName(day)).tag(day)
                         }
                     }
                 } else if copy.auditSettings.frequency == "monthly" {
@@ -539,7 +539,7 @@ struct ArchiveAuditPanel: View {
     }
 
     private var operation: some View {
-        MacSyncPanel("Stato e avanzamento", icon: "arrow.triangle.2.circlepath", accent: true) {
+        MacSyncPanel("Stato e avanzamento", icon: "arrow.triangle.2.circlepath", accent: true, compact: true) {
             if let p = copy.auditProgress {
                 CompactArchiveAuditProgress(progress: p)
             } else {
@@ -550,7 +550,12 @@ struct ArchiveAuditPanel: View {
             if copy.seedBusy {
                 Text(copy.seedStatus).font(.caption).lineLimit(3).help(copy.seedStatus)
             }
-            HStack {
+            HStack(spacing: 6) {
+                if let p = copy.auditProgress, !p.currentPath.isEmpty {
+                    Text("File: " + p.currentPath).font(.caption)
+                        .lineLimit(1).truncationMode(.middle).help(p.currentPath)
+                        .accessibilityLabel("File corrente: " + p.currentPath)
+                }
                 Spacer(minLength: 0)
                 if copy.auditBusy {
                     Button("Annulla verifica") { copy.cancelArchiveAudit() }.buttonStyle(MacSyncStopStyle())
@@ -570,22 +575,33 @@ struct ArchiveAuditPanel: View {
     }
 
     private var lastResult: some View {
-        MacSyncPanel("Ultima verifica", icon: "chart.bar.xaxis") {
+        MacSyncPanel("Ultima verifica", icon: "chart.bar.xaxis", compact: true, fillHeight: true) {
             if let report = copy.auditReport {
                 resultRow("Data e ora", macSyncDateTime(report.ended))
-                resultRow("Metodo", report.mode == .deep ? "SHA-256" : "Rapida (metadati)")
-                ForEach(AuditFindingKind.allCases, id: \.rawValue) { kind in
-                    Button {
-                        selectedFinding = kind; showFindings = true
-                    } label: {
-                        resultRow(kind.label, report.count(kind).formatted())
-                    }.buttonStyle(.plain).help("Mostra dettaglio")
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(report.mode == .deep ? "SHA-256" : "Rapida (metadati)").font(.caption.weight(.medium))
+                    Spacer(minLength: 4)
+                    Text("Durata: " + elapsedText(report.seconds)).font(.caption).monospacedDigit()
                 }
-                resultRow("Durata", elapsedText(report.seconds))
-                resultRow("Accodati", report.queuedRepairs.formatted())
-                Button("Visualizza report…") {
-                    selectedFinding = nil; showFindings = true
-                }.frame(maxWidth: .infinity)
+                Divider()
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], alignment: .leading, spacing: 4) {
+                    ForEach(AuditFindingKind.allCases, id: \.rawValue) { kind in
+                        Button {
+                            selectedFinding = kind; showFindings = true
+                        } label: {
+                            resultRow(shortFindingLabel(kind), report.count(kind).formatted())
+                        }.buttonStyle(.plain)
+                            .help(kind.label + " — mostra dettaglio")
+                            .accessibilityLabel(kind.label + ": " + report.count(kind).formatted())
+                    }
+                }
+                HStack {
+                    Text("Accodati: \(report.queuedRepairs.formatted())").font(.caption).foregroundStyle(.secondary)
+                    Spacer(minLength: 4)
+                    Button("Visualizza report…") {
+                        selectedFinding = nil; showFindings = true
+                    }
+                }
             } else {
                 Text("Nessuna verifica completata").font(.caption).foregroundStyle(.secondary)
                 Button("Visualizza report…") {}.disabled(true)
@@ -605,6 +621,16 @@ struct ArchiveAuditPanel: View {
         }
     }
 
+    private func shortFindingLabel(_ kind: AuditFindingKind) -> String {
+        switch kind {
+        case .matching: return "Corrispondenti"
+        case .missing: return "Mancanti"
+        case .different: return "Differenti"
+        case .extra: return "Solo destinazione"
+        case .uncertain: return "Non verificabili"
+        }
+    }
+
     private func resultRow(_ label: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(label).font(.caption).lineLimit(2)
@@ -614,10 +640,10 @@ struct ArchiveAuditPanel: View {
     }
 
     private var maintenance: some View {
-        MacSyncPanel("Manutenzione temporanei", icon: "wrench.and.screwdriver") {
+        MacSyncPanel("Manutenzione temporanei", icon: "wrench.and.screwdriver", compact: true) {
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Individua e rimuove i file temporanei lasciati da copie interrotte. Usala a copie ferme.")
+                    Text("Verifica e rimuove i temporanei di copie interrotte. Usala a copie ferme.")
                         .font(.caption).foregroundStyle(.secondary)
                     Text(copy.maintenanceStatus).font(.caption).foregroundStyle(.secondary)
                         .lineLimit(2).help(copy.maintenanceStatus)
@@ -646,7 +672,7 @@ private struct CompactArchiveAuditProgress: View {
         TimelineView(.periodic(from: progress.started, by: 1)) { context in
             let elapsed = max(0.001, context.date.timeIntervalSince(progress.started))
             let fraction = determinate ? max(0, min(0.99, Double(progress.compared) / Double(progress.total))) : 0
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text(progress.phase).font(.subheadline.weight(.semibold))
                     Spacer()
@@ -659,19 +685,15 @@ private struct CompactArchiveAuditProgress: View {
                 Divider()
                 HStack(alignment: .top, spacing: 5) {
                     metric("Tempo trascorso", elapsedText(elapsed))
-                    Divider().frame(height: 32)
+                    Divider().frame(height: 27)
                     metric("Velocità media", determinate
                         ? SyncLiveProgress.formatRate(Double(progress.bytesRead) / elapsed)
                         : "\(Int(Double(progress.scannedFiles) / elapsed)) file/s")
-                    Divider().frame(height: 32)
+                    Divider().frame(height: 27)
                     metric("Dati letti", sizeText(progress.bytesRead))
                 }
                 Text("File: \(progress.scannedFiles) · Cartelle: \(progress.scannedDirectories) · \(sizeText(progress.detectedBytes))")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                if !progress.currentPath.isEmpty {
-                    Text("File corrente: " + progress.currentPath).font(.caption)
-                        .lineLimit(1).truncationMode(.middle).help(progress.currentPath)
-                }
             }
         }
     }

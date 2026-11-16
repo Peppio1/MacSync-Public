@@ -54,7 +54,7 @@ jobs:
         env:
           MACSYNC_UI_PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
         run: swift test --skip-build --filter MacSyncUIPreviewTests
-      - name: Check 32 PNG artifacts
+      - name: Check 38 PNG artifacts
         env:
           PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
         run: |
@@ -80,6 +80,16 @@ jobs:
               test "$(sips -g pixelHeight "$file" | awk '/pixelHeight:/{print $2}')" = 1440
             done
           done
+          for appearance in light dark; do
+            for spec in minimum:1960:1320 idle:2360:1640 compact-idle:2040:1440; do
+              IFS=: read -r variant width height <<< "$spec"
+              file="$PREVIEW_DIR/$variant-audit-$appearance.png"
+              test -s "$file"
+              test "$(sips -g pixelWidth "$file" | awk '/pixelWidth:/{print $2}')" = "$width"
+              test "$(sips -g pixelHeight "$file" | awk '/pixelHeight:/{print $2}')" = "$height"
+            done
+          done
+          test "$(find "$PREVIEW_DIR" -maxdepth 1 -name '*.png' | wc -l | tr -d ' ')" = 38
       - uses: actions/upload-artifact@v6
         with:
           name: MacSync-UI-Previews

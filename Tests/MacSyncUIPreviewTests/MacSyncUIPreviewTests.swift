@@ -6,6 +6,13 @@ import MacSyncCore
 
 /// Renders the actual configuration view with a preview-only runtime. All interactions are disabled; synthetic history is stored in a temporary SQLite database, never the real app archive.
 final class MacSyncUIPreviewTests: XCTestCase {
+    func testItalianWeekdayLabels() async {
+        await MainActor.run {
+            XCTAssertEqual((1...7).map(macSyncWeekdayName), ["Domenica","Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato"])
+            XCTAssertEqual(macSyncWeekdayName(0), "—")
+        }
+    }
+
     func testRenderProductionComponents() async throws {
         guard let path = ProcessInfo.processInfo.environment["MACSYNC_UI_PREVIEW_DIR"], !path.isEmpty else {
             throw XCTSkip("UI artifact rendering is opt-in via MACSYNC_UI_PREVIEW_DIR")
@@ -58,6 +65,13 @@ final class MacSyncUIPreviewTests: XCTestCase {
                         .allowsHitTesting(false)
                     try Self.render(screen, name: "page-\(pageKey(page))-\(suffix)", scheme: scheme, directory: directory, width: 1180, height: 820)
                     try Self.render(screen, name: "compact-\(pageKey(page))-\(suffix)", scheme: scheme, directory: directory, width: 1020, height: 720)
+                    if page == .audit {
+                        try Self.render(screen, name: "minimum-audit-\(suffix)", scheme: scheme, directory: directory, width: 980, height: 660)
+                        runtime.copy.populateScreenshotFixture(page: page, entries: try log.recent(), cycle: try history.cycles(limit: 1).first, lastAudit: lastAudit, auditInProgress: false)
+                        let idle = MacSyncConfigurationView(model: runtime.model, copy: runtime.copy, runtime: runtime, settings: runtime.settings, destinations: runtime.destinations, initialPage: page, previewScheme: scheme).allowsHitTesting(false)
+                        try Self.render(idle, name: "idle-audit-\(suffix)", scheme: scheme, directory: directory, width: 1180, height: 820)
+                        try Self.render(idle, name: "compact-idle-audit-\(suffix)", scheme: scheme, directory: directory, width: 1020, height: 720)
+                    }
                 }
             }
         }

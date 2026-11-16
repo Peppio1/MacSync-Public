@@ -234,3 +234,8 @@ Rollback ref `rollback-v0.13.4` keeps validated 643b3aaa7988d131b0587f6a60208545
 ### v0.13.6 — archive screen layout
 
 Rollback `rollback-v0.13.5` retains 0d8b99443b927c3621166dc5d45b382332b8bbf6 (145 functional tests and rendering passed). Archive view now uses one configuration panel, right-side live progress and latest result, and a full-width maintenance strip. Existing audit, recognition/confirmation, scheduling and safety behavior retained; no changes to core or database schema. Preview-only fixture now creates a small actual audit report in temporary directories to show result rows while rendering synthetic in-progress telemetry. CI still needs to validate the new layout in both themes and window sizes.
+
+
+### v0.13.7 — audit layout refinements
+
+Rollback `rollback-v0.13.6` retains d00ccf6bbd2e653f1435b38550d180da3e6d2165 (145 core tests and UI rendering passed). Audit-only compact panels, balanced columns, compact two-column report counts, file path beside the cancel action, and explicit Italian weekday names in both schedules. All result categories and confirmation actions remain; no core or database changes. Added weekday label regression and six audit screenshot fixtures, including idle standard/compact and running at 980×660, total 38 PNGs. Scroll fallback remains for unusually long states rather than hiding actions. Actual screenshot inspection and interactive/SMB validation pending.
