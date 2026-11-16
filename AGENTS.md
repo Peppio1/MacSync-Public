@@ -7,7 +7,7 @@ App nativa macOS Sequoia per sincronizzazione unidirezionale delle cartelle dell
 - UI con configurazione per entrambe le coppie: Sorgente → Destinazione. Le due cartelle si scelgono con NSOpenPanel o drag & drop dal Finder. I nomi di riferimento sono Cartella_1 e Cartella_2 ma sono configurabili gli effettivi percorsi.
 - Sorgenti locali del Mac (monitor FSEvents); destinazioni locali o SMB già montate; sfruttare le credenziali memorizzate nel sistema operativo. Niente form IP/utente/password/dominio, niente rclone o Keychain proprietario per il trasferimento.
 - SQLite locale per inventario, coda persistente, attività e log esportabili. FSEvents per rilevare modifiche, con scansioni locali mirate e audit periodici.
-- Frequenza configurabile: ogni 1–45 minuti, ogni 1–12 ore, ogni giorno a orario HH:mm oppure un giorno specifico della settimana a HH:mm. Il controllo di destinazione SMB avviene solo immediatamente prima di ogni sincronizzazione, non con timer autonomo. Mai enumerare ricorsivamente la destinazione ad ogni ciclo.
+- Frequenza configurabile: ogni 1–59 minuti, ogni 1–23 ore, ogni giorno a orario HH:mm oppure un giorno specifico della settimana a HH:mm. Il controllo di destinazione SMB avviene solo immediatamente prima di ogni sincronizzazione, non con timer autonomo. Mai enumerare ricorsivamente la destinazione ad ogni ciclo.
 - Obiettivo finale: installo/configuro/dimentico, avvio automatico al login opzionale, verifica del monte SMB e gestione della ripresa senza cancellazioni improprie. La VPN è GIÀ gestita dal router di rete e non è di competenza di MacSync.
 - Gli altri utenti hanno accesso in lettura alla copia server; permessi gestiti da Windows. L'iMac è fonte di verità.
 
@@ -187,3 +187,8 @@ Anteprime NSHostingView e cacheDisplay in finestra di test, dati sintetici, ness
 - [macOS CI](https://github.com/Peppio1/MacSync-Public/actions/runs/43882303897): 133 test funzionali superati, un test UI saltato intenzionalmente, zero errori, zero warning nei log; build release e pacchetto ad hoc generati.
 - [macOS UI Preview](https://github.com/Peppio1/MacSync-Public/actions/runs/43882303739): test di rendering superato, sei PNG 1680 × 840 px, tema chiaro/scuro, nessun segnaposto osservato durante l'ispezione visiva. I PNG mostrano componenti di produzione con dati sintetici, non ancora la finestra completa.
 - Prossimo obiettivo v0.13: concordare navigazione, layout e stati dell'interfaccia; progettare anteprime dell'intera finestra senza avviare il motore o accedere a dati reali. Preservare tutte le protezioni e i test già convalidati. Nessuna approvazione per un restyling definitivo è ancora registrata. Il collaudo reale macOS/SMB/VPN resta obbligatorio prima dell'uso in produzione.
+
+
+## v0.13 — interfaccia candidata e pianificazione
+
+Menu laterale Panoramica, Cartelle, Pianificazione, Verifica archivio, Registro attività, Impostazioni; tema automatico/chiaro/scuro. Due coppie unidirezionali, controlli reali esistenti. Intervalli 1–59 minuti, 1–23 ore, default 5 minuti; inserimento numerico, +/- e scorciatoie, input non valido non salvato. Interruzione cooperativa obbligatoria per ogni operazione lunga, senza rollback di cancellazioni effettuate o abort forzato della pubblicazione atomica. Copertura completa di interruzioni, anteprime finestra v0.13 e CI da verificare. Nessun collaudo reale SMB eseguito.

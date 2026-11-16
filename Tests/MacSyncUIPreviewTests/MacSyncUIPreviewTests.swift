@@ -19,6 +19,17 @@ final class MacSyncUIPreviewTests: XCTestCase {
                 try Self.render(folderExample, name: "folders-\(suffix)", scheme: scheme, directory: directory)
                 try Self.render(summaryExample, name: "summary-\(suffix)", scheme: scheme, directory: directory)
                 try Self.render(auditExample, name: "audit-\(suffix)", scheme: scheme, directory: directory)
+                try Self.render(scheduleExample, name: "schedule-\(suffix)", scheme: scheme, directory: directory)
+            }
+        }
+    }
+
+    private var scheduleExample: some View {
+        MacSyncSectionShell(page: .constant(.schedule), monitoring: true, next: Date().addingTimeInterval(900)) {
+            MacSyncPanel("Frequenza sincronizzazione", icon: "clock", accent: true) {
+                Text("Minuti · Ore · Giornaliera · Settimanale").font(.caption)
+                SyncIntervalEditor(range: 1...59, unit: "minuti", value: 15, apply: { _ in })
+                Text("Ogni 15 minuti").font(.caption)
             }
         }
     }

@@ -24,16 +24,34 @@ final class SyncScheduleTests: XCTestCase {
     }
     func testMinuteAndHourBoundaries() {
         XCTAssertTrue(schedule(.minutes, 1).isValid)
-        XCTAssertTrue(schedule(.minutes, 45).isValid)
+        XCTAssertTrue(schedule(.minutes, 59).isValid)
         XCTAssertFalse(schedule(.minutes, 0).isValid)
-        XCTAssertFalse(schedule(.minutes, 46).isValid)
+        XCTAssertFalse(schedule(.minutes, 60).isValid)
         XCTAssertTrue(schedule(.hours, 1).isValid)
-        XCTAssertTrue(schedule(.hours, 12).isValid)
-        XCTAssertFalse(schedule(.hours, 13).isValid)
+        XCTAssertTrue(schedule(.hours, 23).isValid)
+        XCTAssertFalse(schedule(.hours, 24).isValid)
         XCTAssertFalse(schedule(.hours, 0).isValid)
         let now = local(2026, 11, 14, 10, 15)
         XCTAssertEqual(schedule(.minutes, 5).next(after: now), now.addingTimeInterval(300))
         XCTAssertEqual(schedule(.hours, 12).next(after: now), now.addingTimeInterval(12*3600))
+    }
+
+    func testCustomIntervalsAndPersistence() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        for value in [1, 5, 10, 15, 20, 40, 45, 59] {
+            let plan = schedule(.minutes, value)
+            XCTAssertTrue(plan.isValid)
+            XCTAssertEqual(plan.next(after: now), now.addingTimeInterval(Double(value) * 60))
+            XCTAssertEqual(try JSONDecoder().decode(SyncSchedule.self, from: JSONEncoder().encode(plan)), plan)
+        }
+        for value in [1, 12, 15, 23] {
+            let plan = schedule(.hours, value)
+            XCTAssertTrue(plan.isValid)
+            XCTAssertEqual(plan.next(after: now), now.addingTimeInterval(Double(value) * 3600))
+        }
+        XCTAssertEqual(SyncSchedule.standard.interval, 5)
+        XCTAssertNil(schedule(.minutes, 60).next(after: now))
+        XCTAssertNil(schedule(.hours, 24).next(after: now))
     }
 
     func testIntervalCadenceDoesNotDriftAfterFinishing() {

@@ -90,9 +90,9 @@ final class SyncSettingsController: ObservableObject {
         updated.frequency = frequency
         switch frequency {
         case .minutes:
-            if !(1...45).contains(updated.interval) { updated.interval = 5 }
+            if !(1...59).contains(updated.interval) { updated.interval = 5 }
         case .hours:
-            if !(1...12).contains(updated.interval) { updated.interval = 1 }
+            if !(1...23).contains(updated.interval) { updated.interval = 1 }
         case .daily, .weekly:
             break
         }

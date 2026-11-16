@@ -30,12 +30,12 @@ jobs:
         env:
           MACSYNC_UI_PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
         run: swift test --filter MacSyncUIPreviewTests
-      - name: Check six PNG artifacts
+      - name: Check eight PNG artifacts
         env:
           PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
         run: |
           set -euo pipefail
-          for component in folders summary audit; do
+          for component in folders summary audit schedule; do
             for appearance in light dark; do
               file="$PREVIEW_DIR/$component-$appearance.png"
               test -s "$file"

@@ -8,7 +8,7 @@ public struct SyncSchedule: Codable, Equatable, Sendable {
     }
 
     public var frequency: Frequency
-    /// Minutes: 1...45; hours: 1...12. Ignored for daily/weekly.
+    /// Minutes: 1...59; hours: 1...23. Ignored for daily/weekly.
     public var interval: Int
     /// Local wall-clock hour: 0...23.
     public var hour: Int
@@ -34,8 +34,8 @@ public struct SyncSchedule: Codable, Equatable, Sendable {
         guard (0...23).contains(hour), (0...59).contains(minute),
               (1...7).contains(weekday) else { return false }
         switch frequency {
-        case .minutes: return (1...45).contains(interval)
-        case .hours: return (1...12).contains(interval)
+        case .minutes: return (1...59).contains(interval)
+        case .hours: return (1...23).contains(interval)
         case .daily, .weekly: return true
         }
     }

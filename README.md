@@ -254,3 +254,8 @@ Anteprime NSHostingView e cacheDisplay in finestra di test, dati sintetici, ness
 - [macOS CI](https://github.com/Peppio1/MacSync-Public/actions/runs/43882303897): 133 test funzionali superati, un test UI saltato intenzionalmente, zero errori, zero warning nei log; build release e pacchetto ad hoc generati.
 - [macOS UI Preview](https://github.com/Peppio1/MacSync-Public/actions/runs/43882303739): test di rendering superato, sei PNG 1680 × 840 px, tema chiaro/scuro, nessun segnaposto osservato durante l'ispezione visiva. I PNG mostrano componenti di produzione con dati sintetici, non ancora la finestra completa.
 - Prossimo obiettivo v0.13: concordare navigazione, layout e stati dell'interfaccia; progettare anteprime dell'intera finestra senza avviare il motore o accedere a dati reali. Preservare tutte le protezioni e i test già convalidati. Nessuna approvazione per un restyling definitivo è ancora registrata. Il collaudo reale macOS/SMB/VPN resta obbligatorio prima dell'uso in produzione.
+
+
+## v0.13 — interfaccia candidata e pianificazione
+
+Menu laterale Panoramica, Cartelle, Pianificazione, Verifica archivio, Registro attività, Impostazioni; tema automatico/chiaro/scuro. Due coppie unidirezionali, controlli reali esistenti. Intervalli 1–59 minuti, 1–23 ore, default 5 minuti; inserimento numerico, +/- e scorciatoie, input non valido non salvato. Interruzione cooperativa obbligatoria per ogni operazione lunga, senza rollback di cancellazioni effettuate o abort forzato della pubblicazione atomica. Copertura completa di interruzioni, anteprime finestra v0.13 e CI da verificare. Nessun collaudo reale SMB eseguito.

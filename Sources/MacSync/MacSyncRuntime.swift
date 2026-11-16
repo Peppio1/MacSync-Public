@@ -81,6 +81,14 @@ final class MacSyncRuntime: ObservableObject {
         automaticStatus = "Copie fermate manualmente: avvio automatico sospeso fino al prossimo avvio dell'app"
     }
 
+    func resumeAutomaticCopies() {
+        guard copy.automaticCopiesEnabled, !copy.active, !copy.seedBusy, !copy.maintaining else { return }
+        configurationRevision += 1
+        suspendedUntilNextLaunch = false
+        automaticStatus = "Copie automatiche abilitate: attendo il prossimo ciclo"
+        scheduleNextAutomaticAttempt()
+    }
+
     func onAutomaticPreferenceChanged(_ enabled: Bool) {
         configurationRevision += 1
         copy.setAutomaticCopiesEnabled(enabled)
