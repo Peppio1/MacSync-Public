@@ -1,9 +1,17 @@
 name: macOS CI
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'Package.swift'
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'Packaging/**'
+      - '.github/workflows/macos-ci.yml'
   workflow_dispatch:
 
-# Compile explicitly on demand; prevent overlapping runs.
+# Compile code changes and manual runs; prevent overlapping runs.
 concurrency:
   group: macsync-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -17,6 +25,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - name: Tools
         run: |
           xcodebuild -version
