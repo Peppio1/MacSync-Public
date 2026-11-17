@@ -39,6 +39,9 @@ public struct SyncCycleRecord: Codable, Equatable, Sendable, Identifiable {
     public let seconds: Double?
     public let state: String
     public var automatic: Bool? = nil
+    public init(id:String, sessionID:String, started:Date, ended:Date?, seconds:Double?, state:String, automatic:Bool? = nil) {
+        self.id=id; self.sessionID=sessionID; self.started=started; self.ended=ended; self.seconds=seconds; self.state=state; self.automatic=automatic
+    }
 }
 public struct SyncHistoryRow: Identifiable, Sendable {
     public let id: Int64

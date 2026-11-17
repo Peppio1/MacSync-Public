@@ -65,7 +65,7 @@ final class UpdateRecoveryIntegrationTests: XCTestCase {
                 XCTAssertGreaterThan(try journal.pending().count, 0)
                 try ApplicationRollback.databaseDigest(coordinator.database, scratch: state).write(to: digestURL)
                 let snapshot = try coordinator.createSnapshot(application: app, preferences: defaults.dictionaryRepresentation())
-                try coordinator.begin(application: app, previous: "0.17.0", requested: "0.17.1",
+                try coordinator.begin(application: app, previous: "0.18.0", requested: "0.18.1",
                                       snapshot: snapshot, defaults: defaults)
                 XCTAssertTrue(fm.fileExists(atPath: marker.path))
                 XCTAssertTrue(fm.isExecutableFile(atPath: snapshot.appendingPathComponent("Ripristina MacSync.command").path))
@@ -76,7 +76,7 @@ final class UpdateRecoveryIntegrationTests: XCTestCase {
                 // A restart that has not completed initialization must keep
                 // the marker. Exiting this test simulates that interrupted boot.
                 let pending = try XCTUnwrap(coordinator.startup(application: app, defaults: defaults))
-                XCTAssertEqual(Bundle(url: app)?.infoDictionary?["CFBundleShortVersionString"] as? String, "0.17.1")
+                XCTAssertEqual(Bundle(url: app)?.infoDictionary?["CFBundleShortVersionString"] as? String, "0.18.1")
                 XCTAssertTrue(fm.fileExists(atPath: marker.path))
                 try digestMatches()
                 safetyOff()
@@ -87,16 +87,16 @@ final class UpdateRecoveryIntegrationTests: XCTestCase {
                 let pending = try coordinator.loadPending()
                 XCTAssertThrowsError(try coordinator.recover(from: pending.snapshot, isStopped: { false }, confirm: { _ in true }))
                 XCTAssertNil(try coordinator.recover(from: pending.snapshot, isStopped: { true }, confirm: { _ in false }))
-                try ApplicationRollback.validateBundle(app, version: "0.17.1", identifier: "org.macsync.ci.install-lab", publicKey: key)
+                try ApplicationRollback.validateBundle(app, version: "0.18.1", identifier: "org.macsync.ci.install-lab", publicKey: key)
                 let preserved = try XCTUnwrap(coordinator.recover(from: pending.snapshot, isStopped: { true }, confirm: { _ in true }))
-                try ApplicationRollback.validateBundle(preserved.appendingPathComponent("MacSync.app"), version: "0.17.1",
+                try ApplicationRollback.validateBundle(preserved.appendingPathComponent("MacSync.app"), version: "0.18.1",
                                                         identifier: "org.macsync.ci.install-lab", publicKey: key)
-                try ApplicationRollback.validateBundle(app, version: "0.17.0", identifier: "org.macsync.ci.install-lab", publicKey: key)
+                try ApplicationRollback.validateBundle(app, version: "0.18.0", identifier: "org.macsync.ci.install-lab", publicKey: key)
                 XCTAssertTrue(fm.fileExists(atPath: marker.path))
                 try digestMatches()
             } else if phase == "finish" {
                 let pending = try XCTUnwrap(coordinator.startup(application: app, defaults: defaults))
-                let expected = scenario == "success" ? "0.17.1" : "0.17.0"
+                let expected = scenario == "success" ? "0.18.1" : "0.18.0"
                 try ApplicationRollback.validateBundle(app, version: expected, identifier: "org.macsync.ci.install-lab", publicKey: key)
                 _ = try LocalInventory(path: coordinator.database.path)
                 _ = try ChangeJournal(path: coordinator.database.path)

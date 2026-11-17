@@ -226,4 +226,69 @@ final class ArchiveAuditAndHistoryTests:XCTestCase {
         XCTAssertEqual(p.fraction,0.5)
         XCTAssertTrue(SyncLiveProgress.formatRate(1_250_000_000).hasSuffix("GB/s"))
     }
+
+    func testV0180SeparatedAuditMetricsAndActualReadBytes() throws {
+        let f=try setup(); defer { try? FileManager.default.removeItem(at:f.base) }
+        try put(f.source,"folder/same.jpg","same")
+        try put(f.target,"folder/same.jpg","same")
+        try put(f.source,"missing.jpg","123456")
+        try put(f.target,"extra.jpg","123")
+        try baseline(f)
+        let audit=try ArchiveAudit(journal:f.journal,mappings:[f.mapping])
+        var last:ArchiveAuditProgress?
+        _ = try audit.run(mode:.quick,progress:{last=$0})
+        let quick=try XCTUnwrap(last)
+        XCTAssertEqual(quick.source.files,2)
+        XCTAssertEqual(quick.destination.files,2)
+        XCTAssertEqual(quick.source.directories,1)
+        XCTAssertEqual(quick.destination.directories,1)
+        XCTAssertEqual(quick.source.detectedBytes,10)
+        XCTAssertEqual(quick.destination.detectedBytes,7)
+        XCTAssertEqual(quick.bytesRead,0)
+        XCTAssertNil(quick.compareRate)
+        let report=try audit.run(mode:.deep,progress:{last=$0})
+        let deep=try XCTUnwrap(last)
+        XCTAssertEqual(deep.source.bytesRead,4)
+        XCTAssertEqual(deep.destination.bytesRead,4)
+        XCTAssertEqual(report.bytesRead,8)
+        XCTAssertEqual(deep.source.detectedBytes,10)
+        XCTAssertEqual(deep.destination.detectedBytes,7)
+    }
+
+    func testV0180FinishedCyclesRemainSeparateAcrossModesAndReopen() throws {
+        let f=try setup(); defer { try? FileManager.default.removeItem(at:f.base) }
+        let history=try SyncCycleHistory(path:f.db)
+        let now=Date()
+        try history.begin(id:"old",sessionID:"legacy",at:now.addingTimeInterval(-30))
+        try history.finish(id:"old",at:now.addingTimeInterval(-25),seconds:5,state:"completed")
+        try history.begin(id:"manual",sessionID:"manual-session",at:now.addingTimeInterval(-20),automatic:false)
+        try history.finish(id:"manual",at:now.addingTimeInterval(-15),seconds:5,state:"completed")
+        try history.begin(id:"auto",sessionID:"auto-session",at:now.addingTimeInterval(-10),automatic:true)
+        try history.finish(id:"auto",at:now.addingTimeInterval(-5),seconds:5,state:"completed")
+        try history.begin(id:"running",sessionID:"auto-session",at:now,automatic:true)
+        let reopened=try SyncCycleHistory(path:f.db)
+        let cycles=try reopened.cycles(finishedOnly:true)
+        XCTAssertEqual(cycles.map(\.id),["auto","manual","old"])
+        XCTAssertEqual(cycles[0].automatic,true)
+        XCTAssertEqual(cycles[1].automatic,false)
+        XCTAssertNil(cycles[2].automatic)
+        XCTAssertEqual(try reopened.totals(cycleID:"auto").stats,SyncDashboardStats())
+        try reopened.markInterrupted(exceptSession:"new-app")
+        XCTAssertEqual(try reopened.cycles(finishedOnly:true).first?.state,"interrupted")
+    }
+
+    func testV0180EstimateHealthAndDiagnostic() throws {
+        XCTAssertNil(OperationEstimate.remaining(processed:0,total:20,elapsed:10))
+        XCTAssertNil(OperationEstimate.remaining(processed:3,total:0,elapsed:10))
+        XCTAssertEqual(OperationEstimate.remaining(processed:5,total:20,elapsed:10),30)
+        XCTAssertNil(OperationEstimate.remaining(processed:20,total:20,elapsed:10))
+        let f=try setup(); defer { try? FileManager.default.removeItem(at:f.base) }
+        XCTAssertEqual(FolderHealth.inspect(path:f.source.path),.ready)
+        XCTAssertEqual(FolderHealth.inspect(path:f.source.appendingPathComponent("missing").path),.missing)
+        XCTAssertEqual(FolderHealth.inspect(path:f.target.path,destination:true),.unverified)
+        XCTAssertEqual(FolderHealth.inspect(path:f.target.path,expected:try VolumeFingerprint.read(at:f.target),destination:true),.ready)
+        XCTAssertTrue(FolderHealth.classify(13).isError)
+        XCTAssertTrue(SyncDiagnostic.describe(NSError(domain:NSPOSIXErrorDomain,code:13,userInfo:nil)).contains("13"))
+    }
+
 }

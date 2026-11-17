@@ -28,7 +28,7 @@ jobs:
           MACSYNC_UI_PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
           MACSYNC_BRAND_PREVIEW_DIR: ${{ runner.temp }}/macsync-branding
         run: swift test --filter MacSyncUIPreviewTests
-      - name: Check 48 PNG artifacts
+      - name: Check 50 PNG artifacts
         env:
           PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
         run: |
@@ -67,7 +67,7 @@ jobs:
               test "$(sips -g pixelHeight "$file" | awk '/pixelHeight:/{print $2}')" = "$height"
             done
           done
-          test "$(find "$PREVIEW_DIR" -maxdepth 1 -name '*.png' | wc -l | tr -d ' ')" = 48
+          test "$(find "$PREVIEW_DIR" -maxdepth 1 -name '*.png' | wc -l | tr -d ' ')" = 50
       - uses: actions/upload-artifact@v6
         with:
           name: MacSync-UI-Previews

@@ -10,7 +10,7 @@ test -s "$graphics/MacSync.icns"
 test -s "$graphics/MacSync-DMG-Background.png"
 test -s "$graphics/branding-provenance.json"
 version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist")"
-test "$version" = 0.17.0
+test "$version" = 0.18.0
 name="MacSync-v$version-macOS-universal.dmg"
 # Test artifacts are intentionally marked with a visible CI warning in the
 # Finder background and the bundled provenance. The source app is unchanged.

@@ -130,6 +130,7 @@ final class MountedCopyController: ObservableObject {
                     guard let self, self.historySessionID==session, !self.active else { return }
                     self.lastRecordedCycle = cycle
                     self.lastCycleStats = stats
+                    self.sessionStats = stats
                     self.lastCycleAt = cycle?.ended
                 }
             } catch {
@@ -257,6 +258,9 @@ final class MountedCopyController: ObservableObject {
                 } catch { storageWarning = " — impossibile salvare lo storico della verifica" }
                 let warning = storageWarning
                 try? auditLog?.record(level:.info,rootID:"app",action:"audit_finish",bytes:report.bytesRead,durationSeconds:report.seconds,message:"Verifica conclusa: \(report.findings.count) elementi; \(report.queuedRepairs) riparazioni accodate" + warning)
+                for finding in report.findings where finding.kind == .uncertain {
+                    try? auditLog?.record(level:.warning,rootID:finding.rootID,action:"audit_uncertain",relativePath:finding.relativePath,message:finding.detail.isEmpty ? "Confronto non verificabile" : finding.detail)
+                }
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.onQueueChanged?()
@@ -631,7 +635,7 @@ final class MountedCopyController: ObservableObject {
                         try history?.finish(id:cycleID,at:endedAt,seconds:ProcessInfo.processInfo.systemUptime-startUptime,state:outcomeState)
                         try history?.prune(before:endedAt.addingTimeInterval(-365*86400))
                     } catch { historyError = "Storico incompleto: " + error.localizedDescription }
-                    let saved = try? history?.cycles(limit:1,finishedOnly:true).first
+                    let saved = (try? history?.cycles(limit:1,finishedOnly:true).first) ?? nil
                     let finalStats = totals.stats
                     let warning = historyError
                     let finalOutcome = outcomeState
@@ -642,7 +646,7 @@ final class MountedCopyController: ObservableObject {
                         self.interruptionRequested = false
                         if finalOutcome.hasPrefix("interrupted") { self.status = "Ciclo interrotto; operazioni rimanenti in coda." }
                         self.historyWarning = warning
-                        self.lastRecordedCycle = saved ?? nil
+                        self.lastRecordedCycle = saved?.id == cycleID ? saved : SyncCycleRecord(id:cycleID,sessionID:sessionID,started:startedAt,ended:endedAt,seconds:endedAt.timeIntervalSince(startedAt),state:finalOutcome.contains("history_incomplete") ? finalOutcome : finalOutcome + "_history_incomplete",automatic:automatic)
                         self.lastCycleStats = finalStats
                         self.sessionStats = finalStats
                         self.completedCycles += 1

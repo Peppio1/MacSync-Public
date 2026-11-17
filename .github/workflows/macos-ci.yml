@@ -2,7 +2,7 @@ name: macOS CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop-v0.18.0]
     paths:
       - 'Package.swift'
       - 'Sources/**'
@@ -117,7 +117,7 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print LSMinimumSystemVersion' "$info")" = 13.0
           test "$(/usr/libexec/PlistBuddy -c 'Print LSUIElement' "$info")" = true
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIconFile' "$info")" = MacSync.icns
-          test "$version" = 0.17.0
+          test "$version" = 0.18.0
           test -s dist/MacSync.app/Contents/Resources/MacSync.icns
           test -x "$exe"
           lipo "$exe" -info
@@ -159,7 +159,7 @@ jobs:
           MACSYNC_UI_PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
           MACSYNC_BRAND_PREVIEW_DIR: ${{ runner.temp }}/macsync-branding
         run: swift test --skip-build --filter MacSyncUIPreviewTests
-      - name: Check 48 PNG artifacts
+      - name: Check 50 PNG artifacts
         env:
           PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
         run: |
@@ -198,7 +198,7 @@ jobs:
               test "$(sips -g pixelHeight "$file" | awk '/pixelHeight:/{print $2}')" = "$height"
             done
           done
-          test "$(find "$PREVIEW_DIR" -maxdepth 1 -name '*.png' | wc -l | tr -d ' ')" = 48
+          test "$(find "$PREVIEW_DIR" -maxdepth 1 -name '*.png' | wc -l | tr -d ' ')" = 50
       - uses: actions/upload-artifact@v6
         with:
           name: MacSync-UI-Previews
@@ -241,12 +241,12 @@ jobs:
       - name: Verify exact protected candidate and prepare signing tools
         run: |
           set -euo pipefail
-          (cd signing-input && shasum -a 256 -c MacSync-v0.17.0-macOS-universal.zip.sha256)
-          (cd signing-input && shasum -a 256 -c MacSync-v0.17.0-macOS-universal.dmg.sha256)
+          (cd signing-input && shasum -a 256 -c MacSync-v0.18.0-macOS-universal.zip.sha256)
+          (cd signing-input && shasum -a 256 -c MacSync-v0.18.0-macOS-universal.dmg.sha256)
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           printf '%s  %s\n' '0dd750be1d060b75f6b4075122e7ef2bf7f59d74090a3872217dc9a417bd5620' 'Packaging/Branding/MacSync-Approved-Original.png' | shasum -a 256 -c -
           mkdir "$RUNNER_TEMP/verify-branded-package"
-          ditto -x -k signing-input/MacSync-v0.17.0-macOS-universal.zip "$RUNNER_TEMP/verify-branded-package"
+          ditto -x -k signing-input/MacSync-v0.18.0-macOS-universal.zip "$RUNNER_TEMP/verify-branded-package"
           python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["approved_original"] is True and d["source_sha256"]=="0dd750be1d060b75f6b4075122e7ef2bf7f59d74090a3872217dc9a417bd5620"' "$RUNNER_TEMP/verify-branded-package/MacSync.app/Contents/Resources/branding-provenance.json"
           codesign --verify --deep --strict "$RUNNER_TEMP/verify-branded-package/MacSync.app"
           bash Packaging/prepare-release-signing.sh
@@ -255,7 +255,7 @@ jobs:
           MACSYNC_SPARKLE_PRIVATE_KEY: ${{ secrets.MACSYNC_SPARKLE_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          bash Packaging/sign-release-candidate.sh signing-input/MacSync-v0.17.0-macOS-universal.zip
+          bash Packaging/sign-release-candidate.sh signing-input/MacSync-v0.18.0-macOS-universal.zip
       - uses: actions/upload-artifact@v6
         with:
           name: MacSync-signed-release-candidate

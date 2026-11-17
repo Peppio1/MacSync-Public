@@ -241,7 +241,6 @@ struct SyncHistorySheet: View {
     @State private var cycleOffset=0
     @State private var moreCycles=true
     private var selectedCycle:SyncCycleRecord? { cycles.first { $0.id == selected } }
-    private var sessionID:String? { nil }
     private var cycleID:String? { selected.isEmpty ? nil : selected }
     var body:some View {
         VStack(alignment:.leading,spacing:12) {
@@ -293,12 +292,12 @@ struct SyncHistorySheet: View {
                 Text("Velocità media copia in staging: \(SyncLiveProgress.formatRate(totals.meanCopyRate))")
                 HStack {
                     ForEach([HistoryMetric.directoryCreated,.directoryRemoved,.expired]) { m in
-                        Button("\(m.title): \(m.count(totals.stats))") { metric=m }
+                        Button("\(m.title): \(m.count(totals.stats))") { metric=m }.disabled(selectedCycle == nil)
                     }
                 }
                 HStack {
-                    Button("Dettaglio backup") { metric = .backup }
-                    Button("Dettaglio copie temporanee") { metric = .stage }
+                    Button("Dettaglio backup") { metric = .backup }.disabled(selectedCycle == nil)
+                    Button("Dettaglio copie temporanee") { metric = .stage }.disabled(selectedCycle == nil)
                 }
             }.font(.caption)
             Divider()
@@ -320,11 +319,17 @@ struct SyncHistorySheet: View {
             Text("Storico dal rilascio 0.12.4. I percorsi aprono il file attuale, non una copia storica.")
                 .font(.caption).foregroundStyle(.secondary)
         }
-        .padding(20).frame(width:810,height:690)
+        .padding(20).frame(width:850,height:730)
         .onAppear { selected=copy.lastRecordedCycle?.id ?? ""; loadCycles(reset:true) }
         .onChange(of:selected) { _ in loadTotals() }
+        .onChange(of:copy.lastRecordedCycle?.id) { _ in
+            if selected == cycles.first?.id { selected=copy.lastRecordedCycle?.id ?? "" }
+            loadCycles(reset:true)
+        }
         .sheet(item:$metric) { item in
-            HistoryDetailsSheet(copy:copy,model:model,metric:item,cycleID:cycleID,sessionID:sessionID,roots:Array(Set(totals.byRoot.keys).union(model.configuredPairs().map(\.id))).sorted())
+            if let cycleID {
+                HistoryDetailsSheet(copy:copy,model:model,metric:item,cycleID:cycleID,sessionID:nil,roots:Array(Set(totals.byRoot.keys).union(model.configuredPairs().map(\.id))).sorted())
+            }
         }
     }
     private func loadCycles(reset:Bool) {
@@ -337,7 +342,7 @@ struct SyncHistorySheet: View {
                 do {
                     let values=try SyncCycleHistory(path:path).cycles(limit:100,offset:offset,finishedOnly:true)
                     DispatchQueue.main.async {
-                        if reset { cycles=values } else { cycles += values }
+                        if reset { cycles=values } else { cycles += values.filter { value in !cycles.contains(where:{$0.id==value.id}) } }
                         cycleOffset=offset+values.count; moreCycles=values.count==100
                         if !cycles.contains(where:{$0.id==selected}) { selected=cycles.first?.id ?? "" }
                         busy=false; loadTotals()

@@ -1160,7 +1160,7 @@ struct MacSyncConfigurationView: View {
             MacSyncPanel("Informazioni", icon: "info.circle", accent: false) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("MacSync · v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.17.0")").font(.subheadline.weight(.semibold))
+                        Text("MacSync · v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.18.0")").font(.subheadline.weight(.semibold))
                         Text("Registro SQLite locale").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()

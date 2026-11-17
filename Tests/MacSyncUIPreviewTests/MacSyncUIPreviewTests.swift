@@ -62,7 +62,7 @@ final class MacSyncUIPreviewTests: XCTestCase {
                     try log.record(level: .info, rootID: "app", action: "cycle", message: "Ciclo interrotto su richiesta; coda preservata")
                     let history = try SyncCycleHistory(path: db)
                     let now = Date()
-                    try history.begin(id: "demo-cycle", sessionID: "demo-session", at: now.addingTimeInterval(-318))
+                    try history.begin(id: "demo-cycle", sessionID: "demo-session", at: now.addingTimeInterval(-318), automatic:true)
                     try history.finish(id: "demo-cycle", at: now, seconds: 318, state: "partial")
                     var lastAudit: ArchiveAuditReport?
                     if page == .audit {
@@ -88,6 +88,11 @@ final class MacSyncUIPreviewTests: XCTestCase {
                     try Self.render(screen, name: "page-\(pageKey(page))-\(suffix)", scheme: scheme, directory: directory, width: 1180, height: 820)
                     try Self.render(screen, name: "compact-\(pageKey(page))-\(suffix)", scheme: scheme, directory: directory, width: 1020, height: 720)
                     try Self.render(screen, name: "minimum-\(pageKey(page))-\(suffix)", scheme: scheme, directory: directory, width: 980, height: 660)
+                    if page == .folders {
+                        runtime.populateFolderHealthPreview()
+                        let errorScreen=MacSyncConfigurationView(model:runtime.model,copy:runtime.copy,runtime:runtime,settings:runtime.settings,destinations:runtime.destinations,initialPage:.folders,previewScheme:scheme).allowsHitTesting(false)
+                        try Self.render(errorScreen,name:"page-folders-error-\(suffix)",scheme:scheme,directory:directory,width:1180,height:820)
+                    }
                     if page == .audit {
                         runtime.copy.populateScreenshotFixture(page: page, entries: try log.recent(), cycle: try history.cycles(limit: 1).first, lastAudit: lastAudit, auditInProgress: false)
                         let idle = MacSyncConfigurationView(model: runtime.model, copy: runtime.copy, runtime: runtime, settings: runtime.settings, destinations: runtime.destinations, initialPage: page, previewScheme: scheme).allowsHitTesting(false)
