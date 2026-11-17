@@ -1,0 +1,93 @@
+name: Publish verified v0.17.0 pre-release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-v0170.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macsync-publish-v0170
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[publish-v0.17.0]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: '44072456998'
+      TESTED_SHA: '2fe7037cf135f2cbd0051343885875a50aa6c015'
+      ARTIFACT_ID: '14322833998'
+      ARTIFACT_SHA: '086e5f957597c870753b3053a2ff22dbfab64fd1f9731b045b6d99f169d77cc3'
+      TAG: 'v0.17.0'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Validate previously signed immutable candidate
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Peppio1/MacSync-Public
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD^)" = "$TESTED_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" > run.json
+          jq -e --arg sha "$TESTED_SHA" '(.head_sha == $sha) and (.head_branch == "main") and (.status == "completed") and (.conclusion == "success")' run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/jobs" > jobs.json
+          jq -e 'any(.jobs[]; .name == "build" and .conclusion == "success") and any(.jobs[]; .name == "validate-production-signature" and .conclusion == "success")' jobs.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > artifact.json
+          jq -e --arg sha "$TESTED_SHA" --arg digest "sha256:$ARTIFACT_SHA" --argjson run "$RUN_ID" '.name == "MacSync-signed-release-candidate" and .expired == false and .digest == $digest and .workflow_run.id == $run and .workflow_run.head_sha == $sha' artifact.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > candidate.zip
+          printf '%s  candidate.zip\n' "$ARTIFACT_SHA" | sha256sum -c -
+          mkdir candidate
+          unzip -q candidate.zip -d candidate
+          cd candidate
+          test "$(grep '^commit=' build-provenance.txt)" = "commit=$TESTED_SHA"
+          test "$(grep '^run=' build-provenance.txt)" = "run=$RUN_ID"
+          test "$(grep '^version=' build-provenance.txt)" = "version=0.17.0"
+          sha256sum -c SHA256SUMS
+          zip=MacSync-v0.17.0-macOS-universal.zip
+          dmg=MacSync-v0.17.0-macOS-universal.dmg
+          test -s "$zip" && test -s "$dmg" && test -s appcast.xml
+          sha256sum -c "$zip.sha256"
+          printf '302a300506032b6570032100' | xxd -r -p > /tmp/macsync-pub.der
+          printf '%s' 'SDsuoQo3jF5WNHSC1yo6B92Nanc9bBdjHJ8O474h9LU=' | base64 -d >> /tmp/macsync-pub.der
+          base64 -d "$zip.edsignature" > /tmp/macsync-signature.bin
+          openssl pkeyutl -verify -pubin -keyform DER -inkey /tmp/macsync-pub.der -rawin -in "$zip" -sigfile /tmp/macsync-signature.bin
+          sha256sum "$dmg" > "$dmg.sha256"
+          echo "Exact tested candidate verified."
+      - name: Publish only a pre-release tagged at the tested commit
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release already exists: refusing to overwrite"; exit 1
+          fi
+          if existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null)"; then
+            test "$existing" = "$TESTED_SHA"
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$TESTED_SHA" >/dev/null
+          fi
+          gh release create "$TAG" \
+            candidate/MacSync-v0.17.0-macOS-universal.dmg \
+            candidate/MacSync-v0.17.0-macOS-universal.dmg.sha256 \
+            candidate/MacSync-v0.17.0-macOS-universal.zip \
+            candidate/MacSync-v0.17.0-macOS-universal.zip.sha256 \
+            candidate/MacSync-v0.17.0-macOS-universal.zip.edsignature \
+            candidate/appcast.xml \
+            candidate/build-provenance.txt \
+            candidate/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --latest=false \
+            --title "MacSync v0.17.0 — Pre-release di collaudo" \
+            --notes-file docs/RELEASE_v0.17.0.md
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease,isDraft,assets,url > published.json
+          jq -e '.isPrerelease == true and .isDraft == false and (.assets | length == 8)' published.json
+          cat published.json
