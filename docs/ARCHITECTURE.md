@@ -1,6 +1,6 @@
-# MacSync — Architettura v0.14.3
+# MacSync — Architettura v0.15.0
 
-> Riferimento corrente: commit 610ecbd, CI macOS 15 completata. Le note relative alle versioni precedenti sono conservate in [ARCHITECTURE_HISTORY.md](ARCHITECTURE_HISTORY.md) e [DEVELOPMENT_HISTORY.md](DEVELOPMENT_HISTORY.md). Non modificare le protezioni operative per rendere più facili i test.
+> Riferimento convalidato: commit 2cc398b, CI macOS 15 completata. v0.15.0 mantiene il motore invariato; regressione e pacchetto universale da verificare. Le note relative alle versioni precedenti sono conservate in [ARCHITECTURE_HISTORY.md](ARCHITECTURE_HISTORY.md) e [DEVELOPMENT_HISTORY.md](DEVELOPMENT_HISTORY.md). Non modificare le protezioni operative per rendere più facili i test.
 
 ## Componenti
 
@@ -65,10 +65,11 @@ La chiusura controllata annulla nuovi lavori e attende il drenaggio di worker e 
 | [43981589204](https://github.com/Peppio1/MacSync-Public/actions/runs/43981589204) | Correzione backup SQLite: 161 test ordinari superati |
 | [43982920242](https://github.com/Peppio1/MacSync-Public/actions/runs/43982920242) | Test integrato e 162 test ordinari superati |
 | [43983414603](https://github.com/Peppio1/MacSync-Public/actions/runs/43983414603) | 164 test ordinari superati; rendering separato; release e 48 PNG |
+| [43985988474](https://github.com/Peppio1/MacSync-Public/actions/runs/43985988474) | 167 test ordinari superati; 96 cicli accelerati, inventario 10.000 file e recupero simulato |
 
 Test locali includono resistenza a interruzioni, coda da 20.000 operazioni, copia sintetica da 64 MiB, oltre 1.000 cancellazioni autorizzate, carico giornaliero sintetico (40 cartelle, 360 file), quattro cicli di modifica e audit finale. Non equivalgono a un benchmark completo di archivio o rete.
 
-Ancora richiesti: test di durata e risorse, inventario esteso, arresto/riavvio del processo, interazioni UI e accessibilità, SMAppService/notifiche, compatibilità SMB/ACL Windows, riconnessioni VPN, sospensione, comportamento su disco pieno e carico effettivo. Usare solo dati sintetici e share di prova finché questi controlli non sono completati.
+Ancora richiesti: durata reale e risorse dell'app installata, arresto/riavvio effettivo del processo, interazioni UI e accessibilità, SMAppService/notifiche, compatibilità SMB/ACL Windows, riconnessioni VPN, sospensione, comportamento su disco pieno e carico effettivo. Usare solo dati sintetici e share di prova finché questi controlli non sono completati.
 
 ## Rollback e privacy
 

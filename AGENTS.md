@@ -1,8 +1,8 @@
 # AGENTS.md — MacSync
 
-## Stato corrente — v0.14.3
+## Stato corrente — v0.15.0 (consolidamento)
 
-Repository pubblico: Peppio1/MacSync-Public. App nativa Swift/SwiftUI, sincronizzazione unidirezionale locale Mac → locale/SMB già montato. Baseline verificata 610ecbd, workflow 43983414603: 164 test ordinari superati, nessun fallimento, rendering separato e 48 PNG. Durata, risorse e collaudo fisico restano da completare. Nessuna modifica funzionale non richiesta.
+Repository pubblico: Peppio1/MacSync-Public. App nativa Swift/SwiftUI, sincronizzazione unidirezionale locale Mac → locale/SMB già montato. Baseline verificata 2cc398b, workflow 43985988474: 167 test ordinari superati, nessun fallimento, rendering separato e 48 PNG. Durata accelerata, inventario sintetico e telemetria CI superati; regressione v0.15.0, risorse reali e collaudo fisico restano da completare. Nessuna modifica funzionale non richiesta.
 
 Consultare [README.md](README.md) e [architettura corrente](docs/ARCHITECTURE.md). Le istruzioni storiche sono conservate in [AGENTS_HISTORY.md](docs/AGENTS_HISTORY.md); NON applicare le vecchie specifiche al posto dei comportamenti correnti.
 
@@ -17,8 +17,8 @@ Consultare [README.md](README.md) e [architettura corrente](docs/ARCHITECTURE.md
 - Non falsificare statistiche, percentuali, tempi o risultati. Distinguere copie concluse, errori, rimandati, housekeeping e cancellazioni effettive.
 - Prima di modifiche operative preservare un punto di rollback verificabile. Non alterare foto, archivi o preferenze reali; non considerare rollback Git come ripristino dati.
 - Test su dati sintetici e CI macOS 15. Non considerare il progetto stabile prima del collaudo fisico macOS/SMB/VPN. Non introdurre segreti, percorsi o dati aziendali nel repository pubblico.
-- Modifiche puramente documentali non richiedono incrementi di versione. La fase successiva è la validazione di durata, risorse e affidabilità; aggiornare le evidenze soltanto dopo risultati effettivi.
+- Modifiche puramente documentali non richiedono incrementi di versione. La fase successiva è consolidamento e verifica del pacchetto universale; aggiornare le evidenze soltanto dopo risultati effettivi.
 
 ## Riferimenti
 
-[Baseline convalidata](https://github.com/Peppio1/MacSync-Public/actions/runs/43983414603) · [Rollback](https://github.com/Peppio1/MacSync-Public/tree/rollback-before-endurance-validation) · [Storico sviluppo](docs/DEVELOPMENT_HISTORY.md).
+[Baseline convalidata](https://github.com/Peppio1/MacSync-Public/actions/runs/43985988474) · [Rollback](https://github.com/Peppio1/MacSync-Public/tree/rollback-v0.14.3-validated) · [Storico sviluppo](docs/DEVELOPMENT_HISTORY.md).

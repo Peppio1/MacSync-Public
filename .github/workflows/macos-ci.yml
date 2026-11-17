@@ -34,21 +34,53 @@ jobs:
           xcodebuild -version
           swift --version
       - name: Tests
-        run: swift test
-      - name: Release build
-        run: swift build -c release
-      - name: Assemble unsigned prototype bundle
+        run: swift test -Xswiftc -warnings-as-errors
+      - name: Release build for Apple Silicon and Intel
         run: |
+          set -euo pipefail
+          for arch in arm64 x86_64; do
+            scratch="$RUNNER_TEMP/macsync-$arch"
+            swift build -c release --arch "$arch" --scratch-path "$scratch" -Xswiftc -warnings-as-errors
+            bin="$(swift build -c release --arch "$arch" --scratch-path "$scratch" --show-bin-path)"
+            cp "$bin/MacSync" "$RUNNER_TEMP/MacSync-$arch"
+            lipo -verify_arch "$arch" "$RUNNER_TEMP/MacSync-$arch"
+          done
+      - name: Assemble and verify universal ad hoc bundle
+        run: |
+          set -euo pipefail
           mkdir -p dist/MacSync.app/Contents/MacOS
-          cp .build/release/MacSync dist/MacSync.app/Contents/MacOS/MacSync
+          lipo -create "$RUNNER_TEMP/MacSync-arm64" "$RUNNER_TEMP/MacSync-x86_64" -output dist/MacSync.app/Contents/MacOS/MacSync
+          chmod 755 dist/MacSync.app/Contents/MacOS/MacSync
           cp Packaging/Info.plist dist/MacSync.app/Contents/Info.plist
-          plutil -lint dist/MacSync.app/Contents/Info.plist
+          info=dist/MacSync.app/Contents/Info.plist
+          exe=dist/MacSync.app/Contents/MacOS/MacSync
+          plutil -lint "$info"
+          version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$info")"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$info")" = com.macsync.prototype
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$info")" = MacSync
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundlePackageType' "$info")" = APPL
+          test "$(/usr/libexec/PlistBuddy -c 'Print LSMinimumSystemVersion' "$info")" = 13.0
+          test "$(/usr/libexec/PlistBuddy -c 'Print LSUIElement' "$info")" = true
+          test -x "$exe"
+          lipo -info "$exe"
+          lipo -verify_arch arm64 x86_64 "$exe"
           codesign --force --sign - dist/MacSync.app
-          ditto -c -k --sequesterRsrc --keepParent dist/MacSync.app dist/MacSync-prototype.zip
+          codesign --verify --deep --strict --verbose=2 dist/MacSync.app
+          zip="MacSync-v$version-macOS-universal.zip"
+          ditto -c -k --sequesterRsrc --keepParent dist/MacSync.app "dist/$zip"
+          mkdir -p "$RUNNER_TEMP/macsync-package-check"
+          ditto -x -k "dist/$zip" "$RUNNER_TEMP/macsync-package-check"
+          unpacked="$RUNNER_TEMP/macsync-package-check/MacSync.app"
+          codesign --verify --deep --strict --verbose=2 "$unpacked"
+          lipo -verify_arch arm64 x86_64 "$unpacked/Contents/MacOS/MacSync"
+          (cd dist && shasum -a 256 "$zip" > "$zip.sha256")
       - uses: actions/upload-artifact@v6
         with:
-          name: MacSync-macos15-prototype
-          path: dist/MacSync-prototype.zip
+          name: MacSync-macOS-universal
+          path: |
+            dist/MacSync-v*-macOS-universal.zip
+            dist/MacSync-v*-macOS-universal.zip.sha256
+          if-no-files-found: error
           retention-days: 7
       - name: Capture production SwiftUI components with AppKit
         env:
@@ -100,3 +132,39 @@ jobs:
           path: ${{ runner.temp }}/macsync-ui-previews/*.png
           if-no-files-found: error
           retention-days: 7
+
+  publish-v0150:
+    # Explicit one-version gate. Never publish ordinary pushes or failed builds.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[publish-v0.15.0]')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: MacSync-macOS-universal
+          path: release-assets
+      - name: Verify exact build and publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=v0.15.0
+          asset=MacSync-v0.15.0-macOS-universal.zip
+          # Avoid publishing a superseded commit or overwriting any release.
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+          (cd release-assets && sha256sum -c "$asset.sha256")
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release already exists: refusing to overwrite"; exit 1
+          fi
+          if existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null)"; then
+            test "$existing" = "$GITHUB_SHA"
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
+          fi
+          gh release create "$tag" "release-assets/$asset" "release-assets/$asset.sha256" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --title "MacSync v0.15.0 — Baseline di validazione" --notes-file docs/RELEASE_v0.15.0.md

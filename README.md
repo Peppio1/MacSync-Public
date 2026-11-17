@@ -2,28 +2,32 @@
 
 **Sincronizzazione unidirezionale nativa per macOS, verso cartelle locali o condivisioni SMB.**
 
-![Versione](https://img.shields.io/badge/version-0.14.3-blue)
+![Versione](https://img.shields.io/badge/version-0.15.0-blue)
 ![Piattaforma](https://img.shields.io/badge/platform-macOS-lightgrey)
 [![macOS CI](https://github.com/Peppio1/MacSync-Public/actions/workflows/macos-ci.yml/badge.svg?branch=main)](https://github.com/Peppio1/MacSync-Public/actions/workflows/macos-ci.yml)
 
 MacSync è un'applicazione desktop sviluppata in Swift e SwiftUI per replicare cartelle di lavoro del Mac su una destinazione locale o di rete, senza installare componenti sul server. La sorgente rimane l'unica fonte di verità: nessuna sincronizzazione inversa.
 
-> **Stato: v0.14.3 — prototipo in validazione avanzata.** I test su cartelle locali macOS sono superati. Il collaudo su iMac, SMB/VPN reale e applicazione installata è ancora necessario. Non utilizzare con dati di produzione prima del collaudo.
+> **Stato: v0.15.0 — consolidamento in validazione; pre-release solo dopo CI verde.** I test su cartelle locali macOS sono superati. Il collaudo su iMac, SMB/VPN reale e applicazione installata è ancora necessario. Non utilizzare con dati di produzione prima del collaudo.
 
 ## Download
 
-### MacSync v0.14.3 — versione di prova
+### MacSync v0.15.0 — candidata alla baseline
 
-[![Scarica MacSync per macOS](https://img.shields.io/badge/Scarica-MacSync%20v0.14.3-2563eb?style=for-the-badge&logo=apple)](https://github.com/Peppio1/MacSync-Public/actions/runs/43983414603/artifacts/14285220835)
+La distribuzione universale Intel/Apple Silicon sarà disponibile nella [pre-release v0.15.0](https://github.com/Peppio1/MacSync-Public/releases/tag/v0.15.0) soltanto dopo il superamento del workflow di consolidamento. Il pacchetto previsto è `MacSync-v0.15.0-macOS-universal.zip`, accompagnato dal checksum SHA-256. Non notarizzato; solo per collaudo.
+
+### MacSync v0.14.3 — ultima build già verificata
+
+[![Scarica MacSync per macOS](https://img.shields.io/badge/Scarica-MacSync%20v0.14.3-2563eb?style=for-the-badge&logo=apple)](https://github.com/Peppio1/MacSync-Public/actions/runs/43985988474)
 
 | Risorsa | Collegamento |
 |---|---|
-| Applicazione MacSync.app (archivio ZIP) | [Scarica direttamente](https://github.com/Peppio1/MacSync-Public/actions/runs/43983414603/artifacts/14285220835) |
-| Anteprime dell'interfaccia (48 immagini) | [Scarica le anteprime](https://github.com/Peppio1/MacSync-Public/actions/runs/43983414603/artifacts/14285220909) |
+| Applicazione MacSync.app (archivio ZIP) | [Artefatti del workflow](https://github.com/Peppio1/MacSync-Public/actions/runs/43985988474) |
+| Anteprime dell'interfaccia (48 immagini) | [Artefatti delle anteprime](https://github.com/Peppio1/MacSync-Public/actions/runs/43985988474) |
 | Compilazione convalidata | [Apri il workflow](https://github.com/Peppio1/MacSync-Public/actions/runs/43983414603) |
 | Versioni ufficiali | [GitHub Releases](https://github.com/Peppio1/MacSync-Public/releases) |
 
-**Nota:** non è ancora pubblicata una release ufficiale. I download attuali sono artefatti temporanei di GitHub Actions, richiedono l'accesso a GitHub e scadono il 23 novembre 2026. Dopo la scadenza consultare [Actions](https://github.com/Peppio1/MacSync-Public/actions) per eventuali compilazioni più recenti. Il pacchetto è firmato ad hoc, non notarizzato; non va considerato un installer di produzione.
+**Nota:** non è ancora pubblicata una release stabile. I download attuali sono artefatti temporanei di GitHub Actions, richiedono l'accesso a GitHub e scadono secondo la retention di 7 giorni. Dopo la scadenza consultare [Actions](https://github.com/Peppio1/MacSync-Public/actions) per eventuali compilazioni più recenti. Il pacchetto è firmato ad hoc, non notarizzato; non va considerato un installer di produzione.
 
 ## Funzionalità
 
@@ -132,25 +136,35 @@ Usare **Ferma tutto** prima di interventi straordinari. Attendere la conclusione
 
 ## Stato della validazione
 
-Ultima baseline convalidata: [610ecbd](https://github.com/Peppio1/MacSync-Public/commit/610ecbd37b2e62bb885ee769ce514be9e1b36a37), [workflow 43983414603](https://github.com/Peppio1/MacSync-Public/actions/runs/43983414603).
+Ultima baseline già convalidata: [2cc398b](https://github.com/Peppio1/MacSync-Public/commit/2cc398bc2c86543628460fefeb1aaecaf17e8ce8), [workflow 43985988474](https://github.com/Peppio1/MacSync-Public/actions/runs/43985988474). La regressione v0.15.0 e il pacchetto universale attendono l'esito CI.
 
 | Verifica | Risultato |
 |---|---|
-| Suite ordinaria | 164 superati, 0 falliti, 1 rendering opt-in separato (165 schedulati) |
+| Suite ordinaria | 167 superati, 0 falliti, 1 rendering opt-in separato (168 rilevati) |
 | Test integrato: due coppie, disconnessione simulata, backup e ripresa | Superato |
 | Carico sintetico: 40 cartelle, 360 file, quattro cicli di modifica | Superato |
 | Mirror definitivo e con recupero | Superato |
 | Release build e 48 anteprime UI | Completati |
-| Durata, risorse, scalabilità estesa | Da completare |
+| 96 cicli accelerati, inventario 10.000 file, interruzione simulata | Superati |
+| Compilazione universale e regressione v0.15.0 | In validazione |
+| Durata reale e risorse app installata | Da collaudare |
 | Interazioni UI, avvio al login, arresto e SMB/VPN reale | Da collaudare |
 
-Il successivo obiettivo è completare la validazione avanzata, consolidare una candidata al rilascio e procedere al collaudo fisico. Nessuna versione 1.0 stabile è dichiarata.
+Il successivo obiettivo è consolidare la v0.15.0 e procedere con le funzionalità pre-release e il collaudo fisico. Nessuna versione 1.0 stabile è dichiarata.
 
 ## Cronologia e changelog
 
 Le versioni sono riportate dalla più recente alla più vecchia. Lo storico descrive lo sviluppo progressivo: le impostazioni e i limiti delle vecchie versioni non sostituiscono quelli della versione attuale.
 
-### v0.14.3 — versione attuale
+### v0.15.0 — consolidamento
+
+- Motore, interfaccia, database e autorizzazioni invariati; versione visualizzata e metadati aggiornati.
+- Compilazione universale arm64/x86_64, controllo firma ad hoc, verifica del pacchetto estratto e checksum SHA-256.
+- Workflow di pubblicazione condizionato alla regressione completa, senza sovrascrivere release esistenti.
+- Baseline precedente: 167 test ordinari superati, 96 cicli accelerati, inventario di 10.000 file.
+- Nessuna dichiarazione di stabilità in produzione; collaudo reale ancora necessario.
+
+### v0.14.3 — baseline precedente
 
 - Backup SQLite autonomi tramite VACUUM INTO, correzione della creazione del file temporaneo su macOS, controllo integrità e pubblicazione esclusiva.
 - Validazione della ripresa dopo disconnessione simulata, ripristino separato della coda e diagnostica finale.
@@ -205,7 +219,7 @@ Per le modifiche tecniche dettagliate di ogni versione consultare lo [storico co
 
 ### Prossime fasi
 
-- Completare i test di durata, consumo risorse e scalabilità.
+- Consolidare i risultati dei test di durata accelerata e verificare il pacchetto universale.
 - Preparare la candidata al rilascio e la procedura di collaudo.
 - Verificare macOS, Windows SMB, VPN, permessi e ripresa dopo interruzioni reali.
 - Pubblicare una versione stabile soltanto dopo la validazione.
