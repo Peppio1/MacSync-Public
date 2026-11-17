@@ -133,12 +133,14 @@ public final class ArchiveAudit {
     public func run(mode: ArchiveAuditMode, repair: Bool = false,
                     cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
                     onVerifiedFile: (String, String, SeedFileFingerprint, SeedFileFingerprint) -> Void = { _,_,_,_ in },
+                    diagnostic: (ArchiveAuditProgress) -> Void = { _ in },
                     progress: (ArchiveAuditProgress) -> Void = { _ in }) throws -> ArchiveAuditReport {
         var state = ArchiveAuditProgress()
         let startTick = ProcessInfo.processInfo.systemUptime
         var published: Double = 0
         func check() throws { if cancellation.isCancelled { throw SeedVerificationError.cancelled } }
         func report(force: Bool = false) {
+            diagnostic(state)
             let now = ProcessInfo.processInfo.systemUptime
             if force || now-published >= 0.25 { published=now; progress(state) }
         }
@@ -152,6 +154,7 @@ public final class ArchiveAudit {
         }
         var pairs: [Pair] = []
         for mapping in mappings {
+            state.phase = "Controllo coppia di cartelle"; state.currentPath = mapping.rootID; report(force:true)
             try check(); try mapping.verify()
             guard try journal.watchedRootPath(rootID: mapping.rootID) == mapping.source.path else {
                 throw MirrorDeletionFailure.noBaseline
@@ -173,9 +176,11 @@ public final class ArchiveAudit {
             state.scanningDestination = false
             let sourcePrior = state.source.scanSeconds
             scanStart = ProcessInfo.processInfo.systemUptime
-            state.phase = "Analisi sorgente"; report(force:true)
+            state.phase = "Analisi sorgente"; state.currentPath = mapping.rootID; report(force:true)
             let source = try LocalScanner.scan(root:mapping.source,excludeManaged:true,
-                shouldContinue:{ !cancellation.isCancelled },onItem:{ item in
+                shouldContinue:{ !cancellation.isCancelled },onVisit:{ relative in
+                    state.currentPath = mapping.rootID + " / " + relative; diagnostic(state)
+                },onItem:{ item in
                     state.source.scanSeconds = sourcePrior + ProcessInfo.processInfo.systemUptime-scanStart
                     scanned(item)
                 })
@@ -184,9 +189,11 @@ public final class ArchiveAudit {
             state.scanningDestination = true
             let targetPrior = state.destination.scanSeconds
             scanStart = ProcessInfo.processInfo.systemUptime
-            state.phase = "Analisi destinazione"; report(force:true)
+            state.phase = "Analisi destinazione"; state.currentPath = mapping.rootID; report(force:true)
             let target = try LocalScanner.scan(root:mapping.target,excludeManaged:true,
-                shouldContinue:{ !cancellation.isCancelled },onItem:{ item in
+                shouldContinue:{ !cancellation.isCancelled },onVisit:{ relative in
+                    state.currentPath = mapping.rootID + " / " + relative; diagnostic(state)
+                },onItem:{ item in
                     state.destination.scanSeconds = targetPrior + ProcessInfo.processInfo.systemUptime-scanStart
                     scanned(item)
                 })
@@ -212,6 +219,7 @@ public final class ArchiveAudit {
             for path in Set(pair.source.keys).union(pair.target.keys).sorted() {
                 try check()
                 state.currentPath = mapping.rootID + " / " + path
+                diagnostic(state)
                 let src = pair.source[path], dst = pair.target[path]
                 let item = (src ?? dst)!
                 var kind: AuditFindingKind = .uncertain
@@ -294,7 +302,7 @@ public final class ArchiveAudit {
                   try Self.rootStamp(mapping.target) == pair.targetStamp else { throw MountedCopyError.volumeChanged }
         }
         try check()
-        state.phase = "Finalizzazione"; report(force:true)
+        state.phase = "Finalizzazione"; state.currentPath = ""; report(force:true)
         var repairs: [(rootID:String, sourcePath:String, item:TrackedItem)] = []
         if repair {
             // Revalidate local candidates just before one atomic enqueuing.
@@ -312,7 +320,11 @@ public final class ArchiveAudit {
             }
         }
         try check()
-        let queued = try journal.enqueueAuditRepairs(repairs, shouldContinue:{ !cancellation.isCancelled })
+        // Queue repairs retain the strict gate, including every SQL step.
+        if !repairs.isEmpty && !cancellation.mayCommit {
+            throw JournalError.database("Riparazioni non accodate: inventario non pronto durante la finalizzazione")
+        }
+        let queued = try journal.enqueueAuditRepairs(repairs, shouldContinue:{ cancellation.mayCommit })
         report(force:true)
         return ArchiveAuditReport(mode:mode,started:state.started,ended:Date(),
             seconds:ProcessInfo.processInfo.systemUptime-startTick,findings:findings,

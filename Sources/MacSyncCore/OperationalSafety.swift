@@ -36,18 +36,51 @@ public struct DirectoryBinding: Codable, Equatable, Sendable {
 public final class MonitorSafetyGate: @unchecked Sendable {
     private let lock = NSLock()
     private var generation = UUID()
+    private var auditEpoch = UUID()
     private var ready = false
+    private var reconciling = false
+    private var lastBlock = "Monitoraggio non pronto"
     public init() {}
     @discardableResult public func invalidate() -> UUID {
         lock.lock(); defer { lock.unlock() }
-        generation = UUID(); ready = false; return generation
+        generation = UUID(); auditEpoch = UUID(); ready = false; reconciling = false
+        lastBlock = "Monitoraggio arrestato o configurazione modificata"
+        return generation
     }
     public func setReady(_ value: Bool, generation token: UUID) {
         lock.lock(); defer { lock.unlock() }
-        if generation == token { ready = value }
+        guard generation == token else { return }
+        ready = value; reconciling = false
+        if !value { auditEpoch = UUID(); lastBlock = "Monitoraggio non pronto" }
+    }
+    /// Ordinary inventory updates still block all copy/deletion workers.
+    /// An already-authorized audit may continue its read-only comparison.
+    public func beginReconciliation(generation token: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        guard generation == token else { return }
+        if ready { reconciling = true }
+        ready = false
+    }
+    public func fail(generation token: UUID, reason: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard generation == token else { return }
+        ready = false; reconciling = false; auditEpoch = UUID(); lastBlock = reason
     }
     public var isReady: Bool {
         lock.lock(); defer { lock.unlock() }; return ready
+    }
+    public func beginAudit() -> UUID? {
+        lock.lock(); defer { lock.unlock() }
+        return ready ? auditEpoch : nil
+    }
+    public func auditBlockReason(_ token: UUID) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return auditEpoch == token && (ready || reconciling) ? nil : lastBlock
+    }
+    /// Never wait for the monitor inside a SQLite transaction.
+    public func auditCommitAllowed(_ token: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return ready && auditEpoch == token
     }
 }
 

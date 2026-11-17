@@ -291,4 +291,66 @@ final class ArchiveAuditAndHistoryTests:XCTestCase {
         XCTAssertTrue(SyncDiagnostic.describe(NSError(domain:NSPOSIXErrorDomain,code:13,userInfo:nil)).contains("13"))
     }
 
+
+    func testV0180AuditGateDistinguishesReconciliationFromFailure() throws {
+        let gate=MonitorSafetyGate()
+        let generation=gate.invalidate()
+        gate.setReady(true,generation:generation)
+        let token=try XCTUnwrap(gate.beginAudit())
+        let cancel=SeedVerificationCancellation(shouldContinue:{gate.auditBlockReason(token)==nil},commitAllowed:{gate.auditCommitAllowed(token)})
+        gate.beginReconciliation(generation:generation)
+        XCTAssertFalse(gate.isReady)
+        XCTAssertNil(gate.beginAudit())
+        XCTAssertFalse(cancel.isCancelled)
+        XCTAssertFalse(cancel.mayCommit)
+        gate.setReady(true,generation:generation)
+        XCTAssertTrue(cancel.mayCommit)
+        gate.fail(generation:generation,reason:"Errore inventario")
+        gate.setReady(true,generation:generation)
+        XCTAssertTrue(cancel.isCancelled)
+        XCTAssertFalse(cancel.wasExplicitlyCancelled)
+        XCTAssertEqual(gate.auditBlockReason(token),"Errore inventario")
+        let next=try XCTUnwrap(gate.beginAudit())
+        gate.invalidate()
+        XCTAssertNotNil(gate.auditBlockReason(next))
+        cancel.cancel()
+        XCTAssertTrue(cancel.wasExplicitlyCancelled)
+    }
+
+    func testV0180DeepAuditContinuesDuringOrdinaryInventoryReconciliation() throws {
+        let f=try setup(); defer {try? FileManager.default.removeItem(at:f.base)}
+        try put(f.source,"one.jpg","same"); try put(f.target,"one.jpg","same")
+        try put(f.source,"two.jpg","ABCD"); try put(f.target,"two.jpg","ABCD")
+        try baseline(f)
+        let gate=MonitorSafetyGate()
+        let gen=gate.invalidate(); gate.setReady(true,generation:gen)
+        let token=try XCTUnwrap(gate.beginAudit())
+        let cancel=SeedVerificationCancellation(shouldContinue:{gate.auditBlockReason(token)==nil},commitAllowed:{gate.auditCommitAllowed(token)})
+        var entered=false
+        let report=try ArchiveAudit(journal:f.journal,mappings:[f.mapping]).run(mode:.deep,cancellation:cancel,diagnostic:{ progress in
+            if progress.phase=="Verifica SHA-256" && !entered {
+                entered=true
+                gate.beginReconciliation(generation:gen)
+            }
+        })
+        XCTAssertTrue(entered)
+        XCTAssertFalse(gate.isReady)
+        XCTAssertEqual(report.count(.matching),2)
+        XCTAssertEqual(report.bytesRead,16)
+        XCTAssertTrue(try f.journal.pending().isEmpty)
+    }
+
+    func testV0180AuditRepairCannotCommitWhileReconciling() throws {
+        let f=try setup(); defer {try? FileManager.default.removeItem(at:f.base)}
+        try put(f.source,"missing.jpg","new"); try baseline(f)
+        let gate=MonitorSafetyGate()
+        let gen=gate.invalidate(); gate.setReady(true,generation:gen)
+        let token=try XCTUnwrap(gate.beginAudit())
+        let cancel=SeedVerificationCancellation(shouldContinue:{gate.auditBlockReason(token)==nil},commitAllowed:{gate.auditCommitAllowed(token)})
+        XCTAssertThrowsError(try ArchiveAudit(journal:f.journal,mappings:[f.mapping]).run(mode:.deep,repair:true,cancellation:cancel,diagnostic:{progress in
+            if progress.phase=="Finalizzazione" { gate.beginReconciliation(generation:gen) }
+        }))
+        XCTAssertTrue(try f.journal.pending().isEmpty)
+    }
+
 }

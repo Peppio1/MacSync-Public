@@ -4,12 +4,20 @@ import Darwin
 /// Never serialize NSError.userInfo, URLs or credentials. Report the OS domain,
 /// numeric code and the known cause, rather than guessing the remote fault.
 public enum SyncDiagnostic {
+    public static func clean(_ text:String,limit:Int = 3000) -> String {
+        String(text.replacingOccurrences(of:"\n",with:" ").replacingOccurrences(of:"\r",with:" ").replacingOccurrences(of:"\0",with:" ").prefix(limit))
+    }
     public static func describe(_ error: Error) -> String {
         if let copy = error as? MountedCopyError {
             if case .copyFailed(let code) = copy {
                 return "MountedCopyError.copyFailed; POSIX \(code): " + String(cString:strerror(Int32(clamping:code))) + "; coda preservata"
             }
             return "MountedCopyError: " + copy.localizedDescription
+        }
+        if let journal=error as? JournalError {
+            let message=journal.localizedDescription
+            let allowed=["Source root is unavailable or not a directory","Scan path is outside the source root","Source root is not a regular accessible directory","Source root changed during scan","Source scan path inaccessible (filesystem code ","Metadati non disponibili durante la verifica completa","File changed during inventory scan","Cannot enumerate source directory","Riparazioni non accodate: inventario non pronto durante la finalizzazione","Unexpected path outside root","database is locked","database is busy","database disk image is malformed","disk I/O error","database or disk is full"]
+            if allowed.contains(where:{message == $0 || ($0.hasSuffix("code ") && message.hasPrefix($0))}) { return "JournalError: " + clean(message) }
         }
         let e = error as NSError
         var parts = ["\(e.domain) [\(e.code)]"]

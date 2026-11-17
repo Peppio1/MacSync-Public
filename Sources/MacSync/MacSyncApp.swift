@@ -688,12 +688,12 @@ struct MacSyncConfigurationView: View {
                 }
                 MacSyncPanel("Destinazioni", icon: "folder", fillHeight: true) {
                     let pairs = model.configuredPairs().filter { !$0.path.isEmpty }
-                    Text("\(pairs.filter { runtime.targetHealth[$0.id]?.isReady ?? destinations.state(for:$0.id).isReady }.count) / \(pairs.count) destinazioni pronte").font(.subheadline.weight(.semibold))
+                    Text("\(pairs.filter { displayDestinationHealth($0.id).isReady }.count) / \(pairs.count) destinazioni pronte").font(.subheadline.weight(.semibold))
                     if runtime.sourceHealth.values.contains(where:{$0.isError}) || runtime.targetHealth.values.contains(where:{$0.isError}) || runtime.parentHealth.isError {
                         Label("Cartelle non accessibili — verifica i percorsi",systemImage:"exclamationmark.triangle.fill").font(.caption).foregroundStyle(.red)
                         Button("Controlla cartelle…") { page = .folders }
                     }
-                    ForEach(Array(pairs.prefix(3).enumerated()),id: \.offset) { item in destinationLine(item.element.destination, state:destinations.state(for:item.element.id)) }
+                    ForEach(Array(pairs.prefix(3).enumerated()),id: \.offset) { item in destinationLine(item.element.destination, state:displayDestinationHealth(item.element.id)) }
                     if pairs.count > 3 { Button("Mostra tutte le cartelle…") { page = .folders } }
                     Text("Ultimo controllo: " + (destinations.lastCheckedAt.map { macSyncClock($0) } ?? "non eseguito"))
                         .font(.caption).foregroundStyle(.secondary)
@@ -703,12 +703,28 @@ struct MacSyncConfigurationView: View {
         }
     }
 
-    private func destinationLine(_ path: String, state: DestinationAvailability) -> some View {
+    private func displayDestinationHealth(_ id:String) -> FolderHealth {
+        let operational=destinations.state(for:id)
+        if let checked=runtime.healthCheckedAt,
+           destinations.lastCheckedAt.map({ $0 <= checked }) ?? true {
+            if let state=runtime.targetHealth[id] { return state }
+            if runtime.parentHealth.isError { return runtime.parentHealth }
+        }
+        switch operational {
+        case .ready: return .ready
+        case .notConfigured: return .checking
+        case .unverified: return .unverified
+        case .differentVolume: return .differentVolume
+        case .unavailable: return .unavailable(0)
+        }
+    }
+
+    private func destinationLine(_ path: String, state: FolderHealth) -> some View {
         let name = path.isEmpty ? "Non configurata" : URL(fileURLWithPath:path).lastPathComponent
         return HStack(spacing: 6) {
             Text(name).font(.caption.weight(.semibold)).lineLimit(1)
             Spacer(minLength:4)
-            Text(state.description).font(.caption).foregroundStyle(state.isReady ? MacSyncColors.green(scheme) : (state == .notConfigured ? Color.secondary : Color.red)).lineLimit(2)
+            Text(state == .unavailable(0) ? "Cartella non accessibile" : state.description).font(.caption).foregroundStyle(state.isReady ? MacSyncColors.green(scheme) : (state.isError ? Color.red : Color.secondary)).lineLimit(2)
         }.help(path + ": " + state.description)
     }
 
@@ -846,9 +862,9 @@ struct MacSyncConfigurationView: View {
             }
             MacSyncPanel("Connessione",icon:"network") {
                 let pairs = model.configuredPairs().filter{!$0.path.isEmpty}
-                Text("\(pairs.filter{destinations.state(for:$0.id).isReady}.count) / \(pairs.count) destinazioni pronte").font(.subheadline.weight(.semibold))
+                Text("\(pairs.filter{displayDestinationHealth($0.id).isReady}.count) / \(pairs.count) destinazioni pronte").font(.subheadline.weight(.semibold))
                 ForEach(Array(pairs.dropFirst(current*4).prefix(4).enumerated()),id:\.offset) { item in
-                    destinationLine(item.element.destination,state:destinations.state(for:item.element.id))
+                    destinationLine(item.element.destination,state:displayDestinationHealth(item.element.id))
                 }
                 Text("Ultimo controllo: " + (destinations.lastCheckedAt.map {macSyncClock($0)} ?? "non eseguito")).font(.caption).foregroundStyle(.secondary)
                 HStack {

@@ -161,7 +161,7 @@ public final class LocalMonitorService {
 
     private func process(events: [SourceEvent], request: SeedVerificationCancellation, generation: UUID) {
         guard let inventory, !request.isCancelled else { return }
-        safetyGate.setReady(false,generation:generation)
+        safetyGate.beginReconciliation(generation:generation)
         var totalChanges = 0
         do {
             if recoveryRequired || events.contains(where: { $0.streamHistoryLost || $0.requiresFullReconciliation }) {
@@ -217,6 +217,7 @@ public final class LocalMonitorService {
             // Failed event paths remain unacknowledged. Retry by scanning
             // LOCAL folders at the next 5-minute health check.
             recoveryRequired = true
+            safetyGate.fail(generation:generation,reason:"Errore riconciliazione inventario: " + SyncDiagnostic.describe(error))
             try? activityLog?.record(level:.error,rootID:"monitor",action:"inventory_event",message:SyncDiagnostic.describe(error))
             report("Errore inventario: " + error.localizedDescription, active: false)
         }
@@ -236,7 +237,7 @@ public final class LocalMonitorService {
                 }
                 // This is a LOCAL periodic audit, not a recurring SMB scan.
                 if self.recoveryRequired || (self.lastFullScan.map({ Date().timeIntervalSince($0) >= 86_400 }) ?? true) {
-                    self.safetyGate.setReady(false,generation:generation)
+                    self.safetyGate.beginReconciliation(generation:generation)
                     var scan = ArchiveAuditProgress(); scan.phase = "Verifica locale"
                     self.update(MonitorUpdate(message:scan.phase,monitoring:false,pendingChanges:(try? store.pendingCount()) ?? 0,scanProgress:scan))
                     for root in self.roots {
@@ -253,7 +254,7 @@ public final class LocalMonitorService {
                     self.report("Verifica completa locale conclusa", active: true)
                 }
             } catch {
-                self.safetyGate.setReady(false,generation:generation)
+                self.safetyGate.fail(generation:generation,reason:"Verifica locale sospesa: " + SyncDiagnostic.describe(error))
                 self.recoveryRequired = true
                 try? self.activityLog?.record(level:.error,rootID:"monitor",action:"inventory_health",message:SyncDiagnostic.describe(error))
                 self.report("Verifica locale sospesa: " + error.localizedDescription, active: false)

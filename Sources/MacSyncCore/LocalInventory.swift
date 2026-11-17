@@ -46,6 +46,7 @@ public enum LocalScanner {
     public static func scan(root: URL, subtree: URL? = nil,
                             excludeManaged: Bool = false,
                             shouldContinue: () -> Bool = { true },
+                            onVisit: (String) -> Void = { _ in },
                             onItem: (TrackedItem) -> Void = { _ in }) throws -> [TrackedItem] {
         let root = root.standardizedFileURL.resolvingSymlinksInPath()
         let target = (subtree ?? root).standardizedFileURL.resolvingSymlinksInPath()
@@ -135,7 +136,12 @@ public enum LocalScanner {
             return kind
         }
 
+        func visit(_ url:URL) {
+            let prefix = root.path + "/"
+            onVisit(url.path.hasPrefix(prefix) ? String(url.path.dropFirst(prefix.count)) : "[radice]")
+        }
         if target != root {
+            visit(target)
             let kind = try record(target)
             if kind != "directory" {
                 try assertRootUnchanged()
@@ -146,7 +152,8 @@ public enum LocalScanner {
         var enumerationError: Error?
         let enumerator = FileManager.default.enumerator(
             at: target, includingPropertiesForKeys: Array(keys), options: [],
-            errorHandler: { _, error in
+            errorHandler: { url, error in
+                visit(url)
                 enumerationError = error
                 return false
             }
@@ -156,6 +163,7 @@ public enum LocalScanner {
         }
         for case let file as URL in enumerator {
             if enumerationError != nil { break }
+            visit(file)
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             if excludeManaged && file.lastPathComponent.lowercased().hasPrefix(".macsync-") {
                 if try file.resourceValues(forKeys: [.isDirectoryKey,.isSymbolicLinkKey]).isDirectory == true {

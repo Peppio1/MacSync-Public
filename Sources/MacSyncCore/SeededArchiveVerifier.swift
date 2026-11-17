@@ -23,8 +23,17 @@ public final class SeedVerificationCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
     private let shouldContinue: () -> Bool
+    private let commitAllowed: () -> Bool
 
-    public init(shouldContinue: @escaping () -> Bool = { true }) { self.shouldContinue = shouldContinue }
+    public init(shouldContinue: @escaping () -> Bool = { true }, commitAllowed: @escaping () -> Bool = { true }) {
+        self.shouldContinue = shouldContinue
+        self.commitAllowed = commitAllowed
+    }
+    public var wasExplicitlyCancelled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return cancelled
+    }
+    public var mayCommit: Bool { !isCancelled && commitAllowed() }
     public func cancel() {
         lock.lock()
         cancelled = true
@@ -371,6 +380,7 @@ public struct SeededArchiveSession: Sendable {
     public func auditAndRecognize(
         repair: Bool = false,
         cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
+        diagnostic: (ArchiveAuditProgress) -> Void = { _ in },
         progress: (ArchiveAuditProgress) -> Void = { _ in }
     ) throws -> (audit: ArchiveAuditReport, recognition: SeedVerificationReport) {
         let journal = try openJournal()
@@ -399,7 +409,7 @@ public struct SeededArchiveSession: Sendable {
                 let key = root + "\0" + path
                 guard !ambiguous.contains(key), let job = pending[key] else { return }
                 matches.append(SeedVerifiedMatch(jobID:job.id,rootID:root,relativePath:path,source:source,target:target,verifiedBytes:source.size))
-            },progress:progress)
+            },diagnostic:diagnostic,progress:progress)
         try checkFileIdentity()
         guard !cancellation.isCancelled else { throw SeedVerificationError.cancelled }
         // Report remaining jobs conservatively: directories, conflicts, files

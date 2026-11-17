@@ -215,7 +215,8 @@ final class MountedCopyController: ObservableObject {
         do { db = try Self.databaseURL() }
         catch { auditStatus = error.localizedDescription; return }
         let gate = monitorGate
-        let cancel = SeedVerificationCancellation(shouldContinue:{ gate.isReady })
+        guard let auditToken=gate.beginAudit() else { auditStatus="Inventario non pronto: verifica rinviata"; return }
+        let cancel = SeedVerificationCancellation(shouldContinue:{ gate.auditBlockReason(auditToken) == nil },commitAllowed:{ gate.auditCommitAllowed(auditToken) })
         auditCancel = cancel
         auditBusy = true
         maintaining = true
@@ -224,18 +225,27 @@ final class MountedCopyController: ObservableObject {
         auditStatus = "Verifica in attesa della coda di lavoro"
         queue.async { [weak self] in
             let auditLog = try? SyncActivityLog(path:db.path)
-            try? auditLog?.record(level:.info,rootID:"app",action:"audit_start",message:settings.mode == .deep ? "Verifica SHA-256 avviata" : "Verifica metadati avviata")
+            let auditID=UUID().uuidString
+            let started=Date()
+            var last=ArchiveAuditProgress(started:started)
+            last.phase="Preparazione verifica"
+            var currentRoot="app"
+            try? auditLog?.record(level:.info,rootID:"app",action:"audit_start",message:"ID \(auditID) — " + (settings.mode == .deep ? "Verifica SHA-256 avviata" : "Verifica metadati avviata") + "; riconoscimento: \(recognize); riparazioni: \(settings.repair)")
             do {
                 if cancel.isCancelled { throw SeedVerificationError.cancelled }
                 let journal = try ChangeJournal(path:db.path)
                 let maps = try configured.map {
-                    try MountedFolderMapping(rootID:$0.id,source:URL(fileURLWithPath:$0.path),
+                    currentRoot=$0.id
+                    return try MountedFolderMapping(rootID:$0.id,source:URL(fileURLWithPath:$0.path),
                         target:URL(fileURLWithPath:$0.destination),expectedTargetVolume:$0.expected)
                 }
+                currentRoot="app"
+                last.phase="Controllo identità cartelle"
                 try journal.verifyDirectoryBindings(maps,allowNewTarget:interactive)
                 let report: ArchiveAuditReport
                 let recognition: SeedVerificationReport?
                 let session: SeededArchiveSession?
+                let diagnostic: (ArchiveAuditProgress) -> Void = { last=$0 }
                 let progress: (ArchiveAuditProgress) -> Void = { snapshot in
                     DispatchQueue.main.async { [weak self] in
                         self?.auditProgress = snapshot
@@ -244,10 +254,10 @@ final class MountedCopyController: ObservableObject {
                 }
                 if recognize {
                     let local = try SeededArchiveSession(database:db,mappings:maps)
-                    let result = try local.auditAndRecognize(repair:settings.repair,cancellation:cancel,progress:progress)
+                    let result = try local.auditAndRecognize(repair:settings.repair,cancellation:cancel,diagnostic:diagnostic,progress:progress)
                     report = result.audit; recognition = result.recognition; session = local
                 } else {
-                    report = try ArchiveAudit(journal:journal,mappings:maps).run(mode:settings.mode,repair:settings.repair,cancellation:cancel,progress:progress)
+                    report = try ArchiveAudit(journal:journal,mappings:maps).run(mode:settings.mode,repair:settings.repair,cancellation:cancel,diagnostic:diagnostic,progress:progress)
                     recognition = nil; session = nil
                 }
 
@@ -257,7 +267,7 @@ final class MountedCopyController: ObservableObject {
                     try data.write(to:db.deletingLastPathComponent().appendingPathComponent("last-audit.json"),options:.atomic)
                 } catch { storageWarning = " — impossibile salvare lo storico della verifica" }
                 let warning = storageWarning
-                try? auditLog?.record(level:.info,rootID:"app",action:"audit_finish",bytes:report.bytesRead,durationSeconds:report.seconds,message:"Verifica conclusa: \(report.findings.count) elementi; \(report.queuedRepairs) riparazioni accodate" + warning)
+                try? auditLog?.record(level:.info,rootID:"app",action:"audit_finish",bytes:report.bytesRead,durationSeconds:report.seconds,message:"ID \(auditID) — Verifica conclusa: \(report.findings.count) elementi; \(report.queuedRepairs) riparazioni accodate" + warning)
                 for finding in report.findings where finding.kind == .uncertain {
                     try? auditLog?.record(level:.warning,rootID:finding.rootID,action:"audit_uncertain",relativePath:finding.relativePath,message:finding.detail.isEmpty ? "Confronto non verificabile" : finding.detail)
                 }
@@ -277,9 +287,19 @@ final class MountedCopyController: ObservableObject {
                     self.maintaining = false
                 }
             } catch {
-                try? auditLog?.record(level:cancel.isCancelled ? .info : .error,rootID:"app",action:"audit_error",message:cancel.isCancelled ? "Verifica annullata" : SyncDiagnostic.describe(error))
+                let block=gate.auditBlockReason(auditToken)
+                let explicit=cancel.wasExplicitlyCancelled
+                let cause:String
+                if explicit { cause="Verifica annullata: richiesta di arresto" }
+                else if let block { cause="Verifica interrotta dal monitoraggio: " + block }
+                else if let seed=error as? SeedVerificationError, case .cancelled=seed, !cancel.mayCommit {
+                    cause="Verifica interrotta: inventario non pronto durante l’accodamento; transazione annullata"
+                } else { cause="Verifica non riuscita: " + SyncDiagnostic.describe(error) }
+                let context=SyncDiagnostic.clean("ID \(auditID) — \(cause); fase: \(last.phase); ultimo elemento: \(last.currentPath.isEmpty ? "—" : last.currentPath); confrontati: \(last.compared)/\(last.total); byte letti: \(last.bytesRead)",limit:3000)
+                try? auditLog?.record(level:explicit ? .info : .error,rootID:currentRoot,action:"audit_error",bytes:max(0,last.bytesRead),durationSeconds:max(0,Date().timeIntervalSince(started)),message:context)
                 DispatchQueue.main.async { [weak self] in
-                    self?.auditStatus = cancel.isCancelled ? "Verifica annullata" : "Verifica non riuscita: " + error.localizedDescription
+                    self?.auditStatus = cause
+                    self?.refresh()
                     self?.auditProgress = nil
                     self?.auditBusy = false
                     self?.maintaining = false
