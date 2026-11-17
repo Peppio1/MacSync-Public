@@ -2,23 +2,32 @@
 
 **Sincronizzazione unidirezionale nativa per macOS, verso cartelle locali o condivisioni SMB.**
 
-![Versione](https://img.shields.io/badge/version-0.17.0--dev-blue)
+![Versione](https://img.shields.io/badge/version-0.17.0--pre--release-blue)
 ![Piattaforma](https://img.shields.io/badge/platform-macOS-lightgrey)
 [![macOS CI](https://github.com/Peppio1/MacSync-Public/actions/workflows/macos-ci.yml/badge.svg?branch=main)](https://github.com/Peppio1/MacSync-Public/actions/workflows/macos-ci.yml)
 
 MacSync è un'applicazione desktop sviluppata in Swift e SwiftUI per replicare cartelle di lavoro del Mac su una destinazione locale o di rete, senza installare componenti sul server. La sorgente rimane l'unica fonte di verità: nessuna sincronizzazione inversa.
 
-> **Stato: v0.17.0 in validazione — icone, DMG e guida.** La v0.16.0 è convalidata in CI e firmata (run 44068276632), non pubblicata. L’ultima pre-release pubblica rimane v0.15.0. La nuova build non è da considerare definitiva finché il PNG esatto approvato non è presente e i nuovi test non sono superati. Collaudo fisico su iMac/SMB/VPN e Gatekeeper ancora necessario.
+> **Stato: v0.17.0 pubblicata — pre-release di collaudo.** Validazione automatizzata e firma Ed25519 completate; DMG e ZIP universali disponibili. Collaudo su Mac fisico, Gatekeeper e rete SMB/VPN ancora necessario. Non utilizzare con dati aziendali prima della validazione operativa.
 
 ## Download
 
-### MacSync v0.15.0 — pre-release convalidata
+### MacSync v0.17.0 — pre-release di collaudo (17 novembre 2026)
 
-[Scarica MacSync v0.15.0 (universale)](https://github.com/Peppio1/MacSync-Public/releases/download/v0.15.0/MacSync-v0.15.0-macOS-universal.zip) · [SHA-256](https://github.com/Peppio1/MacSync-Public/releases/download/v0.15.0/MacSync-v0.15.0-macOS-universal.zip.sha256) · [Release](https://github.com/Peppio1/MacSync-Public/releases/tag/v0.15.0). Non notarizzato, solo per collaudo.
+[![Scarica MacSync per macOS](https://img.shields.io/badge/Scarica_MacSync_v0.17.0-DMG-2563eb?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/Peppio1/MacSync-Public/releases/download/v0.17.0/MacSync-v0.17.0-macOS-universal.dmg)
 
-### MacSync v0.17.0 — in validazione, non pubblicata
+macOS 13 o successivo (Intel e Apple Silicon). CI eseguita su macOS 15.
 
-[v0.16.0: collaudo integrato e firma superati](https://github.com/Peppio1/MacSync-Public/actions/runs/44068276632) · [Workflow correnti](https://github.com/Peppio1/MacSync-Public/actions). Gli artefatti CI richiedono accesso GitHub e scadono dopo 7 giorni. Nessuna release stabile: pacchetti ad hoc, non notarizzati, solo per test. Non usare le fixture del laboratorio come applicazioni reali.
+| Pacchetto | Download | Integrità |
+|---|---|---|
+| **DMG — consigliato** | [Installer grafico (9,57 MB)](https://github.com/Peppio1/MacSync-Public/releases/download/v0.17.0/MacSync-v0.17.0-macOS-universal.dmg) | [SHA-256](https://github.com/Peppio1/MacSync-Public/releases/download/v0.17.0/MacSync-v0.17.0-macOS-universal.dmg.sha256) |
+| ZIP universale (alternativo) | [Archivio (7,30 MB)](https://github.com/Peppio1/MacSync-Public/releases/download/v0.17.0/MacSync-v0.17.0-macOS-universal.zip) | [SHA-256](https://github.com/Peppio1/MacSync-Public/releases/download/v0.17.0/MacSync-v0.17.0-macOS-universal.zip.sha256) · [Firma Ed25519](https://github.com/Peppio1/MacSync-Public/releases/download/v0.17.0/MacSync-v0.17.0-macOS-universal.zip.edsignature) |
+
+[Release e note di versione](https://github.com/Peppio1/MacSync-Public/releases/tag/v0.17.0) · [Checksum completi](https://github.com/Peppio1/MacSync-Public/releases/download/v0.17.0/SHA256SUMS) · [Provenienza build](https://github.com/Peppio1/MacSync-Public/releases/download/v0.17.0/build-provenance.txt) · [Guida installazione](docs/INSTALLATION.md)
+
+I download appartengono alla release pubblica e non agli artefatti temporanei di Actions. Il DMG include MacSync.app, collegamento ad Applicazioni e guida illustrata offline. Il bundle è firmato ad hoc, **non notarizzato**; la firma Ed25519 del pacchetto ZIP e del feed non sostituisce Developer ID o notarizzazione Apple. La pre-release non è un aggiornamento stabile automatico.
+
+Versione precedente: [v0.15.0 — pre-release convalidata](https://github.com/Peppio1/MacSync-Public/releases/tag/v0.15.0). La v0.16.0 è stata convalidata e firmata, ma non pubblicata separatamente.
 
 ## Funzionalità
 
@@ -73,7 +82,15 @@ La CI assembla anche un bundle MacSync.app con firma ad hoc, non notarizzato. I 
 
 ### 1. Installazione su macOS
 
-Scaricare il pacchetto di prova. Aprire il DMG, trascinare MacSync.app su Applicazioni, leggere la guida illustrata inclusa, espellere il volume e avviare MacSync da Applicazioni. In alternativa estrarre lo ZIP e spostare MacSync.app in Applicazioni. MacSync è un'applicazione della barra dei menu: da lì si apre la finestra di configurazione.
+Scaricare il [DMG v0.17.0](https://github.com/Peppio1/MacSync-Public/releases/download/v0.17.0/MacSync-v0.17.0-macOS-universal.dmg) e il relativo [SHA-256](https://github.com/Peppio1/MacSync-Public/releases/download/v0.17.0/MacSync-v0.17.0-macOS-universal.dmg.sha256). Aprire il DMG, trascinare MacSync.app su Applicazioni, leggere la guida illustrata inclusa, espellere il volume e avviare MacSync da Applicazioni. In alternativa estrarre lo ZIP e spostare MacSync.app in Applicazioni.
+
+Controllo facoltativo nel Terminale (dalla cartella che contiene DMG e checksum):
+
+```bash
+shasum -a 256 -c MacSync-v0.17.0-macOS-universal.dmg.sha256
+```
+
+Proseguire soltanto se la verifica restituisce OK. MacSync è un'applicazione della barra dei menu: da lì si apre la finestra di configurazione.
 
 Essendo una build non notarizzata, macOS potrebbe impedirne l'apertura. Verificare provenienza e integrità del pacchetto prima di autorizzare eventualmente la singola applicazione nelle impostazioni Privacy e sicurezza. Non disattivare globalmente Gatekeeper. Usare soltanto file sintetici per il collaudo.
 
@@ -128,13 +145,13 @@ Usare **Ferma tutto** prima di interventi straordinari. Attendere la conclusione
 
 ### 7. Aggiornamenti e recupero
 
-In **Impostazioni → Aggiornamenti software**, usa Controlla o attiva il controllo automatico (non avvia download automatici). Installa MacSync.app in Applicazioni. La conferma iniziale sospende e drena le operazioni, crea uno snapshot verificato e apre Sparkle; conferma l’installazione nella sua finestra. Dopo annullamento o aggiornamento, riapri MacSync dalla posizione originale e verifica le impostazioni. Copie automatiche, mirror e audit pianificato restano disabilitati finché non li riabiliti esplicitamente.
+In **Impostazioni → Aggiornamenti software**, usa Controlla o attiva il controllo automatico (non avvia download automatici). Le pre-release, inclusa v0.17.0, non vengono offerte dal canale stabile: scaricarle manualmente da Releases. Installa MacSync.app in Applicazioni. La conferma iniziale sospende e drena le operazioni, crea uno snapshot verificato e apre Sparkle; conferma l’installazione nella sua finestra. Dopo annullamento o aggiornamento, riapri MacSync dalla posizione originale e verifica le impostazioni. Copie automatiche, mirror e audit pianificato restano disabilitati finché non li riabiliti esplicitamente.
 
 Se MacSync non si avvia e l’installatore è terminato, apri nel Finder la cartella `~/Library/Application Support/MacSync/update-backups`, individua il backup della transazione pendente e apri **Ripristina MacSync.command**. Conferma con RIPRISTINA. Il recupero è offline, senza sudo; rifiuta database modificati o destinazioni/identità non verificabili, preserva l’app sostituita e non sovrascrive SQLite né preferenze. Non avviare il recupero mentre Sparkle sta ancora installando. La guida tecnica è in [Aggiornamenti e recupero](docs/UPDATES.md). Non eliminare manualmente il marcatore o i file di lock.
 
 ## Stato della validazione
 
-Baseline pubblicata v0.15.0: [workflow 44047883363](https://github.com/Peppio1/MacSync-Public/actions/runs/44047883363). Ultima validazione completata v0.16.0: [e6ace65](https://github.com/Peppio1/MacSync-Public/commit/e6ace651f865f783779621bdc88e7d22d58d2cd4), [workflow 44068276632](https://github.com/Peppio1/MacSync-Public/actions/runs/44068276632).
+Versione pubblicata: [v0.17.0](https://github.com/Peppio1/MacSync-Public/releases/tag/v0.17.0), commit del pacchetto [2fe7037](https://github.com/Peppio1/MacSync-Public/commit/2fe7037cf135f2cbd0051343885875a50aa6c015). [CI e firma](https://github.com/Peppio1/MacSync-Public/actions/runs/44072456998) e [pubblicazione dell'artefatto esatto](https://github.com/Peppio1/MacSync-Public/actions/runs/44074982577) completate con successo. Nessuna ricompilazione in fase di pubblicazione.
 
 | Verifica | Risultato |
 |---|---|
@@ -144,25 +161,29 @@ Baseline pubblicata v0.15.0: [workflow 44047883363](https://github.com/Peppio1/M
 | Mirror definitivo e con recupero | Superato |
 | Release build e 48 anteprime UI | Completati |
 | 96 cicli accelerati, inventario 10.000 file, interruzione simulata | Superati |
-| Compilazione universale v0.15.0 e v0.16.0 | Superata |
+| Compilazione universale v0.17.0 (Intel e Apple Silicon) | Superata |
 | Firma Ed25519 di produzione (candidato precedente) | Superata nel run 44063365937 |
 | Installazione Sparkle e rifiuto archivio alterato | Superati nel run 44066873367 |
 | Recupero e preflight su processi separati, firma v0.16.0 | Superati (44068276632) |
-| Branding, DMG, guida e regressione v0.17.0 | In validazione |
+| Branding con PNG approvato, DMG montato e verifica bundle, guida | Superati |
+| Sparkle v0.17.0 → v0.17.1, riavvio simulato, recupero e rifiuto manomissione | Superati |
+| Firma Ed25519 ZIP e feed v0.17.0 | Superata |
+| Pubblicazione pre-release con 8 asset verificati | Superata |
 | Durata reale e risorse app installata | Da collaudare |
 | Interazioni UI, avvio al login, arresto e SMB/VPN reale | Da collaudare |
 
-Il successivo obiettivo è validare v0.17.0, poi candidata 1.0.0-rc.1 e collaudo reale. Nessuna versione 1.0 stabile è dichiarata.
+Il prossimo obiettivo è il collaudo della v0.17.0 su Mac reale, iniziando da cartelle sintetiche locali e poi SMB/VPN. La candidata 1.0.0-rc.1 sarà preparata in base agli esiti; nessuna versione 1.0 stabile è dichiarata.
 
 ## Cronologia e changelog
 
 Le versioni sono riportate dalla più recente alla più vecchia. Lo storico descrive lo sviluppo progressivo: le impostazioni e i limiti delle vecchie versioni non sostituiscono quelli della versione attuale.
 
-### v0.17.0 — branding e installer (in validazione)
+### v0.17.0 — branding e installer (pre-release pubblicata)
 
-- Icona Finder/Applicazioni .icns, marchio nella sidebar e simbolo monocromatico template della menu bar. Ilmaster approvato viene riconosciuto tramite SHA-256; fallback esclusivamente CI se assente.
+- Icona Finder/Applicazioni .icns, marchio nella sidebar e simbolo monocromatico template della menu bar. Il master approvato viene riconosciuto tramite SHA-256; fallback esclusivamente CI se assente.
 - DMG grafico drag-and-drop, guida HTML illustrata offline e ZIP universale per Sparkle.
-- Controlli risorse, montaggio e firma del DMG, regressione completa e test Sparkle isolati. Nessuna pubblicazione automatica.
+- Controlli risorse, montaggio read-only del DMG e verifica firma del bundle interno, regressione e test Sparkle isolati superati.
+- ZIP/feed firmati Ed25519 e pre-release pubblicata il 17 novembre 2026 dagli artefatti esatti della CI, senza ricompilazione. Nessuna release stabile automatica.
 - [Guida installazione e distribuzione](docs/INSTALLATION.md).
 
 ### v0.16.0 — sistema aggiornamenti (validato in CI)
@@ -235,10 +256,10 @@ Per le modifiche tecniche dettagliate di ogni versione consultare lo [storico co
 
 ### Prossime fasi
 
-- Consolidare i risultati dei test di durata accelerata e verificare il pacchetto universale.
-- Preparare la candidata al rilascio e la procedura di collaudo.
-- Verificare macOS, Windows SMB, VPN, permessi e ripresa dopo interruzioni reali.
-- Pubblicare una versione stabile soltanto dopo la validazione.
+- Installare e collaudare v0.17.0 su Mac fisico con dati sintetici: primo avvio, Gatekeeper, UI, menu bar e funzionamento locale.
+- Verificare SMB/VPN, permessi Windows, disconnessione/riconnessione, copie interrotte, arresto, mirror e uso prolungato su un archivio di prova.
+- Correggere eventuali problemi rilevati e preparare 1.0.0-rc.1.
+- Pubblicare una versione stabile soltanto dopo la validazione operativa.
 
 ## Documentazione
 

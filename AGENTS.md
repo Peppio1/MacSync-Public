@@ -2,7 +2,7 @@
 
 ## Stato corrente — v0.17.0 (branding e DMG)
 
-Repository pubblico: Peppio1/MacSync-Public. Ultima pre-release pubblica v0.15.0. v0.16.0 validata e firmata, commit e6ace65, run 44068276632: 177 test, 2 opt-in eseguiti separatamente, 48 PNG, installazione, rollback e riavvio su fixture, firma Ed25519. v0.17.0 in validazione: branding, DMG, guida. Non sostituire il PNG approvato con un'icona diversa; placeholder solo CI, vietato firmare con placeholder. Collaudo fisico obbligatorio.
+Repository pubblico: Peppio1/MacSync-Public. Pre-release attuale v0.17.0 pubblicata il 17 novembre 2026: https://github.com/Peppio1/MacSync-Public/releases/tag/v0.17.0. Commit del pacchetto 2fe7037cf135f2cbd0051343885875a50aa6c015, CI 44072456998 (177 test ordinari, 2 opt-in separati, 48 PNG, originale verificato, DMG, installazione e recupero Sparkle, firma Ed25519), pubblicazione 44074982577 completata. v0.16.0 validata ma non pubblicata separatamente. Prossima fase: collaudo fisico con dati sintetici, poi 1.0.0-rc.1. Non sostituire il PNG approvato. Non dichiarare stabilità prima della validazione reale.
 
 Consultare [README.md](README.md) e [architettura corrente](docs/ARCHITECTURE.md). Le istruzioni storiche sono conservate in [AGENTS_HISTORY.md](docs/AGENTS_HISTORY.md); NON applicare le vecchie specifiche al posto dei comportamenti correnti.
 
@@ -17,7 +17,7 @@ Consultare [README.md](README.md) e [architettura corrente](docs/ARCHITECTURE.md
 - Non falsificare statistiche, percentuali, tempi o risultati. Distinguere copie concluse, errori, rimandati, housekeeping e cancellazioni effettive.
 - Prima di modifiche operative preservare un punto di rollback verificabile. Non alterare foto, archivi o preferenze reali; non considerare rollback Git come ripristino dati.
 - Test su dati sintetici e CI macOS 15. Non considerare il progetto stabile prima del collaudo fisico macOS/SMB/VPN. Non introdurre segreti, percorsi o dati aziendali nel repository pubblico.
-- Modifiche puramente documentali non richiedono incrementi di versione. La fase successiva è validazione candidata v0.16.0, poi icone/DMG/guida e collaudo reale; aggiornare le evidenze soltanto dopo risultati effettivi.
+- Modifiche puramente documentali non richiedono incrementi di versione. La fase successiva è collaudo fisico v0.17.0; preparare 1.0.0-rc.1 solo in base agli esiti; aggiornare le evidenze soltanto dopo risultati effettivi.
 
 ## Riferimenti
 
@@ -30,3 +30,6 @@ La procedura corrente è in docs/UPDATES.md. Il secret MACSYNC_SPARKLE_PRIVATE_K
 
 ## v0.17.0
 Vedere docs/INSTALLATION.md e Packaging/Branding/README.md. Rollback della v0.16.0: rollback-v0.16.0-validated-before-v0.17.0. Non modificare il motore o i percorsi dati per interventi grafici. Firma solo dopo originale verificato e CI verde. Non pubblicare automaticamente.
+
+## Pubblicazione v0.17.0
+Release e 8 asset verificati; tag sul commit testato 2fe7037cf135f2cbd0051343885875a50aa6c015. Rollback: rollback-v0.17.0-validated-before-prerelease. Non sovrascrivere gli asset/tag pubblicati, non promuovere la pre-release a stabile. Per le correzioni usare una nuova versione e rispettare la sicurezza del feed. Documentazione successiva alla compilazione non modifica i pacchetti.

@@ -55,3 +55,6 @@ Firma: la pipeline protetta produce lo ZIP firmato, firma Ed25519 separata, appc
 
 ## v0.16.0 — risultati effettivi
 Run 44068276632, commit e6ace65: 177 test ordinari superati e 2 opt-in eseguiti separatamente; 48 immagini; tre scenari integrati superati, recupero atomico e preflight persistente, firma di produzione verificata. Il pacchetto non è stato pubblicato. La v0.17.0 mantiene la stessa fiducia Ed25519 e la logica di aggiornamento, aggiorna il laboratorio a 0.17.0 → 0.17.1. Il DMG è destinato all'installazione iniziale; il feed Sparkle continua a puntare allo ZIP. La firma della candidata v0.17.0 richiede il PNG originale con checksum previsto e CI verde.
+
+## v0.17.0 — pubblicazione pre-release
+La CI 44072456998 ha superato i 177 test ordinari (2 opt-in separati), tre scenari integrati Sparkle 0.17.0 → 0.17.1, verifica PNG originale, DMG read-only e 48 immagini. Firma ZIP e appcast verificata. La pre-release è stata pubblicata il 17 novembre 2026 dal candidato esatto, run 44074982577, tag 2fe7037cf135f2cbd0051343885875a50aa6c015. Il feed è incluso per tracciabilità; le pre-release non sono selezionate dal canale stabile. Rimangono le verifiche su Mac fisico; il laboratorio non le sostituisce. Per il primo collaudo scaricare manualmente il DMG da https://github.com/Peppio1/MacSync-Public/releases/tag/v0.17.0.
