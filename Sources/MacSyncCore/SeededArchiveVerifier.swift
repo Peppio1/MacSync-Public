@@ -209,10 +209,10 @@ public final class SeededArchiveVerifier {
                 progress?(index + 1, report.matches.count)
             }
         }
-        if cancellation.isCancelled { throw SeedVerificationError.cancelled }
+        if !cancellation.mayCommit { throw SeedVerificationError.cancelled }
         let sources = mappings.mapValues { $0.source.path }
         let changed = try journal.acknowledgeVerifiedFiles(
-            stillValid, sourceRoots: sources, shouldContinue: { !cancellation.isCancelled }
+            stillValid, sourceRoots: sources, shouldContinue: { cancellation.mayCommit }
         )
         progress?(report.matches.count, report.matches.count)
         return changed
@@ -376,8 +376,9 @@ public struct SeededArchiveSession: Sendable {
 
     /// Use one complete archive scan and reuse its verified fingerprints.
     /// Only job IDs captured before the scan can become approval candidates.
-    /// No queue acknowledgement happens without a subsequent explicit approval.
+    /// No queue acknowledgement happens until a guarded commit is requested.
     public func auditAndRecognize(
+        mode: ArchiveAuditMode = .deep,
         repair: Bool = false,
         cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
         diagnostic: (ArchiveAuditProgress) -> Void = { _ in },
@@ -404,7 +405,7 @@ public struct SeededArchiveSession: Sendable {
         }
         var matches: [SeedVerifiedMatch] = []
         let report = try ArchiveAudit(journal:journal,mappings:mappings).run(
-            mode:.deep,repair:repair,cancellation:cancellation,
+            mode:mode,repair:repair,cancellation:cancellation,collectMetadataMatches:true,
             onVerifiedFile: { root,path,source,target in
                 let key = root + "\0" + path
                 guard !ambiguous.contains(key), let job = pending[key] else { return }

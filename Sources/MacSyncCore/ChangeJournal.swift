@@ -258,7 +258,7 @@ public final class ChangeJournal {
         return result
     }
 
-    /// Atomic, conditional baseline acknowledgement. A verified hash is only
+    /// Atomic, conditional baseline acknowledgement. A verified candidate is only
     /// accepted when the SAME job is still pending, its source inventory
     /// still records that exact file size and modification timestamp, the
     /// source root has not been rebound and no concurrent newer operation for

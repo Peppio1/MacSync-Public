@@ -193,6 +193,57 @@ final class SeededArchiveVerifierTests: XCTestCase {
         XCTAssertEqual(try f.journal.pending().count, 40)
     }
 
+    func testQuickRecognitionDoesNotReadContentAndNeverAcknowledgesDelete() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let date = Date(timeIntervalSinceNow: -600)
+        let src = f.source.appendingPathComponent("same.jpg")
+        let dst = f.target.appendingPathComponent("same.jpg")
+        try write("AAAA", to: src, date: date)
+        try write("BBBB", to: dst, date: date)
+        try initializeInventory(f)
+        _ = try f.journal.enqueue(rootID:"photos",relativePath:"old.jpg",kind:.delete)
+        let session = try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let result = try session.auditAndRecognize(mode:.quick)
+        XCTAssertEqual(result.recognition.bytesRead,0)
+        XCTAssertEqual(result.recognition.verifiedCount,1)
+        XCTAssertEqual(try session.approve(report:result.recognition),1)
+        XCTAssertTrue(try f.journal.pending().contains { $0.kind == .delete })
+        XCTAssertEqual(try String(contentsOf:dst,encoding:.utf8),"BBBB")
+    }
+
+    func testIntelligentRecognitionHashesOnlyTimestampMismatch() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let date = Date(timeIntervalSinceNow: -600)
+        try write("same", to:f.source.appendingPathComponent("a.jpg"),date:date)
+        try write("same", to:f.target.appendingPathComponent("a.jpg"),date:date)
+        try write("same", to:f.source.appendingPathComponent("b.jpg"),date:date)
+        try write("same", to:f.target.appendingPathComponent("b.jpg"),date:date.addingTimeInterval(120))
+        try write("AAAA", to:f.source.appendingPathComponent("c.jpg"),date:date)
+        try write("BBBB", to:f.target.appendingPathComponent("c.jpg"),date:date.addingTimeInterval(120))
+        try initializeInventory(f)
+        let session = try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let result = try session.auditAndRecognize(mode:.intelligent)
+        XCTAssertEqual(result.recognition.bytesRead,16)
+        XCTAssertEqual(result.recognition.verifiedCount,2)
+        XCTAssertEqual(try session.approve(report:result.recognition),2)
+        XCTAssertTrue(try f.journal.pending().contains { $0.relativePath == "c.jpg" })
+    }
+
+    func testMetadataRecognitionRechecksCommitGate() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let date = Date(timeIntervalSinceNow: -600)
+        try write("same", to:f.source.appendingPathComponent("a.jpg"),date:date)
+        try write("same", to:f.target.appendingPathComponent("a.jpg"),date:date)
+        try initializeInventory(f)
+        let session = try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let result = try session.auditAndRecognize(mode:.quick)
+        XCTAssertThrowsError(try session.approve(report:result.recognition,cancellation:SeedVerificationCancellation(commitAllowed:{ false })))
+        XCTAssertEqual(try f.journal.pending().count,1)
+    }
+
     func testSessionReopensJournalForExplicitApproval() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }

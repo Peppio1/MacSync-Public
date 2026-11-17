@@ -193,7 +193,7 @@ final class MountedCopyController: ObservableObject {
             return
         }
         let settings = auditSettings
-        let recognize = interactive && recognizeExisting && settings.mode == .deep
+        let recognize = interactive && recognizeExisting
         guard !recognize || (!active && liveProgress == nil && !interruptionRequested) else { auditStatus = "Sospendi le copie prima del riconoscimento"; return }
         let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
         guard !configured.isEmpty,
@@ -201,12 +201,13 @@ final class MountedCopyController: ObservableObject {
         else { auditStatus = "Configura prima le coppie e i volumi"; return }
         if interactive {
             let alert = NSAlert()
-            alert.messageText = "Avviare verifica completa?"
+            alert.messageText = "Avviare verifica archivio?"
             alert.informativeText = (settings.mode == .deep
                 ? "La verifica SHA-256 legge integralmente i file confrontabili, anche via VPN. "
-                : "La verifica rapida enumera entrambe le cartelle e confronta i metadati. ")
+                : settings.mode == .intelligent ? "Metadati e SHA-256 per file di uguale dimensione con date differenti. "
+                : "La verifica rapida confronta percorso, dimensione e data; non garantisce identità del contenuto. ")
                 + (settings.repair ? "Le differenze sicure verranno accodate come copie/aggiornamenti." : "Modalità solo diagnostica.")
-                + (recognize ? " I file identici ancora in coda potranno essere riconosciuti con conferma separata." : "")
+                + (recognize ? " I file corrispondenti saranno riconosciuti automaticamente nella coda, senza scrivere sulle destinazioni." : "")
                 + " Nessun file presente soltanto sul server verrà cancellato."
             alert.addButton(withTitle:"Avvia verifica"); alert.addButton(withTitle:"Annulla")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -230,7 +231,7 @@ final class MountedCopyController: ObservableObject {
             var last=ArchiveAuditProgress(started:started)
             last.phase="Preparazione verifica"
             var currentRoot="app"
-            try? auditLog?.record(level:.info,rootID:"app",action:"audit_start",message:"ID \(auditID) — " + (settings.mode == .deep ? "Verifica SHA-256 avviata" : "Verifica metadati avviata") + "; riconoscimento: \(recognize); riparazioni: \(settings.repair)")
+            try? auditLog?.record(level:.info,rootID:"app",action:"audit_start",message:"ID \(auditID) — " + (settings.mode.label + " avviata") + "; riconoscimento: \(recognize); riparazioni: \(settings.repair)")
             do {
                 if cancel.isCancelled { throw SeedVerificationError.cancelled }
                 let journal = try ChangeJournal(path:db.path)
@@ -244,7 +245,7 @@ final class MountedCopyController: ObservableObject {
                 try journal.verifyDirectoryBindings(maps,allowNewTarget:interactive)
                 let report: ArchiveAuditReport
                 let recognition: SeedVerificationReport?
-                let session: SeededArchiveSession?
+                let acknowledged: Int
                 let diagnostic: (ArchiveAuditProgress) -> Void = { last=$0 }
                 let progress: (ArchiveAuditProgress) -> Void = { snapshot in
                     DispatchQueue.main.async { [weak self] in
@@ -254,11 +255,14 @@ final class MountedCopyController: ObservableObject {
                 }
                 if recognize {
                     let local = try SeededArchiveSession(database:db,mappings:maps)
-                    let result = try local.auditAndRecognize(repair:settings.repair,cancellation:cancel,diagnostic:diagnostic,progress:progress)
-                    report = result.audit; recognition = result.recognition; session = local
+                    let result = try local.auditAndRecognize(mode:settings.mode,repair:settings.repair,cancellation:cancel,diagnostic:diagnostic,progress:progress)
+                    report = result.audit; recognition = result.recognition
+                    DispatchQueue.main.async { [weak self] in self?.auditStatus = "Riconoscimento automatico: ricontrollo e registrazione" }
+                    acknowledged = try local.approve(report:result.recognition,cancellation:cancel)
+                    try? auditLog?.record(level:.info,rootID:"app",action:"seed_recognized",message:settings.mode.label + ": " + String(acknowledged) + " file riconosciuti automaticamente; nessuna scrittura sul server")
                 } else {
                     report = try ArchiveAudit(journal:journal,mappings:maps).run(mode:settings.mode,repair:settings.repair,cancellation:cancel,diagnostic:diagnostic,progress:progress)
-                    recognition = nil; session = nil
+                    recognition = nil; acknowledged = 0
                 }
 
                 var storageWarning = ""
@@ -275,13 +279,12 @@ final class MountedCopyController: ObservableObject {
                     guard let self else { return }
                     self.onQueueChanged?()
                     self.auditReport = report
-                    if let recognition, let session, !cancel.isCancelled {
-                        self.seedReport = recognition; self.seedSession = session; self.seedCancel = cancel
-                        self.seedReady = !recognition.matches.isEmpty; self.seedVerifiedCount = recognition.verifiedCount
+                    if let recognition {
+                        self.seedReady = false; self.seedVerifiedCount = acknowledged
                         self.seedInspectedCount = recognition.inspected; self.seedReadBytes = recognition.bytesRead
-                        self.seedStatus = recognition.matches.isEmpty ? "Nessun file in coda riconoscibile" : "\(recognition.verifiedCount) file identici in coda: conferma necessaria"
+                        self.seedStatus = "Allineamento automatico: \(acknowledged) file riconosciuti su \(recognition.verifiedCount) candidati"
                     }
-                    self.auditStatus = "Verifica conclusa: " + String(report.queuedRepairs) + " riparazioni accodate" + warning
+                    self.auditStatus = "Verifica conclusa: " + String(report.queuedRepairs) + " riparazioni accodate" + (recognize ? "; \(acknowledged) file riconosciuti" : "") + warning
                     self.auditProgress = nil
                     self.auditBusy = false
                     self.maintaining = false

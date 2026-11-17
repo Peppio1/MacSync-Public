@@ -491,7 +491,7 @@ struct ArchiveAuditPanel: View {
     @ObservedObject var model: MacSyncViewModel
     @State private var selectedFinding: AuditFindingKind?
     @State private var showFindings = false
-    @State private var recognize = false
+    @State private var recognize = true
     @Environment(\.macSyncLayout) private var layout
     private var detailFont: Font { .system(size: layout.compact ? 11 : 12) }
 
@@ -510,8 +510,7 @@ struct ArchiveAuditPanel: View {
             }.fixedSize(horizontal: false, vertical: true)
             maintenance.auditPreviewBounds("maintenance", enabled: runtime.previewOnly)
         }
-        .onChange(of: copy.auditSettings) { value in
-            if value.mode == .quick { recognize = false }
+        .onChange(of: copy.auditSettings) { _ in
             runtime.scheduleArchiveAudit()
         }
         .sheet(isPresented: $showFindings) {
@@ -526,10 +525,13 @@ struct ArchiveAuditPanel: View {
             Text("Metodo di verifica").font(.subheadline.weight(.semibold))
             Picker("Metodo", selection: $copy.auditSettings.mode) {
                 Text("Rapida (metadati)").tag(ArchiveAuditMode.quick)
-                Text("Approfondita (SHA-256)").tag(ArchiveAuditMode.deep)
+                Text("Intelligente").tag(ArchiveAuditMode.intelligent)
+                Text("Completa (SHA-256)").tag(ArchiveAuditMode.deep)
             }.pickerStyle(.segmented).labelsHidden()
             Text(copy.auditSettings.mode == .quick
                 ? "Confronta percorsi, dimensioni e date."
+                : copy.auditSettings.mode == .intelligent
+                ? "Metadati e SHA-256 selettivo quando le date differiscono a parità di dimensione."
                 : "Confronta il contenuto dei file tramite SHA-256; può leggere l’intero archivio via VPN.")
                 .font(detailFont).foregroundStyle(.secondary)
             Divider()
@@ -537,9 +539,8 @@ struct ArchiveAuditPanel: View {
             Text("Prepara le copie e gli aggiornamenti necessari.").font(detailFont).foregroundStyle(.secondary)
             Divider()
             MacSyncSwitchRow("Riconosci i file già copiati", isOn: $recognize)
-                .disabled(copy.auditSettings.mode != .deep)
             if recognize && copy.auditBusy { Text("Attivo · bloccato durante la verifica").font(detailFont).foregroundStyle(Color.accentColor) }
-            Text("SHA-256 manuale: chiude i job identici dopo conferma. Le copie restano sospese fino alla riattivazione manuale.")
+            Text("Riconosce automaticamente i file corrispondenti con il metodo scelto; non modifica le destinazioni. Le copie restano sospese fino alla riattivazione manuale. I soli metadati non provano l'identità del contenuto.")
                 .font(detailFont).foregroundStyle(.secondary)
             Divider()
             MacSyncSwitchRow("Programma verifica automatica", isOn: $copy.auditSettings.enabled)
@@ -630,7 +631,7 @@ struct ArchiveAuditPanel: View {
             if let report = copy.auditReport {
                 resultRow("Data e ora", macSyncDateTime(report.ended))
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text(report.mode == .deep ? "SHA-256" : "Rapida (metadati)").font(.caption.weight(.medium))
+                    Text(report.mode.label).font(.caption.weight(.medium))
                     Spacer(minLength: 4)
                     Text("Durata: " + elapsedText(report.seconds)).font(detailFont).monospacedDigit()
                 }
@@ -666,7 +667,7 @@ struct ArchiveAuditPanel: View {
                         .buttonStyle(.borderedProminent).disabled(copy.active || busy)
                     Button("Scarta") { copy.invalidateSeedReport() }.disabled(busy)
                 }
-            } else if !copy.seedBusy && copy.seedStatus.hasPrefix("Allineamento confermato") {
+            } else if !copy.seedBusy && (copy.seedStatus.hasPrefix("Allineamento confermato") || copy.seedStatus.hasPrefix("Allineamento automatico")) {
                 Text(copy.seedStatus).font(detailFont).lineLimit(3).help(copy.seedStatus)
             }
         }

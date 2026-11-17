@@ -2,7 +2,16 @@ import Foundation
 import Darwin
 import CryptoKit
 
-public enum ArchiveAuditMode: String, Codable, CaseIterable, Sendable { case quick, deep }
+public enum ArchiveAuditMode: String, Codable, CaseIterable, Sendable {
+    case quick, intelligent, deep
+    public var label: String {
+        switch self {
+        case .quick: return "Rapida (metadati)"
+        case .intelligent: return "Intelligente (SHA-256 selettivo)"
+        case .deep: return "Completa (SHA-256)"
+        }
+    }
+}
 public struct ArchiveAuditSettings: Codable, Equatable, Sendable {
     public var enabled = false
     public var mode: ArchiveAuditMode = .quick
@@ -132,6 +141,7 @@ public final class ArchiveAudit {
     // in the local queue. No direct writes to the server; never creates DELETEs.
     public func run(mode: ArchiveAuditMode, repair: Bool = false,
                     cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
+                    collectMetadataMatches: Bool = false,
                     onVerifiedFile: (String, String, SeedFileFingerprint, SeedFileFingerprint) -> Void = { _,_,_,_ in },
                     diagnostic: (ArchiveAuditProgress) -> Void = { _ in },
                     progress: (ArchiveAuditProgress) -> Void = { _ in }) throws -> ArchiveAuditReport {
@@ -212,7 +222,7 @@ public final class ArchiveAudit {
         var findings: [AuditFinding] = []
         var candidates: [(MountedFolderMapping, TrackedItem, String, SeedFileFingerprint?)] = []
         state.comparisonStarted = Date()
-        state.phase = mode == .deep ? "Verifica SHA-256" : "Confronto metadati"
+        state.phase = mode == .deep ? "Verifica SHA-256" : (mode == .intelligent ? "Verifica intelligente" : "Confronto metadati")
         report(force:true)
         for pair in pairs {
             let mapping = pair.mapping
@@ -243,11 +253,25 @@ public final class ArchiveAudit {
                     else if dst == nil { kind = .missing }
                     else if item.kind == "directory" { kind = .matching }
                     else if src!.size != dst!.size { kind = .different; detail = "Dimensione diversa" }
-                    else if mode == .quick {
-                        // SMB timestamp precision varies. A tolerance of two
-                        // seconds is deliberately metadata-only, not a hash.
+                    else if mode == .quick || (mode == .intelligent && abs(src!.modifiedAt-dst!.modifiedAt) <= 2) {
+                        // Metadata equivalence is NOT proof of byte identity.
                         kind = abs(src!.modifiedAt-dst!.modifiedAt) <= 2 ? .matching : .different
                         if kind == .different { detail = "Data di modifica diversa" }
+                        else if collectMetadataMatches {
+                            let a = try Self.safeURL(path,mapping:mapping,destination:false)
+                            let b = try Self.safeURL(path,mapping:mapping,destination:true)
+                            let beforeA = try SeededArchiveVerifier.fingerprint(a)
+                            let beforeB = try SeededArchiveVerifier.fingerprint(b)
+                            guard beforeA.size == src!.size, beforeB.size == dst!.size,
+                                  abs(beforeA.modifiedAt-src!.modifiedAt) < 0.002,
+                                  abs(beforeB.modifiedAt-dst!.modifiedAt) < 0.002,
+                                  abs(beforeA.modifiedAt-beforeB.modifiedAt) <= 2 else {
+                                throw SeedVerificationError.changedDuringRead
+                            }
+                            fingerprint = beforeA
+                            detail = "Corrispondenza metadati (contenuto non confrontato)"
+                            onVerifiedFile(mapping.rootID,path,beforeA,beforeB)
+                        }
                     } else {
                         let a = try Self.safeURL(path,mapping:mapping,destination:false)
                         let b = try Self.safeURL(path,mapping:mapping,destination:true)
