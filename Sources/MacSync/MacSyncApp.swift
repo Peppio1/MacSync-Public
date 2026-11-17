@@ -614,7 +614,7 @@ struct MacSyncConfigurationView: View {
 
     private var overviewPage: some View {
         VStack(alignment: .leading, spacing: 8) {
-            MacSyncPanel("Operazione corrente", icon: "arrow.left.arrow.right") {
+            MacSyncPanel("Operazione corrente", icon: "arrow.left.arrow.right", compact: true) {
                 HStack {
                     if copy.liveProgress == nil || copy.interruptionRequested { Text(globalActivity).font(.subheadline.weight(.semibold)) }
                     Spacer()
@@ -637,8 +637,7 @@ struct MacSyncConfigurationView: View {
                 if copy.interruptionRequested { Text("Interruzione richiesta: attendo il punto sicuro. La coda viene conservata.").font(.caption) }
                 if !model.message.isEmpty { Text(model.message).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(model.message) }
                 if let audit = copy.auditProgress {
-                    CompactArchiveAuditProgress(progress:audit)
-                    AuditFindingCards(model:model,findings:audit.differences,deletionCandidates:audit.deletionCandidates,counts:audit.counts,partial:true)
+                    CompactArchiveAuditProgress(progress:audit, overview: true)
                     if !audit.currentPath.isEmpty { Text(audit.currentPath).font(.caption).lineLimit(1).truncationMode(.middle) }
                 } else if copy.auditBusy || copy.seedBusy || copy.maintaining {
                     Text(copy.auditBusy ? copy.auditStatus : copy.seedBusy ? copy.seedStatus : copy.maintenanceStatus).font(.caption)
@@ -650,14 +649,17 @@ struct MacSyncConfigurationView: View {
                     Text(copy.active || runtime.nextAutomaticAttempt != nil ? "In attesa del prossimo ciclo" : "Nessun trasferimento in corso").font(.callout).foregroundStyle(.secondary)
                     if !copy.historyWarning.isEmpty { Text(copy.historyWarning).foregroundStyle(.orange) }
                 }
-                if copy.auditProgress == nil, let report = copy.auditReport {
-                    Divider()
-                    Text("Ultima verifica: " + macSyncDateTime(report.ended)).font(.caption.weight(.semibold))
-                    AuditArchiveComparison(source:report.sourceMetrics,destination:report.destinationMetrics,showSpeed:false)
-                    AuditFindingCards(model:model,findings:report.findings,deletionCandidates:report.deletionCandidates ?? [],counts:report.displayCounts ?? AuditFindingCounts(),partial:false)
-                }
             }
-            MacSyncPanel("Riepilogo ultima sincronizzazione", icon: "chart.bar.xaxis") {
+            if let audit = copy.auditProgress {
+                AuditFindingCards(model:model,findings:audit.differences,deletionCandidates:audit.deletionCandidates,counts:audit.counts,partial:true,dense:true,overview:true)
+                OverviewArchiveSides(source:audit.source,destination:audit.destination,live:true)
+            } else if let report = copy.auditReport {
+                Text("Ultima verifica: " + macSyncDateTime(report.ended) + " · Dati non aggiornati in tempo reale")
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.8)
+                AuditFindingCards(model:model,findings:report.findings,deletionCandidates:report.deletionCandidates ?? [],counts:report.displayCounts ?? AuditFindingCounts(),partial:false,dense:true,overview:true)
+                OverviewArchiveSides(source:report.sourceMetrics,destination:report.destinationMetrics,live:false)
+            }
+            MacSyncPanel("Riepilogo ultima sincronizzazione", icon: "chart.bar.xaxis", compact: true) {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 6), spacing: 8) {
                     ForEach(HistoryMetric.main) { metric in
                         Button {
@@ -675,7 +677,7 @@ struct MacSyncConfigurationView: View {
                 }
             }
             HStack(alignment: .top, spacing: 8) {
-                MacSyncPanel("Ultimo ciclo", icon: "clock", fillHeight: true) {
+                MacSyncPanel("Ultimo ciclo", icon: "clock", compact: true, fillHeight: true) {
                     if let cycle = copy.lastRecordedCycle {
                         HStack {
                             Label(macSyncCycleState(cycle.state), systemImage: cycle.state == "completed" ? "checkmark.circle.fill" : "clock")
@@ -695,7 +697,7 @@ struct MacSyncConfigurationView: View {
                         Button("Storico…") { page = .history }
                     }
                 }
-                MacSyncPanel("Destinazioni", icon: "folder", fillHeight: true) {
+                MacSyncPanel("Destinazioni", icon: "folder", compact: true, fillHeight: true) {
                     let pairs = model.configuredPairs().filter { !$0.path.isEmpty }
                     Text("\(pairs.filter { displayDestinationHealth($0.id).isReady }.count) / \(pairs.count) destinazioni pronte").font(.subheadline.weight(.semibold))
                     if runtime.sourceHealth.values.contains(where:{$0.isError}) || runtime.targetHealth.values.contains(where:{$0.isError}) || runtime.parentHealth.isError {
@@ -1532,6 +1534,13 @@ struct MacSyncSectionShell<Content: View>: View {
                 }
                 if page == .history {
                     pageContent(layout).frame(maxHeight: .infinity, alignment: .topLeading)
+                } else if page == .overview {
+                    // Prefer a complete, non-scrolling page; never clip safety notices.
+                    ViewThatFits(in: .vertical) {
+                        pageContent(layout).fixedSize(horizontal: false, vertical: true)
+                            .frame(maxHeight: .infinity, alignment: .topLeading)
+                        ScrollView { pageContent(layout) }
+                    }
                 } else {
                     ScrollView { pageContent(layout) }
                 }

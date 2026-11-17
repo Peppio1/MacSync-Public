@@ -704,6 +704,7 @@ struct ArchiveAuditPanel: View {
 /// Compact audit-only presentation. Inventory progress keeps its existing view.
 struct CompactArchiveAuditProgress: View {
     let progress: ArchiveAuditProgress
+    var overview = false
     @Environment(\.macSyncLayout) private var layout
     private var determinate: Bool { progress.comparisonStarted != nil && progress.total > 0 }
     var body: some View {
@@ -723,18 +724,85 @@ struct CompactArchiveAuditProgress: View {
                 HStack {
                     metric("Trascorso",elapsedText(elapsed))
                     metric("Rimanente stimato",progress.remaining(at:context.date).map(elapsedText) ?? "Calcolo…")
-                    metric("Velocità lettura",SyncLiveProgress.formatRate(progress.compareRate))
+                    if overview {
+                        metric("Lettura media complessiva",SyncLiveProgress.formatRate(progress.compareRate),info:"Byte letti da sorgente e destinazione divisi per la somma dei tempi di lettura ed elaborazione SHA-256. Non è la velocità di copia.")
+                    } else {
+                        metric("Velocità lettura",SyncLiveProgress.formatRate(progress.compareRate))
+                    }
                 }
-                Divider()
-                AuditArchiveComparison(source:progress.source,destination:progress.destination,showSpeed:true)
+                if !overview {
+                    Divider()
+                    AuditArchiveComparison(source:progress.source,destination:progress.destination,showSpeed:true)
+                }
             }
         }
     }
-    private func metric(_ title: String, _ value: String) -> some View {
+    private func metric(_ title: String, _ value: String, info: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.8)
+            HStack(spacing: 3) {
+                Text(title).font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.8)
+                if let info { OverviewMetricInfo(text:info) }
+            }
             Text(value).font(.system(size: layout.compact ? 12 : 15, weight: .semibold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
         }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct OverviewMetricInfo: View {
+    let text: String
+    var body: some View {
+        Image(systemName:"info.circle")
+            .font(.system(size:10)).foregroundStyle(.secondary)
+            .help(text).accessibilityLabel(text)
+    }
+}
+
+/// Presentation only: use the existing audit snapshot, never start extra disk or SMB reads.
+struct OverviewArchiveSides: View {
+    let source: AuditSideMetrics?
+    let destination: AuditSideMetrics?
+    let live: Bool
+    @Environment(\.macSyncLayout) private var layout
+    @Environment(\.colorScheme) private var scheme
+    private var reading: Bool { (source?.bytesRead ?? 0) > 0 || (destination?.bytesRead ?? 0) > 0 }
+    var body: some View {
+        HStack(alignment:.top,spacing:8) {
+            side("Sorgente",icon:"folder",metrics:source,remote:false)
+            side("Destinazione",icon:"externaldrive",metrics:destination,remote:true)
+        }
+    }
+    private func side(_ title:String,icon:String,metrics:AuditSideMetrics?,remote:Bool) -> some View {
+        let scanning = live && !reading
+        let rate: String = {
+            guard live, let metrics else { return "—" }
+            if scanning { return metrics.scanRate.map { $0.formatted(.number.precision(.fractionLength(0))) + " file/s" } ?? "—" }
+            return SyncLiveProgress.formatRate(metrics.meanReadRate)
+        }()
+        let explanation = scanning ? "Numero di file inventariati diviso per il tempo di scansione. Non misura la lettura dei contenuti." : "Byte letti divisi per il tempo di lettura ed elaborazione SHA-256. " + (remote ? "Può risentire delle prestazioni della rete SMB. " : "") + "Misura disponibile durante la verifica, non durante la copia."
+        return VStack(alignment:.leading,spacing:5) {
+            Label(title,systemImage:icon).font(.system(size:layout.compact ? 13 : 15,weight:.semibold))
+                .foregroundStyle(MacSyncColors.blue(scheme))
+            Divider()
+            HStack(alignment:.bottom,spacing:4) {
+                value("File",metrics.map { $0.files.formatted() } ?? "—")
+                value("Cartelle",metrics.map { $0.directories.formatted() } ?? "—")
+                value("Dimensione",metrics.map { sizeText($0.detectedBytes) } ?? "—")
+                value(scanning ? "Scansione" : "Velocità media di lettura",rate,info:explanation)
+            }
+        }
+        .padding(layout.compact ? 7 : 10).frame(maxWidth:.infinity,alignment:.leading)
+        .background(MacSyncColors.panel(scheme),in:RoundedRectangle(cornerRadius:12))
+        .overlay(RoundedRectangle(cornerRadius:12).strokeBorder(MacSyncColors.line(scheme),lineWidth:1))
+    }
+    private func value(_ label:String,_ number:String,info:String? = nil) -> some View {
+        VStack(alignment:.leading,spacing:3) {
+            HStack(spacing:2) {
+                Text(label).font(.caption2).foregroundStyle(.secondary).lineLimit(2).minimumScaleFactor(0.8)
+                if let info { OverviewMetricInfo(text:info) }
+            }
+            Text(number).font(.system(size:layout.compact ? 12 : 15,weight:.semibold)).monospacedDigit()
+                .lineLimit(1).minimumScaleFactor(0.7)
+        }.frame(maxWidth:.infinity,alignment:.leading)
     }
 }
 
@@ -790,20 +858,26 @@ struct AuditFindingCards: View {
     let counts: AuditFindingCounts
     let partial: Bool
     var dense = false
+    var overview = false
     @State private var selection: AuditDetailSnapshot?
     @Environment(\.colorScheme) private var scheme
     var body: some View {
         VStack(alignment:.leading,spacing:3) {
+            if overview { differenceCaption }
             HStack(spacing:6) {
                 card(.missing,"Nuovi da copiare","doc.badge.plus")
                 card(.different,"Da aggiornare","arrow.triangle.2.circlepath")
                 card(.extra,"Da eliminare","trash")
             }
-            Text(partial ? "Differenze rilevate finora · risultati parziali" : "Ultima verifica · eliminazioni soggette alle protezioni").font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.75)
+            if !overview { differenceCaption }
         }
         .sheet(item:$selection) { snapshot in
             AuditResultSheet(model:model,findings:snapshot.findings,kind:snapshot.kind,title:snapshot.title,filesOnly:true,deletionCandidates:snapshot.deletionCandidates)
         }
+    }
+    private var differenceCaption: some View {
+        Text(partial ? "Differenze rilevate finora · risultati parziali" : "Ultima verifica · eliminazioni soggette alle protezioni")
+            .font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.75)
     }
     private func card(_ kind:AuditFindingKind,_ title:String,_ symbol:String) -> some View {
         Button {
@@ -811,7 +885,18 @@ struct AuditFindingCards: View {
             // full array on the main thread.
             selection = AuditDetailSnapshot(kind:kind,findings:findings,deletionCandidates:deletionCandidates,title:title)
         } label: {
-            if dense {
+            if overview {
+                let color = kind == .missing ? MacSyncColors.green(scheme) : kind == .different ? MacSyncColors.blue(scheme) : MacSyncColors.red(scheme)
+                HStack(spacing:5) {
+                    Image(systemName:symbol).foregroundStyle(color)
+                    Text(title).font(.caption).lineLimit(1).minimumScaleFactor(0.75)
+                    Spacer(minLength:2)
+                    Text(counts.files(kind).formatted()).font(.system(size:16,weight:.semibold,design:.rounded)).monospacedDigit().foregroundStyle(color)
+                    Image(systemName:"chevron.right").font(.caption2).foregroundStyle(.secondary)
+                }.padding(7).frame(maxWidth:.infinity,alignment:.leading)
+                    .background(MacSyncColors.inset(scheme),in:RoundedRectangle(cornerRadius:8))
+                    .overlay(RoundedRectangle(cornerRadius:8).strokeBorder(MacSyncColors.line(scheme),lineWidth:1))
+            } else if dense {
                 let color = kind == .missing ? MacSyncColors.green(scheme) : kind == .different ? MacSyncColors.blue(scheme) : MacSyncColors.red(scheme)
                 VStack(alignment:.leading,spacing:2) {
                     HStack(spacing:3) {
