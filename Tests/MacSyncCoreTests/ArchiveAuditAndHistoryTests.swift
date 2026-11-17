@@ -33,6 +33,34 @@ final class ArchiveAuditAndHistoryTests:XCTestCase {
         _ = try LocalInventory(path:f.db).reconcile(rootID:"photos",root:f.source)
         for job in try f.journal.pending(limit:10000) { try f.journal.markCompleted(id:job.id) }
     }
+    func testAuditCountsPaginationAndMailbox() throws {
+        let findings = (0..<1250).map { i in
+            AuditFinding(rootID:"photos",relativePath:"file-\(i).jpg",sourceRoot:"/source",targetRoot:"/target",objectKind:i % 5 == 0 ? "directory" : "file",bytes:1,kind:i % 2 == 0 ? .missing : .extra,detail:"")
+        }
+        let candidates = Set(findings.filter { $0.kind == .extra && $0.objectKind == "file" }.prefix(23).map(\.id))
+        let counts = AuditFindingCounts.calculate(findings,deletionCandidates:candidates)
+        XCTAssertEqual(counts.newFiles,500)
+        XCTAssertEqual(counts.deletionFiles,23)
+        XCTAssertEqual(counts.extra,625)
+        let first = try XCTUnwrap(AuditFindingPage.load(findings:findings,kind:.missing,filesOnly:true,deletionCandidates:candidates,root:"",search:"",offset:0))
+        let second = try XCTUnwrap(AuditFindingPage.load(findings:findings,kind:.missing,filesOnly:true,deletionCandidates:candidates,root:"",search:"",offset:200))
+        XCTAssertEqual(first.total,500); XCTAssertEqual(first.rows.count,200); XCTAssertEqual(second.rows.count,200)
+        XCTAssertTrue(Set(first.rows.map(\.id)).isDisjoint(with:Set(second.rows.map(\.id))))
+        let deletes = try XCTUnwrap(AuditFindingPage.load(findings:findings,kind:.extra,filesOnly:true,deletionCandidates:candidates,root:"",search:"",offset:0))
+        XCTAssertEqual(deletes.total,23)
+        XCTAssertNil(AuditFindingPage.load(findings:findings,kind:nil,filesOnly:false,deletionCandidates:[],root:"",search:"",offset:0,shouldContinue:{ false }))
+        let mailbox = AuditProgressMailbox()
+        var progress = ArchiveAuditProgress()
+        XCTAssertTrue(mailbox.offer(progress))
+        for i in 1...10000 {
+            progress.compared = i
+            XCTAssertFalse(mailbox.offer(progress))
+        }
+        XCTAssertEqual(mailbox.take()?.compared,10000)
+        XCTAssertNil(mailbox.take())
+        XCTAssertTrue(mailbox.offer(progress))
+    }
+
     func testUnifiedAuditHashesOnlyOnceAndRequiresApproval() throws {
         let f=try setup(); defer{try? FileManager.default.removeItem(at:f.base)}
         try put(f.source,"same.jpg","same"); try put(f.target,"same.jpg","same")

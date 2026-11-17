@@ -18,3 +18,10 @@ Non pubblicare senza risultati di CI verificati e approvazione esplicita. Non co
 - Ogni verifica manuale o pianificata riconosce i candidati e accoda le differenze sicure, senza scritture remote. Prima delle modifiche alla coda viene creato un backup SQLite verificato e conservato in audit-backups; nessuna rimozione automatica dei backup. Le due opzioni grafiche sono rimosse. Le verifiche pianificate attendono copie ferme e non forzano una copia in corso.
 - Ultimo controllo destinazioni e inventario locale completo, coda e generazione monitoraggio prima dello spegnimento. Non è un blocco dei programmi esterni: rimane necessaria la prova su Mac e SMB reale.
 - Benchmark opt-in con 200.000 file piccoli per lato, nessun hash nella verifica rapida. Non è una misura di latenza VPN.
+
+## Reattività e layout
+
+- Contatori incrementali, diagnostica leggera, aggiornamenti al secondo e mailbox a valore più recente. I cambi di fase restano immediati.
+- Consultazione a pagine di 200 elementi su worker, ricerche cancellabili e caricamento dello storico JSON asincrono. Report precedenti compatibili.
+- Manutenzione nella colonna configurazione; pannelli più compatti, confronto a colonne, tempi e velocità mantenuti. Test di bounds anche per Ultima verifica.
+- Benchmark 400.000 file già superato (292,581 s), ora opzionale manuale. Test sintetico burst/heartbeat e regressioni pagination. Non equivalgono a collaudo reale iMac e VPN.

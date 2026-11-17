@@ -126,7 +126,7 @@ public final class SeededArchiveVerifier {
         var currentPath = ""
         func publish(force:Bool = false) {
             let now = ProcessInfo.processInfo.systemUptime
-            guard force || now-lastProgress >= 0.25 else { return }
+            guard force || now-lastProgress >= 1 else { return }
             lastProgress = now
             progress?(SeedVerificationProgress(inspected:inspected,verified:matches.count,
                 missingOrDifferent:differences,deferred:deferred,bytesRead:bytesRead,
@@ -190,7 +190,16 @@ public final class SeededArchiveVerifier {
         onCommit: () -> Void = {}
     ) throws -> Int {
         var stillValid: [SeedVerifiedMatch] = []
+        var lastProgress = ProcessInfo.processInfo.systemUptime
+        progress?(0,report.matches.count)
         for (index, match) in report.matches.enumerated() {
+            defer {
+                let now = ProcessInfo.processInfo.systemUptime
+                if now-lastProgress >= 1 || index+1 == report.matches.count {
+                    lastProgress = now
+                    progress?(index+1,report.matches.count)
+                }
+            }
             if cancellation.isCancelled { throw SeedVerificationError.cancelled }
             guard let mapping = mappings[match.rootID] else { continue }
             do {
@@ -205,9 +214,6 @@ public final class SeededArchiveVerifier {
                 // A file changed or disappeared AFTER the initial preview.
                 // We do not mark it complete and never silently overwrite it.
                 continue
-            }
-            if (index + 1) % 25 == 0 {
-                progress?(index + 1, report.matches.count)
             }
         }
         if !cancellation.mayCommit { throw SeedVerificationError.cancelled }

@@ -83,11 +83,98 @@ public struct AuditSideMetrics: Codable, Equatable, Sendable {
     }
 }
 
+/// Lightweight counters computed once on the worker. No UI traversal of the archive.
+public struct AuditFindingCounts: Codable, Equatable, Sendable {
+    public var newFiles = 0
+    public var updatedFiles = 0
+    public var deletionFiles = 0
+    public var extra = 0
+    public var uncertain = 0
+    public init() {}
+    public mutating func record(_ finding: AuditFinding, deletionCandidates: Set<String>) {
+        if finding.kind == .extra { extra += 1 }
+        if finding.kind == .uncertain { uncertain += 1 }
+        guard finding.objectKind == "file" else { return }
+        switch finding.kind {
+        case .missing: newFiles += 1
+        case .different: updatedFiles += 1
+        case .extra: if deletionCandidates.contains(finding.id) { deletionFiles += 1 }
+        default: break
+        }
+    }
+    public func files(_ kind: AuditFindingKind) -> Int {
+        switch kind {
+        case .missing: return newFiles
+        case .different: return updatedFiles
+        case .extra: return deletionFiles
+        default: return 0
+        }
+    }
+    public static func calculate(_ findings: [AuditFinding], deletionCandidates: Set<String>) -> Self {
+        var counts = Self()
+        for finding in findings { counts.record(finding,deletionCandidates:deletionCandidates) }
+        return counts
+    }
+}
+
+/// A bounded latest-value mailbox. At most one callback needs to be queued on
+/// the main thread, even if it temporarily cannot consume progress.
+public final class AuditProgressMailbox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var latest: ArchiveAuditProgress?
+    private var scheduled = false
+    public init() {}
+    public func offer(_ value: ArchiveAuditProgress) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        latest = value
+        if scheduled { return false }
+        scheduled = true
+        return true
+    }
+    public func take() -> ArchiveAuditProgress? {
+        lock.lock(); defer { lock.unlock() }
+        let value = latest
+        latest = nil; scheduled = false
+        return value
+    }
+}
+
+public struct AuditFindingPage: Sendable {
+    public let rows: [AuditFinding]
+    public let roots: [String]
+    public let total: Int
+    public let offset: Int
+
+    /// Worker-only scan. Bounded table page; no full filtered array is built.
+    public static func load(findings: [AuditFinding], kind: AuditFindingKind?, filesOnly: Bool,
+                            deletionCandidates: Set<String>, root: String, search: String,
+                            offset: Int, limit: Int = 200, shouldContinue: () -> Bool = { true }) -> Self? {
+        let limit = max(1,min(200,limit)), offset = max(0,offset)
+        var rows = [AuditFinding](), roots = Set<String>(), total = 0
+        for (index,finding) in findings.enumerated() {
+            if index % 256 == 0 && !shouldContinue() { return nil }
+            guard kind == nil || finding.kind == kind else { continue }
+            if filesOnly {
+                guard finding.objectKind == "file" else { continue }
+                if kind == .extra && !deletionCandidates.contains(finding.id) { continue }
+            }
+            roots.insert(finding.rootID)
+            guard root.isEmpty || root == finding.rootID else { continue }
+            guard search.isEmpty || finding.relativePath.localizedCaseInsensitiveContains(search) else { continue }
+            if total >= offset && rows.count < limit { rows.append(finding) }
+            total += 1
+        }
+        guard shouldContinue() else { return nil }
+        return Self(rows:rows,roots:roots.sorted(),total:total,offset:offset)
+    }
+}
+
 public struct ArchiveAuditProgress: Equatable, Sendable {
     public var source = AuditSideMetrics()
     public var destination = AuditSideMetrics()
     public var comparisonStarted: Date?
     public var scanningDestination = false
+    public var counts = AuditFindingCounts()
     public var differences: [AuditFinding] = []
     public var deletionCandidates: Set<String> = []
     public var compareRate: Double? {
@@ -129,6 +216,7 @@ public struct ArchiveAuditReport: Codable, Equatable, Sendable {
     public var recognizedFiles: Int? = nil
     public var metadataMatches: Int? = nil
     public var hashMatches: Int? = nil
+    public var displayCounts: AuditFindingCounts? = nil
     public func count(_ kind: AuditFindingKind) -> Int {
         findings.lazy.filter { $0.kind == kind }.count
     }
@@ -165,10 +253,17 @@ public final class ArchiveAudit {
         let startTick = ProcessInfo.processInfo.systemUptime
         var published: Double = 0
         func check() throws { if cancellation.isCancelled { throw SeedVerificationError.cancelled } }
+        func diagnosticSnapshot() {
+            // Do not keep a shared reference to the growing findings array on
+            // every file event (would trigger copy-on-write on each append).
+            var lightweight = state
+            lightweight.differences = []; lightweight.deletionCandidates = []
+            diagnostic(lightweight)
+        }
         func report(force: Bool = false) {
-            diagnostic(state)
+            diagnosticSnapshot()
             let now = ProcessInfo.processInfo.systemUptime
-            if force || now-published >= 0.25 { published=now; progress(state) }
+            if force || now-published >= 1 { published=now; progress(state) }
         }
         struct Pair {
             let mapping: MountedFolderMapping
@@ -205,7 +300,7 @@ public final class ArchiveAudit {
             state.phase = "Analisi sorgente"; state.currentPath = mapping.rootID; report(force:true)
             let source = try LocalScanner.scan(root:mapping.source,excludeManaged:true,
                 shouldContinue:{ !cancellation.isCancelled },onVisit:{ relative in
-                    state.currentPath = mapping.rootID + " / " + relative; diagnostic(state)
+                    state.currentPath = mapping.rootID + " / " + relative; diagnosticSnapshot()
                 },onItem:{ item in
                     state.source.scanSeconds = sourcePrior + ProcessInfo.processInfo.systemUptime-scanStart
                     scanned(item)
@@ -218,7 +313,7 @@ public final class ArchiveAudit {
             state.phase = "Analisi destinazione"; state.currentPath = mapping.rootID; report(force:true)
             let target = try LocalScanner.scan(root:mapping.target,excludeManaged:true,
                 shouldContinue:{ !cancellation.isCancelled },onVisit:{ relative in
-                    state.currentPath = mapping.rootID + " / " + relative; diagnostic(state)
+                    state.currentPath = mapping.rootID + " / " + relative; diagnosticSnapshot()
                 },onItem:{ item in
                     state.destination.scanSeconds = targetPrior + ProcessInfo.processInfo.systemUptime-scanStart
                     scanned(item)
@@ -246,7 +341,7 @@ public final class ArchiveAudit {
             for path in Set(pair.source.keys).union(pair.target.keys).sorted() {
                 try check()
                 state.currentPath = mapping.rootID + " / " + path
-                diagnostic(state)
+                diagnosticSnapshot()
                 let src = pair.source[path], dst = pair.target[path]
                 let item = (src ?? dst)!
                 var kind: AuditFindingKind = .uncertain
@@ -341,6 +436,7 @@ public final class ArchiveAudit {
                     sourceRoot:mapping.source.path,targetRoot:mapping.target.path,objectKind:item.kind,
                     bytes:item.size,kind:kind,detail:detail)
                 findings.append(finding)
+                state.counts.record(finding,deletionCandidates:deletionCandidates)
                 if item.kind == "file" && kind != .matching { state.differences.append(finding) }
                 state.compared += 1; report()
             }
@@ -378,7 +474,7 @@ public final class ArchiveAudit {
             seconds:ProcessInfo.processInfo.systemUptime-startTick,findings:findings,
             bytesRead:state.bytesRead,queuedRepairs:queued,repairRequested:repair,
             sourceMetrics:state.source,destinationMetrics:state.destination,
-            deletionCandidates:deletionCandidates,metadataMatches:metadataMatches,hashMatches:hashMatches)
+            deletionCandidates:deletionCandidates,metadataMatches:metadataMatches,hashMatches:hashMatches,displayCounts:state.counts)
     }
 
     private static func fold(_ path: String) -> String {

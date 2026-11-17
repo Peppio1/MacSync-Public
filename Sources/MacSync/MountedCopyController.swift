@@ -42,7 +42,10 @@ final class MountedCopyController: ObservableObject {
             progress.copiedBytes = 124000000; progress.copySeconds = 10
             liveProgress = progress
         } else if page == .audit || page == .overview {
-            auditReport = lastAudit
+            if var report = lastAudit {
+                if report.displayCounts == nil { report.displayCounts = .calculate(report.findings,deletionCandidates:report.deletionCandidates ?? []) }
+                auditReport = report
+            } else { auditReport = nil }
             auditSettings.enabled = true; auditSettings.frequency = "weekly"; auditSettings.weekday = 2; auditSettings.hour = 8; auditSettings.minute = 0
             auditBusy = auditInProgress; maintaining = auditInProgress
             guard auditInProgress else {
@@ -60,6 +63,7 @@ final class MountedCopyController: ObservableObject {
             progress.bytesRead = 320000000; progress.currentPath = "Foto_caricate / IMG_0042.dng"
             progress.differences = lastAudit?.findings.filter { $0.objectKind == "file" && $0.kind != .matching } ?? []
             progress.deletionCandidates = lastAudit?.deletionCandidates ?? []
+            progress.counts = .calculate(progress.differences,deletionCandidates:progress.deletionCandidates)
             auditProgress = progress; auditStatus = "Verifica in corso"
         }
     }
@@ -176,13 +180,28 @@ final class MountedCopyController: ObservableObject {
     @Published private(set) var auditStatus = "Verifica completa non eseguita"
     private var auditCancel: SeedVerificationCancellation?
 
+    private var loadingLastAudit = false
+    private var auditRevision = 0
     func loadLastAudit() {
-        guard auditReport == nil, !auditBusy else { return }
-        if let url = try? Self.databaseURL().deletingLastPathComponent().appendingPathComponent("last-audit.json"),
-           let bytes = try? Data(contentsOf:url),
-           let report = try? JSONDecoder().decode(ArchiveAuditReport.self,from:bytes) {
-            auditReport = report
-            auditStatus = "Ultima verifica: " + report.ended.formatted(date:.abbreviated,time:.standard)
+        guard !previewOnly, auditReport == nil, !auditBusy, !loadingLastAudit else { return }
+        loadingLastAudit = true
+        let revision = auditRevision
+        DispatchQueue.global(qos:.utility).async { [weak self] in
+            var loaded: ArchiveAuditReport?
+            if let url = try? Self.databaseURL().deletingLastPathComponent().appendingPathComponent("last-audit.json"),
+               let bytes = try? Data(contentsOf:url),
+               var report = try? JSONDecoder().decode(ArchiveAuditReport.self,from:bytes) {
+                if report.displayCounts == nil { report.displayCounts = .calculate(report.findings,deletionCandidates:report.deletionCandidates ?? []) }
+                loaded = report
+            }
+            let result = loaded
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.loadingLastAudit = false
+                guard self.auditRevision == revision, !self.auditBusy, self.auditReport == nil, let result else { return }
+                self.auditReport = result
+                self.auditStatus = "Ultima verifica: " + result.ended.formatted(date:.abbreviated,time:.standard)
+            }
         }
     }
 
@@ -220,6 +239,8 @@ final class MountedCopyController: ObservableObject {
         guard let auditToken=gate.beginAudit() else { auditStatus="Inventario non pronto: verifica rinviata"; return }
         let cancel = SeedVerificationCancellation(shouldContinue:{ gate.auditBlockReason(auditToken) == nil },commitAllowed:{ gate.auditCommitAllowed(auditToken) })
         auditCancel = cancel
+        auditRevision += 1
+        let revision = auditRevision
         auditBusy = true
         maintaining = true
         invalidateSeedReport()
@@ -245,10 +266,13 @@ final class MountedCopyController: ObservableObject {
                 last.phase="Controllo identità cartelle"
                 try journal.verifyDirectoryBindings(maps,allowNewTarget:interactive)
                 let diagnostic: (ArchiveAuditProgress) -> Void = { last=$0 }
+                let mailbox = AuditProgressMailbox()
                 let progress: (ArchiveAuditProgress) -> Void = { snapshot in
+                    guard mailbox.offer(snapshot) else { return }
                     DispatchQueue.main.async { [weak self] in
-                        self?.auditProgress = snapshot
-                        self?.auditStatus = snapshot.phase
+                        guard let value = mailbox.take(), let self, self.auditRevision == revision, self.auditBusy else { return }
+                        self.auditProgress = value
+                        if !cancel.wasExplicitlyCancelled && self.auditStatus != value.phase { self.auditStatus = value.phase }
                     }
                 }
                 // Verify and preserve a standalone local snapshot before ANY queue updates.
@@ -265,6 +289,9 @@ final class MountedCopyController: ObservableObject {
                 var report = result.audit
                 let recognition = result.recognition
                 var recognitionProgress = last
+                recognitionProgress.differences = report.findings.filter { $0.objectKind == "file" && $0.kind != .matching }
+                recognitionProgress.deletionCandidates = report.deletionCandidates ?? []
+                recognitionProgress.counts = report.displayCounts ?? .calculate(report.findings,deletionCandidates:recognitionProgress.deletionCandidates)
                 recognitionProgress.phase = "Riconoscimento automatico"
                 recognitionProgress.comparisonStarted = Date()
                 recognitionProgress.total = recognition.matches.count
@@ -281,6 +308,9 @@ final class MountedCopyController: ObservableObject {
                     diagnostic(recognitionProgress); progress(recognitionProgress)
                 })
                 report.recognizedFiles = acknowledged
+                recognitionProgress.phase = "Salvataggio report"
+                recognitionProgress.comparisonStarted = nil
+                progress(recognitionProgress)
                 let savedReport = report
                 try? auditLog?.record(level:.info,rootID:"app",action:"seed_recognized",message:settings.mode.label + ": " + String(acknowledged) + " file riconosciuti automaticamente; nessuna scrittura sul server")
  

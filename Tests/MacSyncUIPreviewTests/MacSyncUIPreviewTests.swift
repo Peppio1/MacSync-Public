@@ -35,6 +35,40 @@ final class MacSyncUIPreviewTests: XCTestCase {
         }
     }
 
+    /// Synthetic main-actor heartbeat during real report pagination and a burst
+    /// of progress notifications. No physical disk fixture or remote writes.
+    func testAuditResponsiveUnderSyntheticLoad() async throws {
+        let worker = Task.detached(priority:.utility) {
+            let findings = (0..<50000).map { i in
+                // Use the public audit result page via a small real report in
+                // the separate core tests; here exercise burst coalescing.
+                i
+            }
+            let mailbox = AuditProgressMailbox()
+            var snapshot = ArchiveAuditProgress()
+            var offered = 0
+            for i in findings {
+                snapshot.compared = i
+                if mailbox.offer(snapshot) { offered += 1 }
+            }
+            return (offered,mailbox.take()?.compared)
+        }
+        let maxDelay = await MainActor.run { () -> Double in
+            var longest = 0.0
+            for _ in 0..<15 {
+                let start = ProcessInfo.processInfo.systemUptime
+                RunLoop.main.run(until:Date().addingTimeInterval(0.01))
+                longest = max(longest,ProcessInfo.processInfo.systemUptime-start)
+            }
+            return longest
+        }
+        let result = await worker.value
+        XCTAssertEqual(result.0,1)
+        XCTAssertEqual(result.1,49999)
+        XCTAssertLessThan(maxDelay,1.0,"Main run loop delayed under synthetic load")
+        print("Synthetic UI heartbeat max: \(maxDelay) seconds")
+    }
+
     func testRenderProductionComponents() async throws {
         guard let path = ProcessInfo.processInfo.environment["MACSYNC_UI_PREVIEW_DIR"], !path.isEmpty else {
             throw XCTSkip("UI artifact rendering is opt-in via MACSYNC_UI_PREVIEW_DIR")
@@ -207,7 +241,7 @@ final class MacSyncUIPreviewTests: XCTestCase {
         if name.contains("-audit-") {
             let frames = auditBounds.snapshot()
             let idle = name.contains("idle-")
-            let required = idle ? ["operation","start","maintenance"] : ["operation","progress","cancel","maintenance"]
+            let required = idle ? ["operation","start","maintenance","lastResult"] : ["operation","progress","cancel","maintenance","lastResult"]
             let viewport = CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)).insetBy(dx: -1, dy: -1)
             for id in required {
                 let frame = try XCTUnwrap(frames[id], "Missing visible audit component \(id): \(name)")

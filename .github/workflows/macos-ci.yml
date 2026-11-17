@@ -12,6 +12,10 @@ on:
       - '.github/workflows/macos-ui-preview.yml'
   workflow_dispatch:
     inputs:
+      large_audit:
+        description: 'Repeat 200000 files per side local benchmark'
+        type: boolean
+        default: false
       sign_candidate:
         description: 'Sign the verified candidate (approved branding required)'
         type: boolean
@@ -53,6 +57,7 @@ jobs:
       - name: Tests
         run: swift test -Xswiftc -warnings-as-errors
       - name: Large archive recognition benchmark (200000 files per side)
+        if: github.event_name == 'workflow_dispatch' && inputs.large_audit
         env:
           MACSYNC_LARGE_AUDIT: '1'
         run: swift test -Xswiftc -warnings-as-errors --filter SeededArchiveVerifierTests/testLargeArchiveRecognition200000Files

@@ -638,7 +638,7 @@ struct MacSyncConfigurationView: View {
                 if !model.message.isEmpty { Text(model.message).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(model.message) }
                 if let audit = copy.auditProgress {
                     CompactArchiveAuditProgress(progress:audit)
-                    AuditFindingCards(model:model,findings:audit.differences,deletionCandidates:audit.deletionCandidates,partial:true)
+                    AuditFindingCards(model:model,findings:audit.differences,deletionCandidates:audit.deletionCandidates,counts:audit.counts,partial:true)
                     if !audit.currentPath.isEmpty { Text(audit.currentPath).font(.caption).lineLimit(1).truncationMode(.middle) }
                 } else if copy.auditBusy || copy.seedBusy || copy.maintaining {
                     Text(copy.auditBusy ? copy.auditStatus : copy.seedBusy ? copy.seedStatus : copy.maintenanceStatus).font(.caption)
@@ -654,7 +654,7 @@ struct MacSyncConfigurationView: View {
                     Divider()
                     Text("Ultima verifica: " + macSyncDateTime(report.ended)).font(.caption.weight(.semibold))
                     AuditArchiveComparison(source:report.sourceMetrics,destination:report.destinationMetrics,showSpeed:false)
-                    AuditFindingCards(model:model,findings:report.findings,deletionCandidates:report.deletionCandidates ?? [],partial:false)
+                    AuditFindingCards(model:model,findings:report.findings,deletionCandidates:report.deletionCandidates ?? [],counts:report.displayCounts ?? AuditFindingCounts(),partial:false)
                 }
             }
             MacSyncPanel("Riepilogo ultima sincronizzazione", icon: "chart.bar.xaxis") {
