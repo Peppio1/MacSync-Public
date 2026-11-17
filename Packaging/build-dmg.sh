@@ -10,7 +10,12 @@ test -s "$graphics/MacSync.icns"
 test -s "$graphics/MacSync-DMG-Background.png"
 test -s "$graphics/branding-provenance.json"
 version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist")"
-test "$version" = 0.18.0
+expected_version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Packaging/Info.plist)"
+if [[ ! "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$version" != "$expected_version" ]]; then
+  printf 'DMG version mismatch: expected %s, application reports %s\n' "$expected_version" "$version" >&2
+  exit 1
+fi
+printf 'Creating DMG for verified package version %s\n' "$version"
 name="MacSync-v$version-macOS-universal.dmg"
 # Test artifacts are intentionally marked with a visible CI warning in the
 # Finder background and the bundled provenance. The source app is unchanged.

@@ -86,7 +86,7 @@ def background(approved):
         t=y/(h-1)
         d.line((0,y,w,y),fill=(int(12+9*t),int(29+20*t),int(59+34*t)))
     d.text((36,27),"MacSync",font=font(30,True),fill="#ffffff")
-    d.text((37,66),"Installa la versione 0.17.0",font=font(15),fill="#b9d2ee")
+    d.text((37,66),"Installa MacSync",font=font(15),fill="#b9d2ee")
     d.rounded_rectangle((38,109,682,307),radius=24,fill="#eef5ff")
     d.line((310,198,410,198),fill="#2478cf",width=8)
     d.polygon([(410,181),(440,198),(410,215)],fill="#2478cf")
