@@ -38,18 +38,37 @@ jobs:
       - name: Release build for Apple Silicon and Intel
         run: |
           set -euo pipefail
+          # Keep scratch directories and output files distinct even on
+          # case-insensitive APFS (macsync-arm64 == MacSync-arm64).
+          slices="$RUNNER_TEMP/macsync-release-slices"
+          mkdir -p "$slices"
           for arch in arm64 x86_64; do
-            scratch="$RUNNER_TEMP/macsync-$arch"
+            scratch="$RUNNER_TEMP/macsync-swift-build-$arch"
             swift build -c release --arch "$arch" --scratch-path "$scratch" -Xswiftc -warnings-as-errors
             bin="$(swift build -c release --arch "$arch" --scratch-path "$scratch" --show-bin-path)"
-            cp "$bin/MacSync" "$RUNNER_TEMP/MacSync-$arch"
-            lipo "$RUNNER_TEMP/MacSync-$arch" -verify_arch "$arch"
+            source="$bin/MacSync"
+            output="$slices/$arch.macho"
+            printf 'Architecture: %s\nSwift bin directory: %s\nExecutable: %s\nOutput: %s\n' "$arch" "$bin" "$source" "$output"
+            ls -ld "$source"
+            test -f "$source" && test -s "$source" && test -x "$source"
+            file "$source"
+            file -b "$source" | grep -q 'Mach-O.*executable'
+            test ! -e "$output" && test ! -L "$output"
+            install -m 755 "$source" "$output"
+            test -f "$output" && test -s "$output" && test -x "$output"
+            cmp "$source" "$output"
+            lipo "$output" -info
+            lipo "$output" -verify_arch "$arch"
+            test "$(lipo "$output" -archs)" = "$arch"
           done
       - name: Assemble and verify universal ad hoc bundle
         run: |
           set -euo pipefail
           mkdir -p dist/MacSync.app/Contents/MacOS
-          lipo -create "$RUNNER_TEMP/MacSync-arm64" "$RUNNER_TEMP/MacSync-x86_64" -output dist/MacSync.app/Contents/MacOS/MacSync
+          lipo -create "$RUNNER_TEMP/macsync-release-slices/arm64.macho" "$RUNNER_TEMP/macsync-release-slices/x86_64.macho" -output dist/MacSync.app/Contents/MacOS/MacSync
+          test -f dist/MacSync.app/Contents/MacOS/MacSync
+          test -s dist/MacSync.app/Contents/MacOS/MacSync
+          file dist/MacSync.app/Contents/MacOS/MacSync
           chmod 755 dist/MacSync.app/Contents/MacOS/MacSync
           cp Packaging/Info.plist dist/MacSync.app/Contents/Info.plist
           info=dist/MacSync.app/Contents/Info.plist
@@ -62,7 +81,7 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print LSMinimumSystemVersion' "$info")" = 13.0
           test "$(/usr/libexec/PlistBuddy -c 'Print LSUIElement' "$info")" = true
           test -x "$exe"
-          lipo -info "$exe"
+          lipo "$exe" -info
           lipo "$exe" -verify_arch arm64 x86_64
           codesign --force --sign - dist/MacSync.app
           codesign --verify --deep --strict --verbose=2 dist/MacSync.app
