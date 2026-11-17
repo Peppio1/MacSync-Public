@@ -66,20 +66,38 @@ cat > "$root/www/appcast.xml" <<XML
 XML
 "$sign" -f "$key" "$root/www/appcast.xml" >/dev/null
 "$sign" -f "$key" --verify "$root/www/appcast.xml"
-# Actual Sparkle installer through the public SPUUpdater API, not merely signature verification. The
-# application is not running and is not expected to be relaunched.
-python3 - "$cli" "$root/target/MacSync.app" <<'PY'
+# Each invocation is a new test process: real persisted SQLite, preferences,
+# marker and bundle. No environment switches inside production applications.
+export MACSYNC_RECOVERY_LAB_ROOT="$root"
+export MACSYNC_RECOVERY_LAB_PUBLIC="$public"
+phase() {
+  MACSYNC_RECOVERY_LAB_SCENARIO="$1" MACSYNC_RECOVERY_LAB_PHASE="$2" \
+    swift test --skip-build --filter UpdateRecoveryIntegrationTests/testPersistentRecoveryAndStartupGate
+}
+install_valid() {
+  python3 - "$cli" "$root/target/MacSync.app" <<'PY'
 import subprocess, sys
 subprocess.run([sys.argv[1], sys.argv[2]], check=True, timeout=150)
 PY
-for i in $(seq 1 40); do
-  result="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$root/target/MacSync.app/Contents/Info.plist" 2>/dev/null || true)"
-  test "$result" = 0.16.1 && break
-  sleep 0.5
-done
-test "$result" = 0.16.1
-codesign --verify --deep --strict "$root/target/MacSync.app"
-echo "Sparkle isolated installation 0.16.0 -> 0.16.1 succeeded."
+  for i in $(seq 1 40); do
+    result="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$root/target/MacSync.app/Contents/Info.plist" 2>/dev/null || true)"
+    test "$result" = 0.16.1 && break
+    sleep 0.5
+  done
+  test "$result" = 0.16.1
+  codesign --verify --deep --strict "$root/target/MacSync.app"
+  echo "Sparkle isolated installation 0.16.0 -> 0.16.1 succeeded."
+}
+phase rollback prepare
+install_valid
+phase rollback interrupted-start
+phase rollback recover
+phase rollback finish
+# The real previous application has now been restored; use a separate
+# synthetic archive for a second actual Sparkle install and successful boot.
+phase success prepare
+install_valid
+phase success finish
 # Recreate an independent source with same trust; mutate archive while keeping
 # signed feed and signature intact. No replacement may occur.
 mkdir "$root/bad"
@@ -89,6 +107,7 @@ make_fixture "$root/bad/MacSync.app" 0.16.0 160 appcast.xml
 # Distinct bundle ID itself would otherwise mask the signature test.
  /usr/libexec/PlistBuddy -c 'Set CFBundleIdentifier org.macsync.ci.install-lab' "$root/bad/MacSync.app/Contents/Info.plist"
 codesign --force --sign - "$root/bad/MacSync.app"
+phase tampered prepare
 python3 - "$root/www/update.zip" <<'PY'
 from pathlib import Path
 import sys
@@ -106,9 +125,11 @@ python3 - "$cli" "$root/bad/MacSync.app" <<'PY'
 import subprocess, sys
 r=subprocess.run([sys.argv[1], sys.argv[2]],timeout=150,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
 print(r.stdout)
-if r.returncode not in (12,13) or "LAB: downloading" not in r.stdout:
+if r.returncode not in (12,13) or "LAB: downloading" not in r.stdout or "SUSparkleErrorDomain:4005" not in r.stdout:
     raise SystemExit("Tampered test did not reach download followed by an updater error")
 PY
 test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$root/bad/MacSync.app/Contents/Info.plist")" = 0.16.0
 codesign --verify --deep --strict "$root/bad/MacSync.app"
 echo "Tampered archive did not replace the original application."
+phase tampered finish
+echo "Integrated persistent recovery and startup laboratory passed."

@@ -8,7 +8,7 @@
 
 MacSync è un'applicazione desktop sviluppata in Swift e SwiftUI per replicare cartelle di lavoro del Mac su una destinazione locale o di rete, senza installare componenti sul server. La sorgente rimane l'unica fonte di verità: nessuna sincronizzazione inversa.
 
-> **Stato: v0.16.0 in sviluppo — rilevamento aggiornamenti; installazione automatica non attiva.** La pre-release v0.15.0 è la baseline convalidata. I test su cartelle locali macOS sono superati. Il collaudo su iMac, SMB/VPN reale e applicazione installata è ancora necessario. Non utilizzare con dati di produzione prima del collaudo.
+> **Stato: v0.16.0 candidata in validazione — aggiornamenti firmati con conferma e recupero assistito.** La pre-release v0.15.0 è l’ultima pubblicata. CI macOS: 177 test superati, 0 errori, 48 anteprime, installazione Sparkle 0.16.0 → 0.16.1 e rifiuto ZIP manomesso convalidati nel [run 44066873367](https://github.com/Peppio1/MacSync-Public/actions/runs/44066873367). Il collaudo integrato aggiornamento/riavvio/recupero e la firma del nuovo candidato sono in validazione. Collaudo fisico su iMac, SMB/VPN e Gatekeeper ancora necessario. Non utilizzare dati reali prima del collaudo.
 
 ## Download
 
@@ -16,18 +16,9 @@ MacSync è un'applicazione desktop sviluppata in Swift e SwiftUI per replicare c
 
 [Scarica MacSync v0.15.0 (universale)](https://github.com/Peppio1/MacSync-Public/releases/download/v0.15.0/MacSync-v0.15.0-macOS-universal.zip) · [SHA-256](https://github.com/Peppio1/MacSync-Public/releases/download/v0.15.0/MacSync-v0.15.0-macOS-universal.zip.sha256) · [Release](https://github.com/Peppio1/MacSync-Public/releases/tag/v0.15.0). Non notarizzato, solo per collaudo.
 
-### MacSync v0.14.3 — ultima build già verificata
+### MacSync v0.16.0 — candidata non pubblicata
 
-[![Scarica MacSync per macOS](https://img.shields.io/badge/Scarica-MacSync%20v0.14.3-2563eb?style=for-the-badge&logo=apple)](https://github.com/Peppio1/MacSync-Public/actions/runs/43985988474)
-
-| Risorsa | Collegamento |
-|---|---|
-| Applicazione MacSync.app (archivio ZIP) | [Artefatti del workflow](https://github.com/Peppio1/MacSync-Public/actions/runs/43985988474) |
-| Anteprime dell'interfaccia (48 immagini) | [Artefatti delle anteprime](https://github.com/Peppio1/MacSync-Public/actions/runs/43985988474) |
-| Compilazione convalidata | [Apri il workflow](https://github.com/Peppio1/MacSync-Public/actions/runs/43983414603) |
-| Versioni ufficiali | [GitHub Releases](https://github.com/Peppio1/MacSync-Public/releases) |
-
-**Nota:** non è ancora pubblicata una release stabile. I download attuali sono artefatti temporanei di GitHub Actions, richiedono l'accesso a GitHub e scadono secondo la retention di 7 giorni. Dopo la scadenza consultare [Actions](https://github.com/Peppio1/MacSync-Public/actions) per eventuali compilazioni più recenti. Il pacchetto è firmato ad hoc, non notarizzato; non va considerato un installer di produzione.
+[Ultimo laboratorio di installazione superato](https://github.com/Peppio1/MacSync-Public/actions/runs/44066873367) · [Workflow correnti](https://github.com/Peppio1/MacSync-Public/actions). Gli artefatti CI richiedono accesso GitHub e scadono dopo 7 giorni. Nessuna release stabile: pacchetti ad hoc, non notarizzati, solo per test. Non usare le fixture del laboratorio come applicazioni reali.
 
 ## Funzionalità
 
@@ -41,6 +32,7 @@ MacSync è un'applicazione desktop sviluppata in Swift e SwiftUI per replicare c
 - Riconoscimento dei file già copiati con verifica SHA-256 e conferma esplicita, utile per un archivio inizializzato in precedenza.
 - Stato delle operazioni, avanzamento, tempi, velocità media di copia, storico per ciclo, dettagli per file e registro esportabile.
 - Interfaccia in italiano, con temi chiaro e scuro e layout adattivo.
+- Aggiornamenti solo stabili con controllo facoltativo ogni 24 ore, firma Ed25519 del feed e dello ZIP, conferma esplicita, backup preventivo e recupero assistito.
 
 ## Come funziona
 
@@ -134,34 +126,43 @@ L'attivazione del mirror richiede consenso esplicito. Provare questa funzione es
 
 Usare **Ferma tutto** prima di interventi straordinari. Attendere la conclusione delle operazioni in corso; una chiamata SMB bloccata può ritardare la chiusura.
 
+### 7. Aggiornamenti e recupero
+
+In **Impostazioni → Aggiornamenti software**, usa Controlla o attiva il controllo automatico (non avvia download automatici). Installa MacSync.app in Applicazioni. La conferma iniziale sospende e drena le operazioni, crea uno snapshot verificato e apre Sparkle; conferma l’installazione nella sua finestra. Dopo annullamento o aggiornamento, riapri MacSync dalla posizione originale e verifica le impostazioni. Copie automatiche, mirror e audit pianificato restano disabilitati finché non li riabiliti esplicitamente.
+
+Se MacSync non si avvia e l’installatore è terminato, apri nel Finder la cartella `~/Library/Application Support/MacSync/update-backups`, individua il backup della transazione pendente e apri **Ripristina MacSync.command**. Conferma con RIPRISTINA. Il recupero è offline, senza sudo; rifiuta database modificati o destinazioni/identità non verificabili, preserva l’app sostituita e non sovrascrive SQLite né preferenze. Non avviare il recupero mentre Sparkle sta ancora installando. La guida tecnica è in [Aggiornamenti e recupero](docs/UPDATES.md). Non eliminare manualmente il marcatore o i file di lock.
+
 ## Stato della validazione
 
-Ultima baseline già convalidata: [2cc398b](https://github.com/Peppio1/MacSync-Public/commit/2cc398bc2c86543628460fefeb1aaecaf17e8ce8), [workflow 43985988474](https://github.com/Peppio1/MacSync-Public/actions/runs/43985988474). La regressione v0.15.0 e il pacchetto universale attendono l'esito CI.
+Baseline pubblicata v0.15.0: [workflow 44047883363](https://github.com/Peppio1/MacSync-Public/actions/runs/44047883363). Ultima validazione completata v0.16.0: [56555ce](https://github.com/Peppio1/MacSync-Public/commit/56555ce8670b720e7ecec3841412791c448e1fe3), [workflow 44066873367](https://github.com/Peppio1/MacSync-Public/actions/runs/44066873367).
 
 | Verifica | Risultato |
 |---|---|
-| Suite ordinaria | 167 superati, 0 falliti, 1 rendering opt-in separato (168 rilevati) |
+| Suite ordinaria | 177 superati, 0 falliti, 1 rendering opt-in separato (178 rilevati nell’ultimo run concluso) |
 | Test integrato: due coppie, disconnessione simulata, backup e ripresa | Superato |
 | Carico sintetico: 40 cartelle, 360 file, quattro cicli di modifica | Superato |
 | Mirror definitivo e con recupero | Superato |
 | Release build e 48 anteprime UI | Completati |
 | 96 cicli accelerati, inventario 10.000 file, interruzione simulata | Superati |
-| Compilazione universale e regressione v0.15.0 | In validazione |
+| Compilazione universale v0.15.0 e v0.16.0 | Superata |
+| Firma Ed25519 di produzione (candidato precedente) | Superata nel run 44063365937 |
+| Installazione Sparkle e rifiuto archivio alterato | Superati nel run 44066873367 |
+| Recupero e preflight su processi separati, firma ultima build | In validazione |
 | Durata reale e risorse app installata | Da collaudare |
 | Interazioni UI, avvio al login, arresto e SMB/VPN reale | Da collaudare |
 
-Il successivo obiettivo è consolidare la v0.15.0 e procedere con le funzionalità pre-release e il collaudo fisico. Nessuna versione 1.0 stabile è dichiarata.
+Il successivo obiettivo è completare la candidata v0.16.0, poi v0.17.0 (icone, DMG, guida) e collaudo reale. Nessuna versione 1.0 stabile è dichiarata.
 
 ## Cronologia e changelog
 
 Le versioni sono riportate dalla più recente alla più vecchia. Lo storico descrive lo sviluppo progressivo: le impostazioni e i limiti delle vecchie versioni non sostituiscono quelli della versione attuale.
 
-### v0.16.0 — sviluppo aggiornamenti (prima fase)
+### v0.16.0 — sistema aggiornamenti (candidata)
 
 - Pannello aggiornamenti nelle Impostazioni e comando dalla barra menu.
 - Controllo manuale e automatico delle release stabili; nessuna installazione non autenticata.
-- Preparazione componente di snapshot di recupero, da integrare nel ciclo di arresto e installazione.
-- Sparkle, firma Ed25519, appcast e rollback operativo ancora da completare; nessuna release v0.16.0 pubblicata.
+- Sparkle 2.10.0 integrato; feed e archivio firmati, conferma, arresto dei worker, backup e recupero assistito del solo bundle.
+- Firma di produzione e installazione isolata già provate; collaudo integrato del riavvio e firma dell’ultima build in validazione. Nessuna release v0.16.0 pubblicata.
 
 ### v0.15.0 — consolidamento
 

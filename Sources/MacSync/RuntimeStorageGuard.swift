@@ -16,77 +16,30 @@ final class RuntimeStorageGuard {
 
     /// Only called by the drained runtime while this guard owns the lock.
     func createUpdateSnapshot() throws -> URL {
-        let directory = folder.appendingPathComponent("update-backups", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
-                                                attributes: [.posixPermissions: 0o700])
-        return try UpdateRecoverySnapshot.create(
-            database: folder.appendingPathComponent("inventory.sqlite"),
-            application: Bundle.main.bundleURL,
-            preferences: UserDefaults.standard.dictionaryRepresentation(),
-            parent: directory)
-    }
-
-    private static func disableCopyAuthorizations(_ defaults: UserDefaults) throws {
-        defaults.set(false, forKey: "MacSync.autoCopiesEnabled")
-        defaults.set(false, forKey: "MacSync.autoCopiesEnabled.v2")
-        defaults.removeObject(forKey: "MacSync.mirrorAuthorization.v1")
-        defaults.removeObject(forKey: "MacSync.mirrorEnabled")
-        if let data = defaults.data(forKey: "MacSync.archiveAuditSettings"),
-           var value = try? JSONDecoder().decode(ArchiveAuditSettings.self, from: data) {
-            value.enabled = false
-            value.repair = false
-            defaults.set(try JSONEncoder().encode(value), forKey: "MacSync.archiveAuditSettings")
-        }
-        guard defaults.synchronize() else { throw UpdateTransactionMarker.MarkerError.invalid }
+        try UpdateRecoveryCoordinator(root: folder).createSnapshot(application: Bundle.main.bundleURL,
+            preferences: UserDefaults.standard.dictionaryRepresentation())
     }
 
     func beginSignedUpdate(previous: String, requested: String, snapshot: URL) throws {
-        let backupApp = snapshot.appendingPathComponent("MacSync.app")
-        try ApplicationRollback.validateBundle(backupApp, version: previous)
-        let marker = try UpdateTransactionMarker(previousVersion: previous, requestedVersion: requested,
-                                                 snapshotName: snapshot.lastPathComponent)
-        let manifest = try ApplicationRecoveryManifest(application: Bundle.main.bundleURL, marker: marker)
-        try manifest.write(to: snapshot.appendingPathComponent("recovery.json"))
-        let helper = backupApp.appendingPathComponent("Contents/MacOS/MacSyncRecovery")
-        guard FileManager.default.isExecutableFile(atPath: helper.path) else {
-            throw ApplicationRollback.Failure("Strumento di recupero mancante.")
-        }
-        let wrapper = snapshot.appendingPathComponent("Ripristina MacSync.command")
-        let source = backupApp.appendingPathComponent("Contents/Resources/Ripristina MacSync.command")
-        try FileManager.default.copyItem(at: source, to: wrapper)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: wrapper.path)
-        try marker.write(to: folder.appendingPathComponent("update-pending.json"))
-        try Self.disableCopyAuthorizations(.standard)
+        try UpdateRecoveryCoordinator(root: folder).begin(application: Bundle.main.bundleURL, previous: previous,
+            requested: requested, snapshot: snapshot, defaults: .standard)
     }
 
-    private static func inspectPendingUpdate(folder: URL, database: URL, defaults: UserDefaults) throws -> URL? {
-        let url = folder.appendingPathComponent("update-pending.json")
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        // Run before creating any operational model, watcher or copy worker.
-        try disableCopyAuthorizations(defaults)
-        let marker = try UpdateTransactionMarker.read(from: url)
-        let snapshot = folder.appendingPathComponent("update-backups", isDirectory: true)
-            .appendingPathComponent(marker.snapshotName, isDirectory: true)
-        try ArchiveDatabaseSafety.verify(snapshot.appendingPathComponent("inventory.sqlite"), readOnly: true)
-        try ApplicationRollback.validateBundle(snapshot.appendingPathComponent("MacSync.app"), version: marker.previousVersion)
-        try ArchiveDatabaseSafety.verify(database)
-        guard let actual = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
-              actual == marker.previousVersion || actual == marker.requestedVersion else {
-            throw ApplicationRollback.Failure("Versione inattesa. Apri il backup e usa il recupero solo a MacSync chiuso: " + snapshot.path)
-        }
-        try ApplicationRollback.validateBundle(Bundle.main.bundleURL, version: actual)
+    private static func inspectPendingUpdate(folder: URL, defaults: UserDefaults) throws -> UpdateRecoveryCoordinator.Pending? {
+        guard let pending = try UpdateRecoveryCoordinator(root: folder).startup(application: Bundle.main.bundleURL,
+                                                                                   defaults: defaults) else { return nil }
+        let actual = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         let alert = NSAlert()
-        alert.messageText = actual == marker.requestedVersion ? "Aggiornamento verificato" : "Aggiornamento non completato"
-        alert.informativeText = "Archivio e copia della versione precedente verificati.\nBackup: " + snapshot.path +
-            "\n\nLe copie automatiche, le cancellazioni e le verifiche pianificate restano disattivate: controlla la configurazione e riabilitale esplicitamente. Non verrà ripristinato automaticamente un database precedente."
+        alert.messageText = actual == pending.marker.requestedVersion ? "Aggiornamento verificato" : "Aggiornamento non completato"
+        alert.informativeText = "Archivio e copia precedente verificati.\nBackup: " + pending.snapshot.path +
+            "\n\nCopie automatiche, cancellazioni e verifiche pianificate restano disattivate. Controlla le impostazioni e riabilitale esplicitamente."
         alert.addButton(withTitle: "Continua")
         alert.addButton(withTitle: "Apri backup ed esci")
         if alert.runModal() != .alertFirstButtonReturn {
-            NSWorkspace.shared.open(snapshot)
+            NSWorkspace.shared.open(pending.snapshot)
             Darwin.exit(0)
         }
-        // Keep the marker through all subsequent database initialization.
-        return url
+        return pending
     }
 
     static func acquireOrExit() -> RuntimeStorageGuard {
@@ -102,7 +55,7 @@ final class RuntimeStorageGuard {
             let previousIdentity = defaults.string(forKey:"MacSync.databaseFileIdentity.v014")
             guard exists || previousIdentity == nil else { throw JournalError.database("Database operativo mancante: ripristinare una copia verificata") }
             if exists { try ArchiveDatabaseSafety.verify(db) }
-            let pendingUpdate = try inspectPendingUpdate(folder: folder, database: db, defaults: defaults)
+            let pendingUpdate = try inspectPendingUpdate(folder: folder, defaults: defaults)
             let currentIdentity = exists ? try ArchiveDatabaseSafety.fileIdentity(db) : nil
             let restored = previousIdentity != nil && currentIdentity != previousIdentity
             if !defaults.bool(forKey:"MacSync.safetyMigration.v014") || restored {
@@ -146,7 +99,7 @@ final class RuntimeStorageGuard {
                     try ArchiveDatabaseSafety.backup(db,to:day)
                 } else { try ArchiveDatabaseSafety.verify(day,readOnly:true) }
             }
-            if let pendingUpdate { try FileManager.default.removeItem(at: pendingUpdate) }
+            if let pendingUpdate { try UpdateRecoveryCoordinator(root: folder).complete(pendingUpdate, defaults: defaults) }
             return RuntimeStorageGuard(lock:lock, folder:folder)
         } catch {
             let alert = NSAlert()

@@ -131,8 +131,9 @@ public struct ApplicationRecoveryManifest: Codable, Equatable {
     public let originalPath: String
     public let marker: UpdateTransactionMarker
 
-    public init(application: URL, marker: UpdateTransactionMarker) throws {
-        guard ApplicationRollback.allowedInstallLocation(application) else {
+    public init(application: URL, marker: UpdateTransactionMarker,
+                allowsLocation: (URL) -> Bool = ApplicationRollback.allowedInstallLocation) throws {
+        guard allowsLocation(application) else {
             throw ApplicationRollback.Failure("Sposta MacSync.app in Applicazioni prima di effettuare l’aggiornamento.")
         }
         originalPath = application.path
@@ -147,7 +148,8 @@ public struct ApplicationRecoveryManifest: Codable, Equatable {
         try h.synchronize()
     }
 
-    public static func read(from url: URL) throws -> Self {
+    public static func read(from url: URL,
+                            allowsLocation: (URL) -> Bool = ApplicationRollback.allowedInstallLocation) throws -> Self {
         let r = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
         guard r.isRegularFile == true, r.isSymbolicLink != true, let n = r.fileSize, n > 0, n < 8192 else {
             throw ApplicationRollback.Failure("Manifesto di ripristino non valido.")
@@ -155,6 +157,6 @@ public struct ApplicationRecoveryManifest: Codable, Equatable {
         let raw = try JSONDecoder().decode(Self.self, from: Data(contentsOf: url))
         let marker = try UpdateTransactionMarker(previousVersion: raw.marker.previousVersion,
             requestedVersion: raw.marker.requestedVersion, snapshotName: raw.marker.snapshotName)
-        return try Self(application: URL(fileURLWithPath: raw.originalPath), marker: marker)
+        return try Self(application: URL(fileURLWithPath: raw.originalPath), marker: marker, allowsLocation: allowsLocation)
     }
 }

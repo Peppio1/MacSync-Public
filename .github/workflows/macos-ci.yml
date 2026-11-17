@@ -235,6 +235,7 @@ jobs:
         run: |
           set -euo pipefail
           (cd signing-input && shasum -a 256 -c MacSync-v0.16.0-macOS-universal.zip.sha256)
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           bash Packaging/prepare-release-signing.sh
       - name: Validate production key and sign candidate without publishing
         env:

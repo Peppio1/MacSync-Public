@@ -39,4 +39,8 @@ cat > signing-output/appcast.xml <<XML
 XML
 printf '%s\n' "$MACSYNC_SPARKLE_PRIVATE_KEY" | "$sign" -f - signing-output/appcast.xml > /dev/null
 printf '%s\n' "$MACSYNC_SPARKLE_PRIVATE_KEY" | "$sign" -f - --verify signing-output/appcast.xml
+# Public provenance only: preserve exact CI source/run and artifact hashes.
+printf 'commit=%s\nrun=%s\nversion=0.16.0\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > signing-output/build-provenance.txt
+(cd signing-output && shasum -a 256 "$name" appcast.xml "$name.edsignature" build-provenance.txt > SHA256SUMS)
+(cd signing-output && shasum -a 256 -c SHA256SUMS)
 echo "Production key matches pinned public key; signed candidate and feed verified. Nothing published."
