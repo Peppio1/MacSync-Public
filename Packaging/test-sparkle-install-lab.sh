@@ -66,11 +66,11 @@ cat > "$root/www/appcast.xml" <<XML
 XML
 "$sign" -f "$key" "$root/www/appcast.xml" >/dev/null
 "$sign" -f "$key" --verify "$root/www/appcast.xml"
-# Actual Sparkle CLI replacement, not merely signature verification. The
+# Actual Sparkle installer through the public SPUUpdater API, not merely signature verification. The
 # application is not running and is not expected to be relaunched.
 python3 - "$cli" "$root/target/MacSync.app" <<'PY'
 import subprocess, sys
-subprocess.run([sys.argv[1], "--check-immediately", "--user-agent-name", "MacSync-CI-Lab", "--verbose", sys.argv[2]], check=True, timeout=150)
+subprocess.run([sys.argv[1], sys.argv[2]], check=True, timeout=150)
 PY
 for i in $(seq 1 40); do
   result="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$root/target/MacSync.app/Contents/Info.plist" 2>/dev/null || true)"
@@ -104,9 +104,10 @@ if "$sign" -f "$key" --verify "$root/www/update.zip" "$sig"; then
 fi
 python3 - "$cli" "$root/bad/MacSync.app" <<'PY'
 import subprocess, sys
-r=subprocess.run([sys.argv[1], "--check-immediately", "--user-agent-name", "MacSync-CI-Lab", "--verbose", sys.argv[2]],timeout=150)
-if r.returncode == 0:
-    raise SystemExit("Tampered update unexpectedly reported success")
+r=subprocess.run([sys.argv[1], sys.argv[2]],timeout=150,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+print(r.stdout)
+if r.returncode not in (12,13) or "LAB: downloading" not in r.stdout:
+    raise SystemExit("Tampered test did not reach download followed by an updater error")
 PY
 test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$root/bad/MacSync.app/Contents/Info.plist")" = 0.16.0
 codesign --verify --deep --strict "$root/bad/MacSync.app"

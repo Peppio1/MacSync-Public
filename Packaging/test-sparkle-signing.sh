@@ -106,7 +106,29 @@ if "$sign" -f "$work/test-key" --verify "$work/altered.xml"; then
 fi
 echo "Sparkle framework linking, signing and tamper rejection passed"
 
-# Reuse only disposable keys and the verified official CLI distribution.
-cli="$(find "$work/sdk" -type f -name sparkle-cli -print -quit)"
-test -x "$cli"
-bash Packaging/test-sparkle-install-lab.sh "$archive" "$sign" "$cli" "$work/test-key"
+# The official release contains sign_update, not the optional sparkle-cli.
+# Build an isolated test driver against the already verified public framework.
+# This never launches production MacSync or uses its signing secret.
+echo "Compiling isolated Sparkle installer driver"
+labapp="$work/InstallLab.app"
+mkdir -p "$labapp/Contents/MacOS" "$labapp/Contents/Frameworks"
+ditto "$framework" "$labapp/Contents/Frameworks/Sparkle.framework"
+cat > "$labapp/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>org.macsync.ci.driver</string>
+<key>CFBundleExecutable</key><string>InstallLab</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>LSUIElement</key><true/>
+<key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
+</dict></plist>
+PLIST
+clang -fobjc-arc -fblocks -mmacosx-version-min=13.0 \
+  -F "$labapp/Contents/Frameworks" -framework Sparkle -framework Foundation -framework AppKit \
+  -Wl,-rpath,@executable_path/../Frameworks \
+  Packaging/SparkleInstallLab.m -o "$labapp/Contents/MacOS/InstallLab"
+codesign --force --sign - "$labapp"
+codesign --verify --deep --strict "$labapp"
+echo "Starting isolated Sparkle installation laboratory"
+bash Packaging/test-sparkle-install-lab.sh "$archive" "$sign" "$labapp/Contents/MacOS/InstallLab" "$work/test-key"
