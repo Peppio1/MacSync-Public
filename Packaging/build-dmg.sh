@@ -36,7 +36,11 @@ test -s "$mount/MacSync.app/Contents/Resources/MacSync.icns"
 test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$mount/MacSync.app/Contents/Info.plist")" = "$version"
 lipo "$mount/MacSync.app/Contents/MacOS/MacSync" -verify_arch arm64 x86_64
 lipo "$mount/MacSync.app/Contents/MacOS/MacSyncRecovery" -verify_arch arm64 x86_64
-codesign --verify --deep --strict --all-architectures "$mount/MacSync.app"
+if ! codesign --verify --deep --strict --all-architectures "$mount/MacSync.app"; then
+  echo "Signed bundle changed during DMG creation; extended attribute diagnostics:" >&2
+  xattr -lr "$mount/MacSync.app" >&2 || true
+  exit 1
+fi
 cmp "$app/Contents/MacOS/MacSync" "$mount/MacSync.app/Contents/MacOS/MacSync"
 cmp "$app/Contents/MacOS/MacSyncRecovery" "$mount/MacSync.app/Contents/MacOS/MacSyncRecovery"
 cmp "$app/Contents/Resources/branding-provenance.json" "$mount/MacSync.app/Contents/Resources/branding-provenance.json"

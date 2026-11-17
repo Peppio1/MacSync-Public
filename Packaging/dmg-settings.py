@@ -7,7 +7,9 @@ format = "UDZO"
 filesystem = "HFS+"
 files = [str(app), (str(guide), "Guida installazione.html")]
 symlinks = {"Applications": "/Applications"}
-hide_extensions = ["MacSync.app", "Guida installazione.html"]
+# Never write FinderInfo or a resource fork onto a signed .app bundle.
+# Finder can hide .app by its own preferences; leave the bundle untouched.
+hide_extensions = ["Guida installazione.html"]
 icon = str(graphics / "MacSync.icns")
 background = str(graphics / "MacSync-DMG-Background.png")
 window_rect = ((100, 100), (720, 430))
