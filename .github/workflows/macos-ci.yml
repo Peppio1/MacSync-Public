@@ -93,6 +93,11 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$unpacked"
           lipo "$unpacked/Contents/MacOS/MacSync" -verify_arch arm64 x86_64
           (cd dist && shasum -a 256 "$zip" > "$zip.sha256")
+      - name: Validate Sparkle 2.10.0 with disposable signing keys
+        run: |
+          set -euo pipefail
+          version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' dist/MacSync.app/Contents/Info.plist)"
+          bash Packaging/test-sparkle-signing.sh "dist/MacSync-v$version-macOS-universal.zip"
       - uses: actions/upload-artifact@v6
         with:
           name: MacSync-macOS-universal

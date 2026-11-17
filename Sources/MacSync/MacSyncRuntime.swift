@@ -14,6 +14,7 @@ final class MacSyncRuntime: ObservableObject {
     @Published private(set) var shuttingDown = false
     private var shutdownCompletion: (@MainActor () -> Void)?
     private var shutdownWorkersDrained = false
+    private(set) var manualUpdateURL: URL?
     private var folderEditCancellation: SeedVerificationCancellation?
     let previewOnly: Bool
     let model: MacSyncViewModel
@@ -72,6 +73,9 @@ final class MacSyncRuntime: ObservableObject {
         // automatic attempt is scheduled according to the chosen frequency.
         scheduleNextAutomaticAttempt()
         scheduleArchiveAudit()
+        updates.onPrepareManualUpdate = { [weak self] url in
+            self?.prepareManualUpdate(url)
+        }
         updates.start()
     }
 
@@ -102,8 +106,33 @@ final class MacSyncRuntime: ObservableObject {
         auditTimer = timer
     }
 
+    /// Request an explicit maintenance shutdown; no update code is executed.
+    func prepareManualUpdate(_ url: URL) {
+        guard !previewOnly, !shuttingDown, storageGuard != nil,
+              Bundle.main.bundleURL.pathExtension == "app" else { return }
+        manualUpdateURL = url
+        NSApplication.shared.terminate(nil)
+    }
+
+    func prepareUpdateSnapshotAfterShutdown() throws -> URL {
+        guard shuttingDown, shutdownWorkersDrained, !folderConfigurationBusy,
+              let storageGuard else {
+            throw JournalError.database("Operazioni non ancora arrestate; backup non autorizzato")
+        }
+        return try storageGuard.createUpdateSnapshot()
+    }
+
+    func clearManualUpdateIntent() { manualUpdateURL = nil }
+
     func requestShutdown(_ completion: @escaping @MainActor () -> Void) {
-        guard !shuttingDown else { return }
+        if shuttingDown {
+            // A refused update termination leaves workers stopped; allow
+            // a later ordinary quit without permitting a second snapshot.
+            if shutdownWorkersDrained && !folderConfigurationBusy && shutdownCompletion == nil {
+                completion()
+            }
+            return
+        }
         shuttingDown = true
         updates.stop()
         shutdownCompletion = completion

@@ -1584,7 +1584,7 @@ struct SoftwareUpdatesPanel: View {
                     }
                 }
             }
-            Label("Installazione manuale; firma degli aggiornamenti non ancora configurata.", systemImage: "shield")
+            Label("Backup preventivo e installazione manuale.", systemImage: "shield")
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }

@@ -8,7 +8,23 @@ import MacSyncCore
 @MainActor
 final class RuntimeStorageGuard {
     private let lock: ExclusiveArchiveLock
-    private init(lock: ExclusiveArchiveLock) { self.lock = lock }
+    private let folder: URL
+    private init(lock: ExclusiveArchiveLock, folder: URL) {
+        self.lock = lock
+        self.folder = folder
+    }
+
+    /// Only called by the drained runtime while this guard owns the lock.
+    func createUpdateSnapshot() throws -> URL {
+        let directory = folder.appendingPathComponent("update-backups", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        return try UpdateRecoverySnapshot.create(
+            database: folder.appendingPathComponent("inventory.sqlite"),
+            application: Bundle.main.bundleURL,
+            preferences: UserDefaults.standard.dictionaryRepresentation(),
+            parent: directory)
+    }
 
     static func acquireOrExit() -> RuntimeStorageGuard {
         do {
@@ -66,7 +82,7 @@ final class RuntimeStorageGuard {
                     try ArchiveDatabaseSafety.backup(db,to:day)
                 } else { try ArchiveDatabaseSafety.verify(day,readOnly:true) }
             }
-            return RuntimeStorageGuard(lock:lock)
+            return RuntimeStorageGuard(lock:lock, folder:folder)
         } catch {
             let alert = NSAlert()
             alert.alertStyle = .critical
@@ -83,7 +99,34 @@ final class RuntimeStorageGuard {
 final class MacSyncTerminationDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender:NSApplication) -> NSApplication.TerminateReply {
         guard let runtime = MacSyncRuntime.operationalRuntime else { return .terminateNow }
-        runtime.requestShutdown { sender.reply(toApplicationShouldTerminate:true) }
+        runtime.requestShutdown {
+            guard let url = runtime.manualUpdateURL else {
+                sender.reply(toApplicationShouldTerminate: true)
+                return
+            }
+            // Revoke the one-shot intent even on failure. An ordinary
+            // subsequent quit may proceed, but no installation is launched.
+            runtime.clearManualUpdateIntent()
+            do {
+                let snapshot = try runtime.prepareUpdateSnapshotAfterShutdown()
+                let alert = NSAlert()
+                alert.messageText = "Backup preventivo completato"
+                alert.informativeText = "Database verificato, preferenze e applicazione precedente conservati in:\n" + snapshot.path + "\n\nMacSync verrà chiuso. La release si aprirà nel browser; l’installazione resta manuale."
+                alert.addButton(withTitle: "Apri release e chiudi")
+                alert.runModal()
+                NSWorkspace.shared.open(url)
+                sender.reply(toApplicationShouldTerminate: true)
+            } catch {
+                let alert = NSAlert()
+                alert.alertStyle = .critical
+                alert.messageText = "Aggiornamento bloccato"
+                alert.informativeText = "Backup non completato: " + error.localizedDescription +
+                    "\n\nNessun pacchetto è stato aperto o installato. Le operazioni restano ferme. Esci dalla barra dei menu e riapri MacSync per riprendere il lavoro."
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+                sender.reply(toApplicationShouldTerminate: false)
+            }
+        }
         return .terminateLater
     }
 }

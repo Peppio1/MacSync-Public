@@ -14,6 +14,7 @@ final class SoftwareUpdateController: ObservableObject {
     private var task: Task<Void, Never>?
     private var stopped = false
     private var showingAlert = false
+    var onPrepareManualUpdate: ((URL) -> Void)?
     @Published private(set) var automatic: Bool
     @Published private(set) var lastCheck: Date?
     @Published private(set) var checking = false
@@ -122,13 +123,13 @@ final class SoftwareUpdateController: ObservableObject {
         alert.messageText = "È disponibile un aggiornamento"
         let notes = String((release.body ?? "").prefix(2500))
         alert.informativeText = "MacSync \(release.tagName)\n\n" + notes +
-            "\n\nIl download e l'installazione sono manuali. Chiudi MacSync in modo controllato e conserva un backup verificato prima di sostituire l'applicazione."
-        alert.addButton(withTitle: "Apri release")
+            "\n\nMacSync fermerà le operazioni, verificherà il backup e si chiuderà prima di aprire la release. Il download e l’installazione restano manuali."
+        alert.addButton(withTitle: "Prepara aggiornamento")
         alert.addButton(withTitle: "Più tardi")
         alert.addButton(withTitle: "Salta versione")
         NSApplication.shared.activate(ignoringOtherApps: true)
         switch alert.runModal() {
-        case .alertFirstButtonReturn: NSWorkspace.shared.open(url)
+        case .alertFirstButtonReturn: onPrepareManualUpdate?(url)
         case .alertThirdButtonReturn: defaults.set(release.tagName, forKey: Self.skipKey)
         default: break
         }
