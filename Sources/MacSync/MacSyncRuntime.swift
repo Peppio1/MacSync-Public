@@ -575,7 +575,7 @@ final class MacSyncRuntime: ObservableObject {
                         let note = UNMutableNotificationContent()
                         note.title = "MacSync — Spegnimento programmato"
                         note.body = "Il ciclo finale è completato. Apri MacSync per annullare lo spegnimento entro 60 secondi."
-                        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier:"MacSync.finalShutdown",content:note,trigger:nil),completionHandler:nil)
+                        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier:"MacSync.finalShutdown",content:note,trigger:nil),withCompletionHandler:nil)
                     }
                 }
             }
