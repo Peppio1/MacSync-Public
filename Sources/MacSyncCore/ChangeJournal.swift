@@ -40,6 +40,7 @@ public final class ChangeJournal {
 
         do {
             try execute("PRAGMA journal_mode=WAL;")
+            try execute("PRAGMA synchronous=FULL;")
             try execute("PRAGMA busy_timeout=5000;")
             try execute("""
                 CREATE TABLE IF NOT EXISTS change_queue (

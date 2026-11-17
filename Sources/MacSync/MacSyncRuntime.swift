@@ -36,6 +36,16 @@ final class MacSyncRuntime: ObservableObject {
     @Published private(set) var automaticStatus = "Copie automatiche disabilitate"
     @Published private(set) var nextAutomaticAttempt: Date?
 
+    @Published private(set) var nextFinalShutdownAt: Date?
+    @Published private(set) var finalShutdownStatus = ""
+    @Published private(set) var finalShutdownDeadline: Date?
+    private var finalShutdownTimer: Timer?
+    private var finalShutdownSlot: Date?
+    private var finalShutdownHolding = false
+    private var finalShutdownChecking = false
+    private var finalShutdownForcedCycle = false
+    private var finalShutdownGeneration = 0
+    var canCancelFinalShutdown: Bool { finalShutdownSlot != nil }
     private var autoTimer: Timer?
     private var auditTimer: Timer?
     @Published private(set) var nextAuditAt: Date?
@@ -81,13 +91,14 @@ final class MacSyncRuntime: ObservableObject {
         // automatic attempt is scheduled according to the chosen frequency.
         scheduleNextAutomaticAttempt()
         scheduleArchiveAudit()
+        rescheduleFinalShutdown()
         updates.onPrepareSignedUpdate = { [weak self] release in
             self?.prepareSignedUpdate(release)
         }
         updates.start()
     }
 
-    deinit { autoTimer?.invalidate(); auditTimer?.invalidate() }
+    deinit { autoTimer?.invalidate(); auditTimer?.invalidate(); finalShutdownTimer?.invalidate() }
 
     // A single read-only probe in flight. No extra SMB enumeration, writes,
     // reconnect attempts or automatic authorization. Stale results discarded.
@@ -142,7 +153,7 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     func scheduleArchiveAudit() {
-        guard !previewOnly, !shuttingDown, !folderConfigurationBusy, !savingSchedule else { return }
+        guard !previewOnly, !shuttingDown, !folderConfigurationBusy, !savingSchedule, !finalShutdownHolding else { return }
         auditRevision += 1
         auditTimer?.invalidate()
         auditTimer = nil
@@ -218,6 +229,7 @@ final class MacSyncRuntime: ObservableObject {
             return
         }
         shuttingDown = true
+        finalShutdownTimer?.invalidate(); finalShutdownTimer = nil
         updates.stop()
         shutdownCompletion = completion
         folderEditCancellation?.cancel()
@@ -238,7 +250,7 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     func startManualSynchronization() {
-        guard !previewOnly, !shuttingDown, !savingSchedule, !folderConfigurationBusy,
+        guard !previewOnly, !shuttingDown, !savingSchedule, !folderConfigurationBusy, !finalShutdownHolding,
               model.monitoring, model.safetyGate.isReady, !copy.active, !copy.maintaining,
               !copy.seedBusy, !copy.seedReady, !copy.interruptionRequested else { return }
         configurationRevision += 1
@@ -248,6 +260,7 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     func stopCopiesForCurrentLaunch() {
+        if finalShutdownSlot != nil { resetFinalShutdown(message:"Spegnimento annullato: copie sospese",resume:false) }
         configurationRevision += 1
         suspendedUntilNextLaunch = true
         autoTimer?.invalidate()
@@ -276,6 +289,7 @@ final class MacSyncRuntime: ObservableObject {
 
     func onAutomaticPreferenceChanged(_ enabled: Bool) {
         guard !shuttingDown, !savingSchedule, !folderConfigurationBusy else { return }
+        if !enabled && finalShutdownSlot != nil { resetFinalShutdown(message:"Spegnimento annullato: automatismo disabilitato",resume:false) }
         configurationRevision += 1
         copy.setAutomaticCopiesEnabled(enabled)
         if copy.automaticCopiesEnabled {
@@ -355,6 +369,7 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     func onFolderConfigurationChanged() {
+        if finalShutdownSlot != nil { resetFinalShutdown(message:"Spegnimento annullato: cartelle modificate",resume:false) }
         configurationRevision += 1
         copy.stop()
         copy.revokeMirrorAuthorization()
@@ -431,11 +446,175 @@ final class MacSyncRuntime: ObservableObject {
         }
     }
 
+    // All power-off requests are ordinary macOS requests; never sudo or force quit.
+    // The timer lives independently of the configuration window.
+    func rescheduleFinalShutdown() {
+        guard !previewOnly, !shuttingDown else { return }
+        resetFinalShutdown(message:"",resume:true)
+        finalShutdownTimer?.invalidate(); finalShutdownTimer = nil
+        guard settings.finalShutdown.enabled else { return }
+        if !copy.automaticCopiesEnabled { finalShutdownStatus = "Richiede la sincronizzazione automatica attiva" }
+        let timer = Timer(timeInterval:5,repeats:true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.tickFinalShutdown() }
+        }
+        RunLoop.main.add(timer,forMode:.common)
+        finalShutdownTimer = timer
+    }
+
+    func cancelFinalShutdownToday() {
+        guard finalShutdownSlot != nil else { return }
+        resetFinalShutdown(message:"Spegnimento annullato per oggi",resume:true)
+    }
+
+    private func resetFinalShutdown(message: String, resume: Bool) {
+        let wasHolding = finalShutdownHolding
+        finalShutdownGeneration += 1
+        finalShutdownSlot = nil; finalShutdownDeadline = nil
+        finalShutdownHolding = false; finalShutdownChecking = false; finalShutdownForcedCycle = false
+        nextFinalShutdownAt = settings.finalShutdown.next(after:Date())
+        finalShutdownStatus = message
+        if resume && wasHolding && !shuttingDown {
+            scheduleNextAutomaticAttempt()
+            scheduleArchiveAudit()
+        }
+    }
+
+    private func tickFinalShutdown() {
+        guard !previewOnly, !shuttingDown, !preparingSignedUpdate, settings.finalShutdown.enabled else { return }
+        let now = Date()
+        if finalShutdownSlot == nil {
+            guard let next = nextFinalShutdownAt, next <= now else { return }
+            // No catch-up request from a previous day after sleep or clock change.
+            guard Calendar.current.isDate(next,inSameDayAs:now),
+                  copy.automaticCopiesEnabled, !suspendedUntilNextLaunch else {
+                resetFinalShutdown(message:"Spegnimento rinviato: automatismo non attivo o fascia trascorsa",resume:true)
+                return
+            }
+            finalShutdownSlot = next; nextFinalShutdownAt = nil
+            finalShutdownStatus = "Attendo la sincronizzazione finale"
+        }
+        guard let slot = finalShutdownSlot else { return }
+        guard Calendar.current.isDate(slot,inSameDayAs:now),
+              copy.automaticCopiesEnabled, !suspendedUntilNextLaunch else {
+            resetFinalShutdown(message:"Spegnimento rinviato",resume:true); return
+        }
+        guard !finalShutdownChecking, !folderConfigurationBusy, !savingSchedule,
+              model.monitoring, model.safetyGate.isReady, !copy.maintaining, !copy.auditBusy,
+              !copy.seedBusy, !copy.seedReady, !copy.interruptionRequested, copy.liveProgress == nil else { return }
+        if finalShutdownHolding {
+            guard let deadline = finalShutdownDeadline, now >= deadline else { return }
+            checkFinalShutdownQueue(slot:slot,finalCheck:true)
+            return
+        }
+        if let cycle = copy.lastRecordedCycle,
+           FinalShutdownPolicy.mayRequestShutdown(slot:slot,cycleStarted:cycle.started,
+               cycleState:cycle.state,errors:copy.lastCycleStats.failed,
+               deferred:copy.lastCycleStats.deferred,queueEmpty:true,monitorReady:true),
+           copy.historyWarning.isEmpty {
+            checkFinalShutdownQueue(slot:slot,finalCheck:false)
+        } else if !finalShutdownForcedCycle {
+            // Reuse the already authorized automatic path. Wait for a running
+            // cycle; drain an idle session before arming the final one.
+            finalShutdownForcedCycle = true; finalShutdownChecking = true
+            let generation = finalShutdownGeneration
+            configurationRevision += 1
+            autoTimer?.invalidate(); autoTimer = nil; nextAutomaticAttempt = nil
+            copy.stop()
+            copy.afterWorkerStopped { [weak self] in
+                guard let self, self.finalShutdownGeneration == generation, !self.shuttingDown else { return }
+                self.finalShutdownChecking = false
+                self.activateAutomaticSession(at:Date())
+            }
+        } else {
+            finalShutdownStatus = "Attendo un ciclo completato senza errori"
+        }
+    }
+
+    private func checkFinalShutdownQueue(slot: Date, finalCheck: Bool) {
+        guard !finalShutdownChecking, let db = try? copy.historyPath() else { return }
+        finalShutdownChecking = true
+        let generation = finalShutdownGeneration
+        // Local database check only. No extra SMB enumeration or transfer.
+        DispatchQueue.global(qos:.utility).async { [weak self] in
+            let empty = (try? ChangeJournal(path:db).pending(limit:1).isEmpty) == true
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.finalShutdownGeneration == generation, !self.shuttingDown else { return }
+                self.finalShutdownChecking = false
+                guard self.finalShutdownSlot == slot, self.copy.automaticCopiesEnabled,
+                      !self.suspendedUntilNextLaunch, !self.folderConfigurationBusy, !self.savingSchedule,
+                      self.model.monitoring, self.model.safetyGate.isReady, !self.copy.maintaining,
+                      !self.copy.interruptionRequested, self.copy.liveProgress == nil,
+                      let cycle = self.copy.lastRecordedCycle,
+                      self.copy.historyWarning.isEmpty,
+                      FinalShutdownPolicy.mayRequestShutdown(slot:slot,cycleStarted:cycle.started,
+                          cycleState:cycle.state,errors:self.copy.lastCycleStats.failed,
+                          deferred:self.copy.lastCycleStats.deferred,queueEmpty:empty,monitorReady:true) else {
+                    if self.finalShutdownHolding {
+                        self.finalShutdownHolding = false; self.finalShutdownDeadline = nil
+                        self.finalShutdownForcedCycle = false
+                        self.scheduleNextAutomaticAttempt(); self.scheduleArchiveAudit()
+                    }
+                    self.finalShutdownStatus = "Spegnimento sospeso: coda o inventario non pronti"
+                    return
+                }
+                if finalCheck {
+                    self.sendFinalShutdownRequest()
+                } else {
+                    self.finalShutdownHolding = true; self.finalShutdownChecking = true
+                    self.configurationRevision += 1
+                    self.autoTimer?.invalidate(); self.autoTimer = nil; self.nextAutomaticAttempt = nil
+                    self.auditRevision += 1
+                    self.auditTimer?.invalidate(); self.auditTimer = nil; self.nextAuditAt = nil
+                    self.copy.stop()
+                    self.copy.afterWorkerStopped { [weak self] in
+                        guard let self, self.finalShutdownGeneration == generation, !self.shuttingDown else { return }
+                        self.finalShutdownChecking = false
+                        self.finalShutdownDeadline = Date().addingTimeInterval(60)
+                        self.finalShutdownStatus = "Spegnimento tra 60 secondi: annullabile in Panoramica, Pianificazione e menu"
+                        let note = UNMutableNotificationContent()
+                        note.title = "MacSync — Spegnimento programmato"
+                        note.body = "Il ciclo finale è completato. Apri MacSync per annullare lo spegnimento entro 60 secondi."
+                        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier:"MacSync.finalShutdown",content:note,trigger:nil))
+                    }
+                }
+            }
+        }
+    }
+
+    private func sendFinalShutdownRequest() {
+        // The last queue check and cooldown have completed. osascript asks
+        // System Events to shut down normally, respecting other applications.
+        // macOS may request Automation permission or reject the request.
+        finalShutdownChecking = true
+        finalShutdownDeadline = nil
+        finalShutdownStatus = "Richiesta di spegnimento inviata a macOS"
+        let generation = finalShutdownGeneration
+        DispatchQueue.global(qos:.utility).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath:"/usr/bin/osascript")
+            process.arguments = ["-e","with timeout of 20 seconds","-e","tell application \"System Events\" to shut down","-e","end timeout"]
+            let errorPipe = Pipe(); process.standardError = errorPipe
+            let message: String
+            do {
+                try process.run()
+                process.waitUntilExit()
+                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                let detail = String(data:errorData,encoding:.utf8) ?? ""
+                message = process.terminationStatus == 0 ? "Richiesta di spegnimento accettata da macOS" :
+                    "Spegnimento non riuscito: " + String(detail.prefix(300))
+            } catch { message = "Spegnimento non riuscito: " + error.localizedDescription }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.finalShutdownGeneration == generation, !self.shuttingDown else { return }
+                self.resetFinalShutdown(message:message,resume:true)
+            }
+        }
+    }
+
     private func scheduleNextAutomaticAttempt(afterSlot: Date? = nil) {
         autoTimer?.invalidate()
         autoTimer = nil
         nextAutomaticAttempt = nil
-        guard !shuttingDown, !savingSchedule, !folderConfigurationBusy, !suspendedUntilNextLaunch,
+        guard !shuttingDown, !savingSchedule, !folderConfigurationBusy, !suspendedUntilNextLaunch, !finalShutdownHolding,
               copy.automaticCopiesEnabled,
               !copy.active, !copy.interruptionRequested, copy.liveProgress == nil else { return }
         let schedule = settings.schedule
@@ -463,7 +642,7 @@ final class MacSyncRuntime: ObservableObject {
     /// probes SMB. Once armed, the copy worker owns all subsequent slots,
     /// including offline checks, retries and notifications.
     private func activateAutomaticSession(at slot: Date) {
-        guard !shuttingDown, !savingSchedule, !folderConfigurationBusy, !suspendedUntilNextLaunch,
+        guard !shuttingDown, !savingSchedule, !folderConfigurationBusy, !suspendedUntilNextLaunch, !finalShutdownHolding,
               copy.automaticCopiesEnabled, !copy.active else { return }
         guard model.monitoring, model.safetyGate.isReady, !copy.maintaining, !copy.seedBusy, !copy.seedReady else {
             automaticStatus = "Attendo il monitoraggio delle sorgenti"

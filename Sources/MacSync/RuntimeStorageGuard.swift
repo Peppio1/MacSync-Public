@@ -115,13 +115,28 @@ final class RuntimeStorageGuard {
 
 @MainActor
 final class MacSyncTerminationDelegate: NSObject, NSApplicationDelegate {
+    private var awaitingReply = false
+
+    private func finish(_ sender: NSApplication) {
+        guard awaitingReply else { return }
+        awaitingReply = false
+        sender.reply(toApplicationShouldTerminate:true)
+    }
+
     func applicationShouldTerminate(_ sender:NSApplication) -> NSApplication.TerminateReply {
         guard let runtime = MacSyncRuntime.operationalRuntime else { return .terminateNow }
+        // Never bypass the signed updater's independent drain and snapshot.
         if runtime.preparingSignedUpdate { return .terminateCancel }
+        if awaitingReply { return .terminateLater }
         if runtime.readyForTermination { return .terminateNow }
-        runtime.requestShutdown {
-            DispatchQueue.main.async { sender.reply(toApplicationShouldTerminate: true) }
+        awaitingReply = true
+        runtime.requestShutdown { [weak self] in
+            DispatchQueue.main.async { self?.finish(sender) }
         }
+        // An SMB syscall may block indefinitely. SQLite WAL/transactions and
+        // staged atomic publishing are also the crash-recovery boundary; a
+        // normal OS quit must not be vetoed while waiting for network I/O.
+        DispatchQueue.main.asyncAfter(deadline:.now()+15) { [weak self] in self?.finish(sender) }
         return .terminateLater
     }
 }

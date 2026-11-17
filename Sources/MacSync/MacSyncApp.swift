@@ -632,6 +632,7 @@ struct MacSyncConfigurationView: View {
                     Spacer()
                     if let next = copy.nextScheduledRun ?? runtime.nextAutomaticAttempt { Text("Prossimo: " + macSyncDateTime(next)).font(.caption).foregroundStyle(Color.accentColor) }
                 }
+                finalShutdownNotice
                 if copy.interruptionRequested { Text("Interruzione richiesta: attendo il punto sicuro. La coda viene conservata.").font(.caption) }
                 if !model.message.isEmpty { Text(model.message).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(model.message) }
                 if let audit = copy.auditProgress {
@@ -939,6 +940,38 @@ struct MacSyncConfigurationView: View {
                 else if editedSchedule != settings.schedule { Text("Modifiche non salvate").font(.caption).foregroundStyle(.orange) }
                 Text("Frequenza attuale: " + settings.schedule.summary).font(.caption).foregroundStyle(.secondary)
             }
+            MacSyncPanel("Spegnimento automatico",icon:"power") {
+                MacSyncSwitchRow("Spegni il Mac dopo la sincronizzazione finale",isOn:$settings.finalShutdown.enabled)
+                if settings.finalShutdown.enabled {
+                    HStack {
+                        Picker("Ora",selection:$settings.finalShutdown.hour) {
+                            ForEach(0...23,id:\.self) { Text(String(format:"%02d",$0)).tag($0) }
+                        }.frame(width:160)
+                        Picker("Minuti",selection:$settings.finalShutdown.minute) {
+                            ForEach(0...59,id:\.self) { Text(String(format:"%02d",$0)).tag($0) }
+                        }.frame(width:160)
+                    }
+                    HStack {
+                        Text("Giorni")
+                        ForEach([2,3,4,5,6,7,1],id:\.self) { day in
+                            Button {
+                                if settings.finalShutdown.weekdays.contains(day) {
+                                    if settings.finalShutdown.weekdays.count > 1 { settings.finalShutdown.weekdays.remove(day) }
+                                } else { settings.finalShutdown.weekdays.insert(day) }
+                            } label: {
+                                Text(String(macSyncWeekdayName(day).prefix(3))).font(.caption)
+                                    .padding(5).background(settings.finalShutdown.weekdays.contains(day) ? Color.accentColor.opacity(0.20) : Color.secondary.opacity(0.08),in:RoundedRectangle(cornerRadius:5))
+                            }.buttonStyle(.plain)
+                            .accessibilityAddTraits(settings.finalShutdown.weekdays.contains(day) ? .isSelected : [])
+                        }
+                    }
+                    if let next = runtime.nextFinalShutdownAt {
+                        Text("Prossimo: " + macSyncDateTime(next)).font(.caption)
+                    }
+                    Text("Richiede la sincronizzazione automatica attiva, un ciclo riuscito e coda vuota. macOS può richiedere il permesso Automazione. Nessuna chiusura forzata.").font(.caption).foregroundStyle(.secondary)
+                    finalShutdownNotice
+                }
+            }
             MacSyncPanel("Destinazione offline",icon:"wifi.slash") {
                 MacSyncSwitchRow("Notifiche disconnessione",isOn:Binding(get:{settings.alertPolicy.enabled},set:{runtime.onAlertPolicyChanged($0)}))
                 if settings.alertPolicy.enabled {
@@ -951,6 +984,19 @@ struct MacSyncConfigurationView: View {
             if frequency == .minutes && !(1...59).contains(Int(intervalText) ?? 0) {intervalText = "5"}
             if frequency == .hours && !(1...23).contains(Int(intervalText) ?? 0) {intervalText = "1"}
         }.onChange(of:settings.schedule) { plan in draftSchedule = plan; intervalText = String(plan.interval) }
+        .onChange(of:settings.finalShutdown) { _ in runtime.rescheduleFinalShutdown() }
+    }
+
+    @ViewBuilder private var finalShutdownNotice: some View {
+        if !runtime.finalShutdownStatus.isEmpty {
+            HStack {
+                Text(runtime.finalShutdownStatus).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if runtime.canCancelFinalShutdown {
+                    Button("Annulla spegnimento") { runtime.cancelFinalShutdownToday() }
+                }
+            }
+        }
     }
 
     private var auditPage: some View {
@@ -1577,6 +1623,10 @@ private struct MacSyncStatusMenu: View {
             Text(runtime.automaticStatus)
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if runtime.canCancelFinalShutdown {
+                Text(runtime.finalShutdownStatus).font(.caption)
+                Button("Annulla spegnimento") { runtime.cancelFinalShutdownToday() }
+            }
             if copy.active { Button("Sospendi copie programmate") { runtime.stopCopiesForCurrentLaunch() }.buttonStyle(MacSyncStopStyle()) }
             Button("Apri configurazione…") {
                 openWindow(id: "configuration")

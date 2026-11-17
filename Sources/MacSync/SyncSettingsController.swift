@@ -30,6 +30,14 @@ final class SyncSettingsController: ObservableObject {
             }
         }
     }
+    @Published var finalShutdown = FinalShutdownPolicy() {
+        didSet {
+            if !finalShutdown.isValid { finalShutdown = oldValue; return }
+            if !previewOnly, let data = try? JSONEncoder().encode(finalShutdown) {
+                UserDefaults.standard.set(data,forKey:"MacSync.finalShutdown.v1")
+            }
+        }
+    }
     @Published var notificationPermissionStatus = "Notifiche non configurate"
 
     init(previewOnly: Bool = false) {
@@ -43,6 +51,10 @@ final class SyncSettingsController: ObservableObject {
             return
         }
         let defaults = UserDefaults.standard
+        if let data = defaults.data(forKey:"MacSync.finalShutdown.v1"),
+           let value = try? JSONDecoder().decode(FinalShutdownPolicy.self,from:data), value.isValid {
+            finalShutdown = value
+        }
         let savedSchedule = defaults.data(forKey: "MacSync.schedule")
             .flatMap { try? JSONDecoder().decode(SyncSchedule.self, from: $0) }
         schedule = savedSchedule?.isValid == true ? savedSchedule! : .standard

@@ -23,5 +23,6 @@
   <key>SUAutomaticallyUpdate</key><false/>
   <key>SUEnableSystemProfiling</key><false/>
   <key>SUEnableJavaScript</key><false/>
+  <key>NSAppleEventsUsageDescription</key><string>MacSync richiede lo spegnimento ordinario del Mac soltanto se hai abilitato la pianificazione finale.</string>
 </dict>
 </plist>
