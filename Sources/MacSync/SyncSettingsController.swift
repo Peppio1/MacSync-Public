@@ -51,16 +51,16 @@ final class SyncSettingsController: ObservableObject {
             return
         }
         let defaults = UserDefaults.standard
-        if let data = defaults.data(forKey:"MacSync.finalShutdown.v1"),
-           let value = try? JSONDecoder().decode(FinalShutdownPolicy.self,from:data), value.isValid {
-            finalShutdown = value
-        }
         let savedSchedule = defaults.data(forKey: "MacSync.schedule")
             .flatMap { try? JSONDecoder().decode(SyncSchedule.self, from: $0) }
         schedule = savedSchedule?.isValid == true ? savedSchedule! : .standard
         let savedPolicy = defaults.data(forKey: "MacSync.connectionAlertPolicy")
             .flatMap { try? JSONDecoder().decode(ConnectionAlertPolicy.self, from: $0) }
         alertPolicy = savedPolicy?.isValid == true ? savedPolicy! : ConnectionAlertPolicy()
+        if let data = defaults.data(forKey:"MacSync.finalShutdown.v1"),
+           let value = try? JSONDecoder().decode(FinalShutdownPolicy.self,from:data), value.isValid {
+            finalShutdown = value
+        }
         refreshNotificationPermission()
     }
 

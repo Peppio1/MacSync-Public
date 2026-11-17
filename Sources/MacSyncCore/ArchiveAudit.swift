@@ -94,7 +94,11 @@ public struct ArchiveAuditProgress: Equatable, Sendable {
     }
     public func remaining(at now: Date) -> Double? {
         guard let start = comparisonStarted, phase != "Finalizzazione" else { return nil }
-        return OperationEstimate.remaining(processed:compared,total:total,elapsed:now.timeIntervalSince(start))
+        let elapsed = now.timeIntervalSince(start)
+        // Delay extrapolation on heterogeneous archives until a meaningful
+        // sample exists; the scan time is never charged to the compare phase.
+        guard elapsed >= 8, compared >= min(500,max(10,total/100)) else { return nil }
+        return OperationEstimate.remaining(processed:compared,total:total,elapsed:elapsed)
     }
     public let started: Date
     public var phase = "Analisi sorgente e destinazione"

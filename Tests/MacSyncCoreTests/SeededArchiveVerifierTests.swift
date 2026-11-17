@@ -231,6 +231,23 @@ final class SeededArchiveVerifierTests: XCTestCase {
         XCTAssertTrue(try f.journal.pending().contains { $0.relativePath == "c.jpg" })
     }
 
+    func testQuickRecognitionLeavesChangedFingerprintPending() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let date = Date(timeIntervalSinceNow:-600)
+        let src = f.source.appendingPathComponent("a.jpg")
+        let dst = f.target.appendingPathComponent("a.jpg")
+        try write("same",to:src,date:date)
+        try write("same",to:dst,date:date)
+        try initializeInventory(f)
+        let session = try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let result = try session.auditAndRecognize(mode:.quick)
+        XCTAssertEqual(result.recognition.verifiedCount,1)
+        try write("changed",to:dst)
+        XCTAssertEqual(try session.approve(report:result.recognition),0)
+        XCTAssertEqual(try f.journal.pending().count,1)
+    }
+
     func testMetadataRecognitionRechecksCommitGate() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }

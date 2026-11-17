@@ -277,6 +277,16 @@ final class ArchiveAuditAndHistoryTests:XCTestCase {
         XCTAssertEqual(try reopened.cycles(finishedOnly:true).first?.state,"interrupted")
     }
 
+    func testArchiveEstimateWaitsForRepresentativeSample() {
+        let start = Date()
+        var p = ArchiveAuditProgress(started:start.addingTimeInterval(-3600))
+        p.phase = "Verifica SHA-256"; p.comparisonStarted = start
+        p.total = 250_000; p.compared = 134
+        XCTAssertNil(p.remaining(at:start.addingTimeInterval(60)))
+        p.compared = 500
+        XCTAssertEqual(p.remaining(at:start.addingTimeInterval(60)),29_940)
+    }
+
     func testV0180EstimateHealthAndDiagnostic() throws {
         XCTAssertNil(OperationEstimate.remaining(processed:0,total:20,elapsed:10))
         XCTAssertNil(OperationEstimate.remaining(processed:3,total:0,elapsed:10))

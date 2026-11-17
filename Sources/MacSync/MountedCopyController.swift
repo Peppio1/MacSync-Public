@@ -206,7 +206,7 @@ final class MountedCopyController: ObservableObject {
                 ? "La verifica SHA-256 legge integralmente i file confrontabili, anche via VPN. "
                 : settings.mode == .intelligent ? "Metadati e SHA-256 per file di uguale dimensione con date differenti. "
                 : "La verifica rapida confronta percorso, dimensione e data; non garantisce identità del contenuto. ")
-                + (settings.repair ? "Le differenze sicure verranno accodate come copie/aggiornamenti." : "Modalità solo diagnostica.")
+                + (settings.repair ? "Le differenze sicure verranno accodate come copie/aggiornamenti." : recognize ? "Nessuna riparazione verrà accodata." : "Modalità solo diagnostica.")
                 + (recognize ? " I file corrispondenti saranno riconosciuti automaticamente nella coda, senza scrivere sulle destinazioni." : "")
                 + " Nessun file presente soltanto sul server verrà cancellato."
             alert.addButton(withTitle:"Avvia verifica"); alert.addButton(withTitle:"Annulla")
@@ -257,8 +257,18 @@ final class MountedCopyController: ObservableObject {
                     let local = try SeededArchiveSession(database:db,mappings:maps)
                     let result = try local.auditAndRecognize(mode:settings.mode,repair:settings.repair,cancellation:cancel,diagnostic:diagnostic,progress:progress)
                     report = result.audit; recognition = result.recognition
-                    DispatchQueue.main.async { [weak self] in self?.auditStatus = "Riconoscimento automatico: ricontrollo e registrazione" }
-                    acknowledged = try local.approve(report:result.recognition,cancellation:cancel)
+                    var recognitionProgress = last
+                    recognitionProgress.phase = "Riconoscimento automatico"
+                    recognitionProgress.comparisonStarted = Date()
+                    recognitionProgress.total = result.recognition.matches.count
+                    recognitionProgress.compared = 0
+                    recognitionProgress.currentPath = ""
+                    diagnostic(recognitionProgress); progress(recognitionProgress)
+                    acknowledged = try local.approve(report:result.recognition,cancellation:cancel,progress:{ processed,total in
+                        recognitionProgress.compared = processed
+                        recognitionProgress.total = total
+                        diagnostic(recognitionProgress); progress(recognitionProgress)
+                    })
                     try? auditLog?.record(level:.info,rootID:"app",action:"seed_recognized",message:settings.mode.label + ": " + String(acknowledged) + " file riconosciuti automaticamente; nessuna scrittura sul server")
                 } else {
                     report = try ArchiveAudit(journal:journal,mappings:maps).run(mode:settings.mode,repair:settings.repair,cancellation:cancel,diagnostic:diagnostic,progress:progress)

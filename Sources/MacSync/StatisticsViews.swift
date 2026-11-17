@@ -731,7 +731,7 @@ struct CompactArchiveAuditProgress: View {
                 }
                 if determinate {
                     MacSyncLinearProgress(value:fraction)
-                    Text("\(progress.compared) / \(progress.total) elementi confrontati").font(.caption)
+                    Text("\(progress.compared) / \(progress.total) " + (progress.phase == "Riconoscimento automatico" ? "candidati ricontrollati" : "elementi confrontati")).font(.caption)
                 } else { ProgressView().controlSize(.small) }
                 HStack {
                     metric("Trascorso",elapsedText(elapsed))

@@ -45,7 +45,8 @@ final class MacSyncRuntime: ObservableObject {
     private var finalShutdownChecking = false
     private var finalShutdownForcedCycle = false
     private var finalShutdownGeneration = 0
-    var canCancelFinalShutdown: Bool { finalShutdownSlot != nil }
+    private var finalShutdownRequestSent = false
+    var canCancelFinalShutdown: Bool { finalShutdownSlot != nil && !finalShutdownRequestSent }
     private var autoTimer: Timer?
     private var auditTimer: Timer?
     @Published private(set) var nextAuditAt: Date?
@@ -462,15 +463,15 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     func cancelFinalShutdownToday() {
-        guard finalShutdownSlot != nil else { return }
+        guard canCancelFinalShutdown else { return }
         resetFinalShutdown(message:"Spegnimento annullato per oggi",resume:true)
     }
 
     private func resetFinalShutdown(message: String, resume: Bool) {
-        let wasHolding = finalShutdownHolding
+        let wasHolding = finalShutdownHolding || (finalShutdownForcedCycle && finalShutdownChecking)
         finalShutdownGeneration += 1
         finalShutdownSlot = nil; finalShutdownDeadline = nil
-        finalShutdownHolding = false; finalShutdownChecking = false; finalShutdownForcedCycle = false
+        finalShutdownHolding = false; finalShutdownChecking = false; finalShutdownForcedCycle = false; finalShutdownRequestSent = false
         nextFinalShutdownAt = settings.finalShutdown.next(after:Date())
         finalShutdownStatus = message
         if resume && wasHolding && !shuttingDown {
@@ -574,7 +575,7 @@ final class MacSyncRuntime: ObservableObject {
                         let note = UNMutableNotificationContent()
                         note.title = "MacSync — Spegnimento programmato"
                         note.body = "Il ciclo finale è completato. Apri MacSync per annullare lo spegnimento entro 60 secondi."
-                        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier:"MacSync.finalShutdown",content:note,trigger:nil))
+                        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier:"MacSync.finalShutdown",content:note,trigger:nil),completionHandler:nil)
                     }
                 }
             }
@@ -586,8 +587,9 @@ final class MacSyncRuntime: ObservableObject {
         // System Events to shut down normally, respecting other applications.
         // macOS may request Automation permission or reject the request.
         finalShutdownChecking = true
+        finalShutdownRequestSent = true
         finalShutdownDeadline = nil
-        finalShutdownStatus = "Richiesta di spegnimento inviata a macOS"
+        finalShutdownStatus = "Invio richiesta di spegnimento a macOS"
         let generation = finalShutdownGeneration
         DispatchQueue.global(qos:.utility).async { [weak self] in
             let process = Process()
@@ -597,8 +599,8 @@ final class MacSyncRuntime: ObservableObject {
             let message: String
             do {
                 try process.run()
-                process.waitUntilExit()
                 let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
                 let detail = String(data:errorData,encoding:.utf8) ?? ""
                 message = process.terminationStatus == 0 ? "Richiesta di spegnimento accettata da macOS" :
                     "Spegnimento non riuscito: " + String(detail.prefix(300))

@@ -425,10 +425,11 @@ public struct SeededArchiveSession: Sendable {
 
     public func approve(
         report: SeedVerificationReport,
-        cancellation: SeedVerificationCancellation = SeedVerificationCancellation()
+        cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
+        progress: ((Int, Int) -> Void)? = nil
     ) throws -> Int {
         let journal = try openJournal()
         let verifier = try SeededArchiveVerifier(journal: journal, mappings: mappings)
-        return try verifier.approve(report: report, cancellation: cancellation)
+        return try verifier.approve(report: report, cancellation: cancellation, progress:progress)
     }
 }
