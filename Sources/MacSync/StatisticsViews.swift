@@ -714,7 +714,7 @@ struct ArchiveAuditPanel: View {
 }
 
 /// Compact audit-only presentation. Inventory progress keeps its existing view.
-private struct CompactArchiveAuditProgress: View {
+struct CompactArchiveAuditProgress: View {
     let progress: ArchiveAuditProgress
     @Environment(\.macSyncLayout) private var layout
     private var determinate: Bool { progress.comparisonStarted != nil && progress.total > 0 }
