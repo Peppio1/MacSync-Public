@@ -14,7 +14,7 @@ final class SoftwareUpdateController: ObservableObject {
     private var task: Task<Void, Never>?
     private var stopped = false
     private var showingAlert = false
-    var onPrepareManualUpdate: ((URL) -> Void)?
+    var onPrepareSignedUpdate: ((StableUpdateRelease) -> Void)?
     @Published private(set) var automatic: Bool
     @Published private(set) var lastCheck: Date?
     @Published private(set) var checking = false
@@ -115,21 +115,19 @@ final class SoftwareUpdateController: ObservableObject {
     }
 
     private func present(_ release: StableUpdateRelease) {
-        guard !previewOnly, !stopped, !showingAlert, let url = release.pageURL else { return }
+        guard !previewOnly, !stopped, !showingAlert, release.pageURL != nil else { return }
         showingAlert = true
         defer { showingAlert = false }
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "È disponibile un aggiornamento"
-        let notes = String((release.body ?? "").prefix(2500))
-        alert.informativeText = "MacSync \(release.tagName)\n\n" + notes +
-            "\n\nMacSync fermerà le operazioni, verificherà il backup e si chiuderà prima di aprire la release. Il download e l’installazione restano manuali."
+        alert.informativeText = "GitHub segnala MacSync \(release.tagName).\n\nMacSync fermerà le operazioni e creerà un backup verificato. Solo dopo verrà aperta la finestra di Sparkle per verificare la firma e confermare l’installazione. Le novità saranno mostrate dal feed firmato. Se annulli, chiudi e riapri MacSync."
         alert.addButton(withTitle: "Prepara aggiornamento")
         alert.addButton(withTitle: "Più tardi")
         alert.addButton(withTitle: "Salta versione")
         NSApplication.shared.activate(ignoringOtherApps: true)
         switch alert.runModal() {
-        case .alertFirstButtonReturn: onPrepareManualUpdate?(url)
+        case .alertFirstButtonReturn: onPrepareSignedUpdate?(release)
         case .alertThirdButtonReturn: defaults.set(release.tagName, forKey: Self.skipKey)
         default: break
         }

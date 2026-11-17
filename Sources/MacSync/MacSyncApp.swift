@@ -1584,7 +1584,7 @@ struct SoftwareUpdatesPanel: View {
                     }
                 }
             }
-            Label("Backup preventivo e installazione manuale.", systemImage: "shield")
+            Label("Installazione con conferma e backup preventivo.", systemImage: "shield")
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }

@@ -14,7 +14,9 @@ final class MacSyncRuntime: ObservableObject {
     @Published private(set) var shuttingDown = false
     private var shutdownCompletion: (@MainActor () -> Void)?
     private var shutdownWorkersDrained = false
-    private(set) var manualUpdateURL: URL?
+    private(set) var preparingSignedUpdate = false
+    private var signedUpdateSession: SignedUpdateSession?
+    var readyForTermination: Bool { shuttingDown && shutdownWorkersDrained && !folderConfigurationBusy && !savingSchedule && shutdownCompletion == nil }
     private var folderEditCancellation: SeedVerificationCancellation?
     let previewOnly: Bool
     let model: MacSyncViewModel
@@ -73,8 +75,8 @@ final class MacSyncRuntime: ObservableObject {
         // automatic attempt is scheduled according to the chosen frequency.
         scheduleNextAutomaticAttempt()
         scheduleArchiveAudit()
-        updates.onPrepareManualUpdate = { [weak self] url in
-            self?.prepareManualUpdate(url)
+        updates.onPrepareSignedUpdate = { [weak self] release in
+            self?.prepareSignedUpdate(release)
         }
         updates.start()
     }
@@ -106,23 +108,47 @@ final class MacSyncRuntime: ObservableObject {
         auditTimer = timer
     }
 
-    /// Request an explicit maintenance shutdown; no update code is executed.
-    func prepareManualUpdate(_ url: URL) {
-        guard !previewOnly, !shuttingDown, storageGuard != nil,
-              Bundle.main.bundleURL.pathExtension == "app" else { return }
-        manualUpdateURL = url
-        NSApplication.shared.terminate(nil)
-    }
-
-    func prepareUpdateSnapshotAfterShutdown() throws -> URL {
-        guard shuttingDown, shutdownWorkersDrained, !folderConfigurationBusy,
-              let storageGuard else {
-            throw JournalError.database("Operazioni non ancora arrestate; backup non autorizzato")
+    /// No install-capable Sparkle object exists before this gate succeeds.
+    func prepareSignedUpdate(_ release: StableUpdateRelease) {
+        guard !previewOnly, !shuttingDown, let storageGuard,
+              let installed = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              release.isNewer(than: installed), release.tagName.hasPrefix("v"),
+              SignedUpdatePolicy.assetURL(version: String(release.tagName.dropFirst())) != nil,
+              Bundle.main.bundleURL.pathExtension == "app",
+              !Bundle.main.bundleURL.path.contains("/AppTranslocation/"),
+              Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String == SignedUpdatePolicy.publicKey,
+              Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String == SignedUpdatePolicy.feedURL else {
+            let alert = NSAlert()
+            alert.messageText = "Aggiornamento non autorizzato"
+            alert.informativeText = "Installa MacSync nella cartella Applicazioni e verifica la configurazione dell’aggiornamento."
+            alert.runModal()
+            return
         }
-        return try storageGuard.createUpdateSnapshot()
+        let requested = String(release.tagName.dropFirst())
+        preparingSignedUpdate = true
+        requestShutdown { [weak self] in
+            guard let self else { return }
+            defer { self.preparingSignedUpdate = false }
+            do {
+                let snapshot = try storageGuard.createUpdateSnapshot()
+                try storageGuard.beginSignedUpdate(previous: installed, requested: requested, snapshot: snapshot)
+                self.automaticStatus = "Backup completato; sincronizzazione sospesa fino al riavvio"
+                let session = SignedUpdateSession(installed: installed, requested: requested)
+                self.signedUpdateSession = session
+                // Defer until the current shutdown completion and modal UI
+                // have returned. Sparkle cannot install before this point.
+                DispatchQueue.main.async { session.start() }
+            } catch {
+                self.automaticStatus = "Aggiornamento bloccato; riavvia MacSync"
+                let alert = NSAlert()
+                alert.alertStyle = .critical
+                alert.messageText = "Aggiornamento bloccato"
+                alert.informativeText = error.localizedDescription +
+                    "\n\nNessun installatore avviato. Esci e riapri MacSync."
+                alert.runModal()
+            }
+        }
     }
-
-    func clearManualUpdateIntent() { manualUpdateURL = nil }
 
     func requestShutdown(_ completion: @escaping @MainActor () -> Void) {
         if shuttingDown {
@@ -149,7 +175,7 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     private func finishShutdownIfReady() {
-        guard shuttingDown, shutdownWorkersDrained, !folderConfigurationBusy else { return }
+        guard shuttingDown, shutdownWorkersDrained, !folderConfigurationBusy, !savingSchedule else { return }
         let complete = shutdownCompletion; shutdownCompletion = nil; complete?()
     }
 
@@ -214,7 +240,7 @@ final class MacSyncRuntime: ObservableObject {
         let revision = configurationRevision
         copy.afterWorkerStopped { [weak self] in
             guard let self else { return }
-            guard self.configurationRevision == revision else { self.savingSchedule = false; return }
+            guard self.configurationRevision == revision else { self.savingSchedule = false; self.finishShutdownIfReady(); return }
             self.settings.schedule = schedule
             self.suspendedUntilNextLaunch = !resume
             self.savingSchedule = false

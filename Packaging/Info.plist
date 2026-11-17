@@ -12,5 +12,15 @@
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
+  <key>SUPublicEDKey</key><string>SDsuoQo3jF5WNHSC1yo6B92Nanc9bBdjHJ8O474h9LU=</string>
+  <key>SUFeedURL</key><string>https://github.com/Peppio1/MacSync-Public/releases/latest/download/appcast.xml</string>
+  <key>SUVerifyUpdateBeforeExtraction</key><true/>
+  <key>SURequireSignedFeed</key><true/>
+  <key>SUSignedFeedFailureExpirationInterval</key><integer>0</integer>
+  <key>SUEnableAutomaticChecks</key><false/>
+  <key>SUAllowsAutomaticUpdates</key><false/>
+  <key>SUAutomaticallyUpdate</key><false/>
+  <key>SUEnableSystemProfiling</key><false/>
+  <key>SUEnableJavaScript</key><false/>
 </dict>
 </plist>

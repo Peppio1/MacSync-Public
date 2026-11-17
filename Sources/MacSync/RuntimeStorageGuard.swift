@@ -26,6 +26,66 @@ final class RuntimeStorageGuard {
             parent: directory)
     }
 
+    private static func disableCopyAuthorizations(_ defaults: UserDefaults) throws {
+        defaults.set(false, forKey: "MacSync.autoCopiesEnabled")
+        defaults.set(false, forKey: "MacSync.autoCopiesEnabled.v2")
+        defaults.removeObject(forKey: "MacSync.mirrorAuthorization.v1")
+        defaults.removeObject(forKey: "MacSync.mirrorEnabled")
+        if let data = defaults.data(forKey: "MacSync.archiveAuditSettings"),
+           var value = try? JSONDecoder().decode(ArchiveAuditSettings.self, from: data) {
+            value.enabled = false
+            value.repair = false
+            defaults.set(try JSONEncoder().encode(value), forKey: "MacSync.archiveAuditSettings")
+        }
+        guard defaults.synchronize() else { throw UpdateTransactionMarker.MarkerError.invalid }
+    }
+
+    private static func verifyBundle(_ url: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        process.arguments = ["--verify", "--deep", "--strict", url.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw JournalError.database("Firma del bundle non verificabile")
+        }
+    }
+
+    func beginSignedUpdate(previous: String, requested: String, snapshot: URL) throws {
+        let backupApp = snapshot.appendingPathComponent("MacSync.app")
+        try Self.verifyBundle(backupApp)
+        let marker = try UpdateTransactionMarker(previousVersion: previous, requestedVersion: requested,
+                                                 snapshotName: snapshot.lastPathComponent)
+        try marker.write(to: folder.appendingPathComponent("update-pending.json"))
+        try Self.disableCopyAuthorizations(.standard)
+    }
+
+    private static func inspectPendingUpdate(folder: URL, database: URL, defaults: UserDefaults) throws {
+        let url = folder.appendingPathComponent("update-pending.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        // Run before creating any operational model, watcher or copy worker.
+        try disableCopyAuthorizations(defaults)
+        let marker = try UpdateTransactionMarker.read(from: url)
+        let snapshot = folder.appendingPathComponent("update-backups", isDirectory: true)
+            .appendingPathComponent(marker.snapshotName, isDirectory: true)
+        try ArchiveDatabaseSafety.verify(snapshot.appendingPathComponent("inventory.sqlite"), readOnly: true)
+        try verifyBundle(snapshot.appendingPathComponent("MacSync.app"))
+        try ArchiveDatabaseSafety.verify(database)
+        try verifyBundle(Bundle.main.bundleURL)
+        let actual = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let alert = NSAlert()
+        alert.messageText = actual == marker.requestedVersion ? "Aggiornamento verificato" : "Aggiornamento non completato"
+        alert.informativeText = "Archivio e copia della versione precedente verificati.\nBackup: " + snapshot.path +
+            "\n\nLe copie automatiche, le cancellazioni e le verifiche pianificate restano disattivate: controlla la configurazione e riabilitale esplicitamente. Non verrà ripristinato automaticamente un database precedente."
+        alert.addButton(withTitle: "Continua")
+        alert.addButton(withTitle: "Esci")
+        if alert.runModal() != .alertFirstButtonReturn { Darwin.exit(0) }
+        // Previous bundle and snapshot remain available for manual recovery.
+        try FileManager.default.removeItem(at: url)
+    }
+
     static func acquireOrExit() -> RuntimeStorageGuard {
         do {
             let folder = try FileManager.default.url(for:.applicationSupportDirectory,
@@ -39,6 +99,7 @@ final class RuntimeStorageGuard {
             let previousIdentity = defaults.string(forKey:"MacSync.databaseFileIdentity.v014")
             guard exists || previousIdentity == nil else { throw JournalError.database("Database operativo mancante: ripristinare una copia verificata") }
             if exists { try ArchiveDatabaseSafety.verify(db) }
+            try inspectPendingUpdate(folder: folder, database: db, defaults: defaults)
             let currentIdentity = exists ? try ArchiveDatabaseSafety.fileIdentity(db) : nil
             let restored = previousIdentity != nil && currentIdentity != previousIdentity
             if !defaults.bool(forKey:"MacSync.safetyMigration.v014") || restored {
@@ -99,33 +160,10 @@ final class RuntimeStorageGuard {
 final class MacSyncTerminationDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender:NSApplication) -> NSApplication.TerminateReply {
         guard let runtime = MacSyncRuntime.operationalRuntime else { return .terminateNow }
+        if runtime.preparingSignedUpdate { return .terminateCancel }
+        if runtime.readyForTermination { return .terminateNow }
         runtime.requestShutdown {
-            guard let url = runtime.manualUpdateURL else {
-                sender.reply(toApplicationShouldTerminate: true)
-                return
-            }
-            // Revoke the one-shot intent even on failure. An ordinary
-            // subsequent quit may proceed, but no installation is launched.
-            runtime.clearManualUpdateIntent()
-            do {
-                let snapshot = try runtime.prepareUpdateSnapshotAfterShutdown()
-                let alert = NSAlert()
-                alert.messageText = "Backup preventivo completato"
-                alert.informativeText = "Database verificato, preferenze e applicazione precedente conservati in:\n" + snapshot.path + "\n\nMacSync verrà chiuso. La release si aprirà nel browser; l’installazione resta manuale."
-                alert.addButton(withTitle: "Apri release e chiudi")
-                alert.runModal()
-                NSWorkspace.shared.open(url)
-                sender.reply(toApplicationShouldTerminate: true)
-            } catch {
-                let alert = NSAlert()
-                alert.alertStyle = .critical
-                alert.messageText = "Aggiornamento bloccato"
-                alert.informativeText = "Backup non completato: " + error.localizedDescription +
-                    "\n\nNessun pacchetto è stato aperto o installato. Le operazioni restano ferme. Esci dalla barra dei menu e riapri MacSync per riprendere il lavoro."
-                alert.addButton(withTitle: "OK")
-                alert.runModal()
-                sender.reply(toApplicationShouldTerminate: false)
-            }
+            DispatchQueue.main.async { sender.reply(toApplicationShouldTerminate: true) }
         }
         return .terminateLater
     }
