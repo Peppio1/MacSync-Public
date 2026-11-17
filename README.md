@@ -10,6 +10,21 @@ MacSync è un'applicazione desktop sviluppata in Swift e SwiftUI per replicare c
 
 > **Stato: v0.14.3 — prototipo in validazione avanzata.** I test su cartelle locali macOS sono superati. Il collaudo su iMac, SMB/VPN reale e applicazione installata è ancora necessario. Non utilizzare con dati di produzione prima del collaudo.
 
+## Download
+
+### MacSync v0.14.3 — versione di prova
+
+[![Scarica MacSync per macOS](https://img.shields.io/badge/Scarica-MacSync%20v0.14.3-2563eb?style=for-the-badge&logo=apple)](https://github.com/Peppio1/MacSync-Public/actions/runs/43983414603/artifacts/14285220835)
+
+| Risorsa | Collegamento |
+|---|---|
+| Applicazione MacSync.app (archivio ZIP) | [Scarica direttamente](https://github.com/Peppio1/MacSync-Public/actions/runs/43983414603/artifacts/14285220835) |
+| Anteprime dell'interfaccia (48 immagini) | [Scarica le anteprime](https://github.com/Peppio1/MacSync-Public/actions/runs/43983414603/artifacts/14285220909) |
+| Compilazione convalidata | [Apri il workflow](https://github.com/Peppio1/MacSync-Public/actions/runs/43983414603) |
+| Versioni ufficiali | [GitHub Releases](https://github.com/Peppio1/MacSync-Public/releases) |
+
+**Nota:** non è ancora pubblicata una release ufficiale. I download attuali sono artefatti temporanei di GitHub Actions, richiedono l'accesso a GitHub e scadono il 23 novembre 2026. Dopo la scadenza consultare [Actions](https://github.com/Peppio1/MacSync-Public/actions) per eventuali compilazioni più recenti. Il pacchetto è firmato ad hoc, non notarizzato; non va considerato un installer di produzione.
+
 ## Funzionalità
 
 - Configurazione grafica delle cartelle, tramite selezione Finder o drag and drop; più coppie separate e controllo delle sovrapposizioni.
@@ -58,14 +73,62 @@ swift build -c release
 
 La CI assembla anche un bundle MacSync.app con firma ad hoc, non notarizzato. I pacchetti temporanei e le anteprime grafiche si trovano negli [artefatti GitHub Actions](https://github.com/Peppio1/MacSync-Public/actions); possono scadere. Non sono release di produzione.
 
-## Primo collaudo
+## Installazione e guida all'utilizzo
 
-1. Creare cartelle locali di prova separate, con file sintetici e nessun dato originale.
-2. Configurare sorgenti e destinazioni senza sovrapposizioni.
-3. Eseguire una verifica diagnostica prima di attivare le copie.
-4. Effettuare una sincronizzazione manuale; controllare contenuto dei file e registro.
-5. Provare modifiche, disconnessione, riavvio e cancellazioni con recupero prima di valutare l'automazione.
-6. Ripetere su una condivisione SMB dedicata ai test, verificando permessi e continuità della rete.
+### 1. Installazione su macOS
+
+Scaricare il pacchetto di prova, estrarre lo ZIP scaricato e, se presente un secondo archivio MacSync-prototype.zip, estrarre anche quello. Spostare MacSync.app nella cartella Applicazioni e avviarla. MacSync è un'applicazione della barra dei menu: da lì si apre la finestra di configurazione.
+
+Essendo una build non notarizzata, macOS potrebbe impedirne l'apertura. Verificare provenienza e integrità del pacchetto prima di autorizzare eventualmente la singola applicazione nelle impostazioni Privacy e sicurezza. Non disattivare globalmente Gatekeeper. Usare soltanto file sintetici per il collaudo.
+
+### 2. Configurazione delle cartelle
+
+Aprire **Cartelle** e scegliere le sorgenti locali tramite **Sfoglia…** o trascinamento dal Finder. È possibile aggiungere sorgenti e configurare le rispettive destinazioni, anche sotto una cartella comune. Non selezionare percorsi sovrapposti.
+
+Esempio dimostrativo:
+
+```text
+Mac (sorgente)                  Destinazione locale o SMB
+Cartella_A             ─────►   Condivisione/Cartella_A
+Cartella_B             ─────►   Condivisione/Cartella_B
+```
+
+Per una destinazione di rete, collegarsi prima alla condivisione SMB con Finder, quindi selezionare la cartella accessibile. Non occorre installare MacSync sul server.
+
+### 3. Prima sincronizzazione
+
+1. Attendere l'inventario delle sorgenti locali.
+2. Aprire **Verifica archivio** ed eseguire un confronto diagnostico, senza riallineamento.
+3. Se la destinazione contiene già una copia iniziale, usare la verifica approfondita e il riconoscimento dei file identici con conferma esplicita. Il confronto SHA-256 legge anche i dati remoti.
+4. Nella **Panoramica**, scegliere **Avvia sincronizzazione**.
+5. Controllare file copiati, coda residua, errori e risultati in **Registro attività**.
+
+### 4. Pianificazione e avvio automatico
+
+Dalla pagina **Pianificazione** scegliere l'intervallo in minuti oppure ore, o un orario giornaliero/settimanale. Per esempio, un ciclo ogni cinque minuti. Salvare l'impostazione.
+
+In **Impostazioni** è possibile attivare separatamente l'avvio dell'app al login e la sincronizzazione automatica. L'avvio dell'app non autorizza da solo le copie o le eliminazioni. Se una destinazione non è accessibile, le scritture vengono sospese.
+
+### 5. Cancellazioni speculari e recupero
+
+| Impostazione | Comportamento |
+|---|---|
+| Cancellazione speculare disattivata (predefinita) | I file rimossi dalla sorgente rimangono nella destinazione |
+| Mirror attivo, recupero attivo | Le eliminazioni autorizzate spostano i file nella cartella di recupero |
+| Mirror attivo, recupero disattivato | Le eliminazioni autorizzate sono definitive |
+
+L'attivazione del mirror richiede consenso esplicito. Provare questa funzione esclusivamente su archivi di test. Le eliminazioni precedenti all'autorizzazione non sono riprodotte. Le nuove copie hanno priorità sulle rimozioni: durante uno spostamento il vecchio percorso resta preservato finché le copie pendenti non sono completate.
+
+### 6. Controllo delle operazioni e manutenzione
+
+- **Panoramica:** stato, coda, avanzamento e riepilogo dei cicli.
+- **Cartelle:** configurazione e associazione dei percorsi.
+- **Pianificazione:** frequenza e prossimi cicli.
+- **Verifica archivio:** confronto rapido o SHA-256, programmazione e manutenzione controllata.
+- **Registro attività:** esiti, errori, dettagli e esportazione TSV.
+- **Impostazioni:** avvio, aspetto, recupero, sicurezza e notifiche.
+
+Usare **Ferma tutto** prima di interventi straordinari. Attendere la conclusione delle operazioni in corso; una chiamata SMB bloccata può ritardare la chiusura.
 
 ## Stato della validazione
 
@@ -82,6 +145,70 @@ Ultima baseline convalidata: [610ecbd](https://github.com/Peppio1/MacSync-Public
 | Interazioni UI, avvio al login, arresto e SMB/VPN reale | Da collaudare |
 
 Il successivo obiettivo è completare la validazione avanzata, consolidare una candidata al rilascio e procedere al collaudo fisico. Nessuna versione 1.0 stabile è dichiarata.
+
+## Cronologia e changelog
+
+Le versioni sono riportate dalla più recente alla più vecchia. Lo storico descrive lo sviluppo progressivo: le impostazioni e i limiti delle vecchie versioni non sostituiscono quelli della versione attuale.
+
+### v0.14.3 — versione attuale
+
+- Backup SQLite autonomi tramite VACUUM INTO, correzione della creazione del file temporaneo su macOS, controllo integrità e pubblicazione esclusiva.
+- Validazione della ripresa dopo disconnessione simulata, ripristino separato della coda e diagnostica finale.
+- Test di carico con 40 cartelle e 360 file sintetici, quattro cicli di aggiornamento e verifica delle cancellazioni definitive/con recupero.
+- 164 test ordinari superati, nessun errore; rendering separato e 48 anteprime.
+- Validazione prolungata e collaudo fisico ancora da effettuare.
+
+### v0.14.0 – v0.14.2 — sicurezza operativa
+
+| Versione | Novità |
+|---|---|
+| v0.14.2 | Isolamento dei backup SQLite e pubblicazione esclusiva degli snapshot verificati |
+| v0.14.1 | Correzioni dei test di riconnessione, nomi Unicode e gestione WAL |
+| v0.14.0 | Identità persistente delle cartelle, controlli Windows, blocco istanze multiple, sicurezza database, arresto controllato e gestione delle pubblicazioni interrotte |
+
+### v0.13 — interfaccia grafica e organizzazione
+
+| Versione | Novità |
+|---|---|
+| v0.13.9 | Ripristino del pannello operativo della verifica archivio |
+| v0.13.8 | Layout desktop adattivo e 48 anteprime nei due temi |
+| v0.13.7 | Miglioramento del layout della verifica e dei nomi dei giorni |
+| v0.13.6 | Organizzazione della schermata verifica archivio |
+| v0.13.5 | Verifica archivio unificata e riconoscimento SHA-256 |
+| v0.13.4 | Configurazione delle sorgenti e destinazione comune, modifica protetta della pianificazione |
+| v0.13.3 | Layout desktop compatto |
+| v0.13.2 | Revisione UI/UX e annullamento del singolo ciclo |
+| v0.13.1 | Consolidamento della compilazione e delle anteprime automatiche |
+| v0.13.0 | Nuova organizzazione dell'interfaccia e della pianificazione |
+
+### Versioni precedenti — sviluppo del motore
+
+| Versione | Novità |
+|---|---|
+| v0.12.4 | Statistiche dettagliate, avanzamento, storico e verifica completa programmabile |
+| v0.12.3 | Autorizzazione persistente del mirror e protezioni facoltative configurabili |
+| v0.12.2 | Ripartenza dei file interrotti e gestione dei temporanei |
+| v0.12.1 | Gestione prudente dei backup temporanei |
+| v0.12 | Coda paginata e prestazioni dei cicli |
+| v0.11 | Resilienza, verifica dei file e sicurezza delle sostituzioni |
+| v0.10.1 | Correzioni della pianificazione e degli avvisi |
+| v0.10 | Intervalli configurabili e avviso di disconnessione |
+| v0.9.1 | Ripresa automatica delle copie |
+| v0.9 | Avvio al login e verifica della disponibilità |
+| v0.8.1 | Correzione dello scanner e riepilogo operativo |
+| v0.8 | Cancellazioni speculari, recupero e conservazione |
+| v0.7 | Riconoscimento SHA-256 dei file già presenti |
+| v0.6 | Spazio disponibile, staging, diagnostica e registro |
+| v0.5 | Base del prototipo: monitoraggio locale, coda SQLite e replica unidirezionale |
+
+Per le modifiche tecniche dettagliate di ogni versione consultare lo [storico completo dello sviluppo](docs/DEVELOPMENT_HISTORY.md) e lo [storico dell'architettura](docs/ARCHITECTURE_HISTORY.md).
+
+### Prossime fasi
+
+- Completare i test di durata, consumo risorse e scalabilità.
+- Preparare la candidata al rilascio e la procedura di collaudo.
+- Verificare macOS, Windows SMB, VPN, permessi e ripresa dopo interruzioni reali.
+- Pubblicare una versione stabile soltanto dopo la validazione.
 
 ## Documentazione
 
