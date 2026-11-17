@@ -558,12 +558,18 @@ struct MacSyncConfigurationView: View {
             copy.loadLastCycle()
             loginAtStartup.refresh()
             settings.refreshNotificationPermission()
+            runtime.refreshFolderHealth()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             guard !runtime.previewOnly else { return }
             loginAtStartup.refresh()
             settings.refreshNotificationPermission()
+            runtime.refreshFolderHealth()
         }
+        .onReceive(Timer.publish(every:30,on:.main,in:.common).autoconnect()) { _ in runtime.refreshFolderHealth() }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for:NSWorkspace.didWakeNotification)) { _ in runtime.refreshFolderHealth() }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for:NSWorkspace.didMountNotification)) { _ in runtime.refreshFolderHealth() }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for:NSWorkspace.didUnmountNotification)) { _ in runtime.refreshFolderHealth() }
         .sheet(isPresented: $showSummary) {
             SyncHistorySheet(copy:copy,model:model,initialMetric:initialMetric)
         }
@@ -682,7 +688,11 @@ struct MacSyncConfigurationView: View {
                 }
                 MacSyncPanel("Destinazioni", icon: "folder", fillHeight: true) {
                     let pairs = model.configuredPairs().filter { !$0.path.isEmpty }
-                    Text("\(pairs.filter { destinations.state(for:$0.id).isReady }.count) / \(pairs.count) destinazioni pronte").font(.subheadline.weight(.semibold))
+                    Text("\(pairs.filter { runtime.targetHealth[$0.id]?.isReady ?? destinations.state(for:$0.id).isReady }.count) / \(pairs.count) destinazioni pronte").font(.subheadline.weight(.semibold))
+                    if runtime.sourceHealth.values.contains(where:{$0.isError}) || runtime.targetHealth.values.contains(where:{$0.isError}) || runtime.parentHealth.isError {
+                        Label("Cartelle non accessibili — verifica i percorsi",systemImage:"exclamationmark.triangle.fill").font(.caption).foregroundStyle(.red)
+                        Button("Controlla cartelle…") { page = .folders }
+                    }
                     ForEach(Array(pairs.prefix(3).enumerated()),id: \.offset) { item in destinationLine(item.element.destination, state:destinations.state(for:item.element.id)) }
                     if pairs.count > 3 { Button("Mostra tutte le cartelle…") { page = .folders } }
                     Text("Ultimo controllo: " + (destinations.lastCheckedAt.map { macSyncClock($0) } ?? "non eseguito"))
@@ -698,10 +708,23 @@ struct MacSyncConfigurationView: View {
         return HStack(spacing: 6) {
             Text(name).font(.caption.weight(.semibold)).lineLimit(1)
             Spacer(minLength:4)
-            Text(state.description).font(.caption).foregroundStyle(state.isReady ? MacSyncColors.green(scheme) : Color.secondary).lineLimit(2)
+            Text(state.description).font(.caption).foregroundStyle(state.isReady ? MacSyncColors.green(scheme) : (state == .notConfigured ? Color.secondary : Color.red)).lineLimit(2)
         }.help(path + ": " + state.description)
     }
 
+    private func healthLabel(_ state:FolderHealth) -> some View {
+        Label(state.description,systemImage:state.isError ? "exclamationmark.triangle.fill" : state.isReady ? "checkmark.circle" : "clock")
+            .font(.caption).foregroundStyle(state.isError ? Color.red : state.isReady ? MacSyncColors.green(scheme) : Color.secondary)
+            .lineLimit(2)
+    }
+    private func healthBackground(_ state:FolderHealth) -> Color {
+        state.isError ? Color.red.opacity(scheme == .dark ? 0.16 : 0.08) : MacSyncColors.inset(scheme)
+    }
+    private var destinationHealth: FolderHealth {
+        if runtime.parentHealth.isError { return runtime.parentHealth }
+        if let failed=runtime.targetHealth.sorted(by:{$0.key<$1.key}).first(where:{$0.value.isError}) { return failed.value }
+        return runtime.parentHealth
+    }
     private var folderEditAllowed: Bool {
         !copy.active && copy.liveProgress == nil && !copy.interruptionRequested && !copy.seedBusy && !copy.maintaining && !copy.auditBusy && !runtime.savingSchedule && !runtime.folderConfigurationBusy
     }
@@ -760,17 +783,21 @@ struct MacSyncConfigurationView: View {
                                 .overlay(RoundedRectangle(cornerRadius:8).strokeBorder(Color.secondary.opacity(0.5),style:StrokeStyle(lineWidth:1,dash:[5,4])))
                         } else {
                             ForEach(Array(plan.sources.dropFirst(current*4).prefix(4))) { source in
+                                let state=runtime.sourceHealth[source.id] ?? .checking
                                 HStack {
                                     VStack(alignment:.leading,spacing:3) {
                                         Text(source.name).font(.subheadline.weight(.semibold))
                                         Text(source.path).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                                        healthLabel(state)
                                     }
                                     Spacer(minLength:4)
                                     Menu {
                                         Button("Mostra nel Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath:source.path)]) }
                                         Button("Rimuovi sorgente") { changeFolders(remove:source.id) }.disabled(!folderEditAllowed)
                                     } label: { Image(systemName:"ellipsis.circle") }.menuStyle(.borderlessButton).fixedSize()
-                                }.padding(8).background(MacSyncColors.inset(scheme),in:RoundedRectangle(cornerRadius:8)).help(source.path)
+                                }.padding(8).background(healthBackground(state),in:RoundedRectangle(cornerRadius:8))
+                                    .overlay(RoundedRectangle(cornerRadius:8).strokeBorder(state.isError ? Color.red.opacity(0.8) : Color.clear,lineWidth:1))
+                                    .help(source.path)
                             }
                             if lastPage > 0 {
                                 HStack {
@@ -801,7 +828,14 @@ struct MacSyncConfigurationView: View {
                             VStack(alignment:.leading,spacing:4) {
                                 Text(URL(fileURLWithPath:plan.parent).lastPathComponent).font(.subheadline.weight(.semibold))
                                 Text(plan.parent).font(.caption).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
-                            }.frame(maxWidth:.infinity,alignment:.leading).padding(10).background(MacSyncColors.inset(scheme),in:RoundedRectangle(cornerRadius:8)).help(plan.parent)
+                                healthLabel(destinationHealth)
+                                if runtime.parentHealth.isReady {
+                                    ForEach(Array(plan.sources.filter{runtime.targetHealth[$0.id]?.isError == true}.prefix(4))) { item in
+                                        Text(item.name + ": " + (runtime.targetHealth[item.id]?.description ?? "")).font(.caption).foregroundStyle(.red)
+                                    }
+                                }
+                            }.frame(maxWidth:.infinity,alignment:.leading).padding(10).background(healthBackground(destinationHealth),in:RoundedRectangle(cornerRadius:8))
+                                .overlay(RoundedRectangle(cornerRadius:8).strokeBorder(destinationHealth.isError ? Color.red.opacity(0.8) : Color.clear,lineWidth:1)).help(plan.parent)
                             Text("Ogni sorgente viene sincronizzata nella sottocartella omonima.").font(.caption).foregroundStyle(.secondary)
                         }
                     }.padding(10).frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.topLeading)
@@ -817,6 +851,11 @@ struct MacSyncConfigurationView: View {
                     destinationLine(item.element.destination,state:destinations.state(for:item.element.id))
                 }
                 Text("Ultimo controllo: " + (destinations.lastCheckedAt.map {macSyncClock($0)} ?? "non eseguito")).font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Text("Disponibilità: " + (runtime.healthCheckedAt.map {macSyncClock($0,seconds:true)} ?? "non verificata")).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Controlla ora") { runtime.refreshFolderHealth() }
+                }
                 Text("Direzione unica: sorgenti → destinazione. Controllo prima di ogni ciclo.").font(.caption).foregroundStyle(.secondary)
             }
             Text(model.message).font(.caption).foregroundStyle(.secondary).lineLimit(2).help(model.message)

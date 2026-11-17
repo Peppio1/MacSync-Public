@@ -283,7 +283,7 @@ public final class ArchiveAudit {
                         candidates.append((mapping,src,pair.sourceStamp,fingerprint))
                     }
                 } catch SeedVerificationError.cancelled { throw SeedVerificationError.cancelled }
-                catch { kind = .uncertain; detail = error.localizedDescription }
+                catch { kind = .uncertain; detail = SyncDiagnostic.describe(error) }
                 findings.append(AuditFinding(rootID:mapping.rootID,relativePath:path,
                     sourceRoot:mapping.source.path,targetRoot:mapping.target.path,objectKind:item.kind,
                     bytes:item.size,kind:kind,detail:detail))
@@ -337,7 +337,7 @@ public final class ArchiveAudit {
     private static func hash(_ url:URL,expected:SeedFileFingerprint,cancel:SeedVerificationCancellation,
                              read:(Int64)->Void) throws -> Data {
         let fd = url.path.withCString { Darwin.open($0,O_RDONLY | O_NOFOLLOW | O_NONBLOCK) }
-        guard fd >= 0 else { throw SeedVerificationError.sourceMissing }
+        guard fd >= 0 else { throw NSError(domain:NSPOSIXErrorDomain,code:Int(errno),userInfo:nil) }
         let handle = FileHandle(fileDescriptor:fd,closeOnDealloc:true)
         defer { try? handle.close() }
         var st = stat()

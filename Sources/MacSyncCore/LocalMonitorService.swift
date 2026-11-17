@@ -80,6 +80,7 @@ public final class LocalMonitorService {
                 var scan = ArchiveAuditProgress()
                 scan.phase = "Inventario locale iniziale"
                 var lastUpdate = 0.0
+                let scanTick = ProcessInfo.processInfo.systemUptime
                 self.update(MonitorUpdate(message:scan.phase,monitoring:false,pendingChanges:0,scanProgress:scan))
                 for root in checked {
                     _ = try store.reconcile(rootID:root.id,root:root.url,shouldContinue:{ !request.isCancelled },onItem:{ item in
@@ -88,6 +89,8 @@ public final class LocalMonitorService {
                             let sum = scan.detectedBytes.addingReportingOverflow(max(0,item.size))
                             scan.detectedBytes = sum.overflow ? Int64.max : sum.partialValue
                         } else if item.kind == "directory" { scan.scannedDirectories += 1 }
+                        scan.source.record(item)
+                        scan.source.scanSeconds = ProcessInfo.processInfo.systemUptime-scanTick
                         scan.currentPath = root.id + " / " + item.relativePath
                         let now = ProcessInfo.processInfo.systemUptime
                         if now-lastUpdate >= 0.25 {
@@ -110,6 +113,9 @@ public final class LocalMonitorService {
                 self.safetyGate.setReady(true,generation:generation)
                 self.report("Monitoraggio locale attivo", active: true)
             } catch {
+                if !request.isCancelled {
+                    try? SyncActivityLog(path:databasePath).record(level:.error,rootID:"monitor",action:"inventory_start",message:SyncDiagnostic.describe(error))
+                }
                 self.stopOnQueue()
                 self.report(request.isCancelled ? "Scansione annullata" : "Monitoraggio sospeso: " + error.localizedDescription, active: false)
             }
@@ -211,6 +217,7 @@ public final class LocalMonitorService {
             // Failed event paths remain unacknowledged. Retry by scanning
             // LOCAL folders at the next 5-minute health check.
             recoveryRequired = true
+            try? activityLog?.record(level:.error,rootID:"monitor",action:"inventory_event",message:SyncDiagnostic.describe(error))
             report("Errore inventario: " + error.localizedDescription, active: false)
         }
     }
@@ -248,6 +255,7 @@ public final class LocalMonitorService {
             } catch {
                 self.safetyGate.setReady(false,generation:generation)
                 self.recoveryRequired = true
+                try? self.activityLog?.record(level:.error,rootID:"monitor",action:"inventory_health",message:SyncDiagnostic.describe(error))
                 self.report("Verifica locale sospesa: " + error.localizedDescription, active: false)
             }
         }

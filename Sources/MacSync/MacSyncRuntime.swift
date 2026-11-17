@@ -4,9 +4,9 @@ import SwiftUI
 import UserNotifications
 import MacSyncCore
 
-/// Application-lifetime coordinator. Connection status is queried ONLY
-/// immediately before a scheduled synchronization attempt. No 30s polling,
-/// VPN client, SMB reconnect, or background probing separate from the plan.
+/// Application-lifetime coordinator. Operational checks still run before copies.
+/// Visible folder-health probes are separate and read-only; no VPN client or
+/// forced reconnect.
 @MainActor
 final class MacSyncRuntime: ObservableObject {
     static weak var operationalRuntime: MacSyncRuntime?
@@ -24,6 +24,12 @@ final class MacSyncRuntime: ObservableObject {
     let updates: SoftwareUpdateController
     let settings: SyncSettingsController
     let destinations = DestinationStatusController()
+    @Published private(set) var sourceHealth: [String:FolderHealth] = [:]
+    @Published private(set) var targetHealth: [String:FolderHealth] = [:]
+    @Published private(set) var parentHealth: FolderHealth = .checking
+    @Published private(set) var healthCheckedAt: Date?
+    private var probingHealth = false
+    private var healthRevision = 0
 
     @Published private(set) var savingSchedule = false
     @Published private(set) var folderConfigurationBusy = false
@@ -82,6 +88,58 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     deinit { autoTimer?.invalidate(); auditTimer?.invalidate() }
+
+    // A single read-only probe in flight. No extra SMB enumeration, writes,
+    // reconnect attempts or automatic authorization. Stale results discarded.
+    func refreshFolderHealth() {
+        guard !previewOnly, !shuttingDown, !folderConfigurationBusy, !probingHealth else { return }
+        let plan=model.editableCommonPlan
+        let pairs=model.configuredPairs().filter{ !$0.path.isEmpty }
+        let rev=healthRevision
+        let previousSources=sourceHealth, previousTargets=targetHealth, previousParent=parentHealth
+        probingHealth=true
+        let db=try? copy.historyPath()
+        DispatchQueue.global(qos:.utility).async { [weak self] in
+            var sources:[String:FolderHealth]=[:], targets:[String:FolderHealth]=[:]
+            for pair in pairs {
+                sources[pair.id]=FolderHealth.inspect(path:pair.path)
+                targets[pair.id]=FolderHealth.inspect(path:pair.destination,expected:pair.expected,destination:true)
+            }
+            let parent=FolderHealth.inspect(path:plan.parent,expected:plan.expected,destination:true)
+            let sourceResult=sources,targetResult=targets
+            let date=Date()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.probingHealth=false
+                guard !self.shuttingDown, self.healthRevision==rev else {
+                    self.refreshFolderHealth(); return
+                }
+                self.sourceHealth=sourceResult; self.targetHealth=targetResult
+                self.parentHealth=parent; self.healthCheckedAt=date
+                if let db {
+                    let sourceEvents=sourceResult.filter{previousSources[$0.key] != $0.value}.map{($0.key,"source_health",$0.value)}
+                    let targetEvents=targetResult.filter{previousTargets[$0.key] != $0.value}.map{($0.key,"target_health",$0.value)}
+                    let parentEvents:[(String,String,FolderHealth)] = previousParent == parent ? [] : [("app","target_parent_health",parent)]
+                    let events=sourceEvents+targetEvents+parentEvents
+                    DispatchQueue.global(qos:.utility).async {
+                        if let log=try? SyncActivityLog(path:db) {
+                            for (id,action,state) in events where state != .checking {
+                                try? log.record(level:state.isError ? .warning : .info,rootID:id,action:action,message:state.description)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func populateFolderHealthPreview() {
+        guard previewOnly else { return }
+        sourceHealth=["photo-uploads":.ready,"photo-editing":.missing,"demo-third":.ready]
+        targetHealth=["photo-uploads":.missing,"photo-editing":.missing,"demo-third":.missing]
+        parentHealth = .missing
+        healthCheckedAt=Date()
+    }
 
     func scheduleArchiveAudit() {
         guard !previewOnly, !shuttingDown, !folderConfigurationBusy, !savingSchedule else { return }
@@ -289,6 +347,7 @@ final class MacSyncRuntime: ObservableObject {
                     self.folderConfigurationBusy = false
                     self.folderEditCancellation = nil
                     if !self.shuttingDown && self.model.configuredPairs().contains(where:{ !$0.path.isEmpty }) { self.model.startMonitoring() }
+                    self.refreshFolderHealth()
                     self.finishShutdownIfReady()
                 }
             }
@@ -311,6 +370,7 @@ final class MacSyncRuntime: ObservableObject {
         autoTimer = nil
         nextAutomaticAttempt = nil
         destinations.configurationChanged()
+        healthRevision += 1; sourceHealth=[:]; targetHealth=[:]; parentHealth = .checking; healthCheckedAt=nil
         pendingAlerts.removeAll()
         outages = ConnectionOutageTracker()
         persistOutages()
