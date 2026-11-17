@@ -60,6 +60,11 @@ struct LiveSyncPanel: View {
                             Text(elapsedText(elapsed)).monospacedDigit().font(.system(size: 16, weight: .semibold))
                         }
                         Spacer(minLength: 0)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Rimanente stimato").font(.caption).foregroundStyle(.secondary)
+                            Text(p.remaining(at:ctx.date).map(elapsedText) ?? "Calcolo…").monospacedDigit().font(.system(size: 16, weight: .semibold))
+                        }
+                        Spacer(minLength: 0)
                         VStack(alignment: .trailing, spacing: 2) {
                             Text("Velocità media copia").font(.caption).foregroundStyle(.secondary)
                             Text(SyncLiveProgress.formatRate(p.meanCopyRate)).font(.system(size: 16, weight: .semibold)).monospacedDigit()
@@ -227,7 +232,7 @@ struct SyncHistorySheet: View {
     @ObservedObject var model: MacSyncViewModel
     @Environment(\.dismiss) private var dismiss
     let initialMetric:HistoryMetric?
-    @State private var selected = "session"
+    @State private var selected = ""
     @State private var cycles:[SyncCycleRecord] = []
     @State private var totals = SyncHistoryTotals()
     @State private var metric:HistoryMetric?
@@ -236,8 +241,8 @@ struct SyncHistorySheet: View {
     @State private var cycleOffset=0
     @State private var moreCycles=true
     private var selectedCycle:SyncCycleRecord? { cycles.first { $0.id == selected } }
-    private var sessionID:String? { selected == "session" ? copy.historySessionID : nil }
-    private var cycleID:String? { selected == "session" ? nil : selected }
+    private var sessionID:String? { nil }
+    private var cycleID:String? { selected.isEmpty ? nil : selected }
     var body:some View {
         VStack(alignment:.leading,spacing:12) {
             HStack {
@@ -246,17 +251,28 @@ struct SyncHistorySheet: View {
                 Button("Chiudi") { dismiss() }
             }
             Picker("Periodo",selection:$selected) {
-                Text("Sessione corrente").tag("session")
+                if cycles.isEmpty { Text("Nessun ciclo concluso").tag("") }
                 ForEach(cycles) { cycle in
                     Text(cycle.started.formatted(date:.abbreviated,time:.standard) + " — " + macSyncCycleState(cycle.state)).tag(cycle.id)
                 }
             }
-            if moreCycles { Button("Carica altri cicli") { loadCycles(reset:false) }.disabled(busy) }
+            HStack {
+                Button("Precedente") {
+                    if let i=cycles.firstIndex(where:{$0.id==selected}), i+1<cycles.count { selected=cycles[i+1].id }
+                }.disabled(cycles.firstIndex(where:{$0.id==selected}).map{$0+1>=cycles.count} ?? true)
+                Button("Successiva") {
+                    if let i=cycles.firstIndex(where:{$0.id==selected}), i>0 { selected=cycles[i-1].id }
+                }.disabled(cycles.firstIndex(where:{$0.id==selected}).map{$0==0} ?? true)
+                Button("Torna all’ultima") { if let first=cycles.first { selected=first.id } }.disabled(cycles.first?.id==selected)
+                Spacer()
+                if moreCycles { Button("Carica altri cicli") { loadCycles(reset:false) }.disabled(busy) }
+            }
             if let c=selectedCycle {
                 HStack {
                     Text("Inizio: \(c.started.formatted(date:.abbreviated,time:.standard))")
                     Text("Fine: \(c.ended?.formatted(date:.abbreviated,time:.standard) ?? "—")")
                     Spacer()
+                    Text(c.automatic.map { $0 ? "Automatica" : "Manuale" } ?? "Modalità non registrata")
                     Text(c.seconds.map(elapsedText) ?? "—").monospacedDigit()
                 }.font(.caption)
             }
@@ -267,7 +283,7 @@ struct SyncHistorySheet: View {
                             Label(m.title,systemImage:m.symbol).font(.caption)
                             Text(m.count(totals.stats).formatted()).font(.title2.bold())
                         }.frame(maxWidth:.infinity,alignment:.leading).padding(8)
-                    }.buttonStyle(.bordered)
+                    }.buttonStyle(.bordered).disabled(selectedCycle == nil)
                 }
             }
             Text("Eliminati comprende i recuperabili, senza contare backup, temporanei, cartelle o file già assenti.").font(.caption)
@@ -305,7 +321,7 @@ struct SyncHistorySheet: View {
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(20).frame(width:810,height:690)
-        .onAppear { loadCycles(reset:true); if let initialMetric { metric=initialMetric } }
+        .onAppear { selected=copy.lastRecordedCycle?.id ?? ""; loadCycles(reset:true) }
         .onChange(of:selected) { _ in loadTotals() }
         .sheet(item:$metric) { item in
             HistoryDetailsSheet(copy:copy,model:model,metric:item,cycleID:cycleID,sessionID:sessionID,roots:Array(Set(totals.byRoot.keys).union(model.configuredPairs().map(\.id))).sorted())
@@ -319,27 +335,27 @@ struct SyncHistorySheet: View {
             busy=true
             DispatchQueue.global(qos:.utility).async {
                 do {
-                    let values=try SyncCycleHistory(path:path).cycles(limit:100,offset:offset)
+                    let values=try SyncCycleHistory(path:path).cycles(limit:100,offset:offset,finishedOnly:true)
                     DispatchQueue.main.async {
                         if reset { cycles=values } else { cycles += values }
                         cycleOffset=offset+values.count; moreCycles=values.count==100
-                        if selected != "session" && !cycles.contains(where:{$0.id==selected}) { selected="session" }
-                        if reset && initialMetric == nil && selected == "session", let last=cycles.first {
-                            selected=last.id
-                        }
+                        if !cycles.contains(where:{$0.id==selected}) { selected=cycles.first?.id ?? "" }
                         busy=false; loadTotals()
+                        if reset, !selected.isEmpty, let initialMetric { metric=initialMetric }
                     }
                 } catch { DispatchQueue.main.async { busy=false; message=error.localizedDescription } }
             }
         } catch { message=error.localizedDescription }
     }
     private func loadTotals() {
-        let cycle=cycleID,session=sessionID,scope=selected
+        guard let cycle=cycleID else { totals=SyncHistoryTotals(); return }
+        let scope=selected
+        totals=SyncHistoryTotals()
         do {
             let path=try copy.historyPath()
             DispatchQueue.global(qos:.utility).async {
                 do {
-                    let result=try SyncCycleHistory(path:path).totals(cycleID:cycle,sessionID:session)
+                    let result=try SyncCycleHistory(path:path).totals(cycleID:cycle)
                     DispatchQueue.main.async { if scope==selected { totals=result } }
                 } catch { DispatchQueue.main.async { message=error.localizedDescription } }
             }
@@ -517,6 +533,7 @@ struct ArchiveAuditPanel: View {
             Divider()
             MacSyncSwitchRow("Riconosci i file già copiati", isOn: $recognize)
                 .disabled(copy.auditSettings.mode != .deep)
+            if recognize && copy.auditBusy { Text("Attivo · bloccato durante la verifica").font(detailFont).foregroundStyle(Color.accentColor) }
             Text("SHA-256 manuale: chiude i job identici dopo conferma. Le copie restano sospese fino alla riattivazione manuale.")
                 .font(detailFont).foregroundStyle(.secondary)
             Divider()
@@ -695,42 +712,47 @@ struct ArchiveAuditPanel: View {
 private struct CompactArchiveAuditProgress: View {
     let progress: ArchiveAuditProgress
     @Environment(\.macSyncLayout) private var layout
-    private var determinate: Bool {
-        progress.total > 0 && !progress.phase.hasPrefix("Analisi")
-    }
+    private var determinate: Bool { progress.comparisonStarted != nil && progress.total > 0 }
     var body: some View {
-        TimelineView(.periodic(from: progress.started, by: 1)) { context in
-            let elapsed = max(0.001, context.date.timeIntervalSince(progress.started))
-            let fraction = determinate ? max(0, min(0.99, Double(progress.compared) / Double(progress.total))) : 0
-            VStack(alignment: .leading, spacing: 4) {
+        TimelineView(.periodic(from:progress.started,by:1)) { context in
+            let elapsed = max(0,context.date.timeIntervalSince(progress.started))
+            let fraction = determinate ? min(0.99,Double(progress.compared)/Double(progress.total)) : 0
+            VStack(alignment:.leading,spacing:4) {
                 HStack {
                     Text(progress.phase).font(.subheadline.weight(.semibold))
                     Spacer()
-                    if determinate { Text("\(Int(fraction * 100))%").monospacedDigit().bold() }
+                    if determinate { Text("\(Int(fraction*100))%").monospacedDigit().bold() }
                 }
                 if determinate {
-                    MacSyncLinearProgress(value: fraction)
+                    MacSyncLinearProgress(value:fraction)
                     Text("\(progress.compared) / \(progress.total) elementi confrontati").font(.caption)
                 } else { ProgressView().controlSize(.small) }
-                Divider()
-                HStack(alignment: .top, spacing: 5) {
-                    metric("Tempo trascorso", elapsedText(elapsed))
-                    Divider().frame(height: 27)
-                    metric("Velocità media", determinate
-                        ? SyncLiveProgress.formatRate(Double(progress.bytesRead) / elapsed)
-                        : "\(Int(Double(progress.scannedFiles) / elapsed)) file/s")
-                    Divider().frame(height: 27)
-                    metric("Dati letti", sizeText(progress.bytesRead))
+                HStack {
+                    metric("Trascorso",elapsedText(elapsed))
+                    metric("Rimanente stimato",progress.remaining(at:context.date).map(elapsedText) ?? "Calcolo…")
+                    metric("Velocità lettura",SyncLiveProgress.formatRate(progress.compareRate))
                 }
-                Text("File: \(progress.scannedFiles) · Cartelle: \(progress.scannedDirectories) · \(sizeText(progress.detectedBytes))")
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Divider()
+                side("Sorgente",progress.source)
+                side("Destinazione",progress.destination)
+            }
+        }
+    }
+    private func side(_ name:String,_ data:AuditSideMetrics) -> some View {
+        VStack(alignment:.leading,spacing:2) {
+            Text(name).font(.caption.weight(.semibold))
+            HStack(spacing:5) {
+                metric("File",data.files.formatted())
+                metric("Cartelle",data.directories.formatted())
+                metric("Dimensione",sizeText(data.detectedBytes))
+                metric(data.bytesRead > 0 ? "Lettura media" : "Scansione",data.bytesRead > 0 ? SyncLiveProgress.formatRate(data.meanReadRate) : data.scanRate.map { "\($0.formatted(.number.precision(.fractionLength(0)))) file/s" } ?? "—")
             }
         }
     }
     private func metric(_ title: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 2) {
             Text(title).font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.8)
-            Text(value).font(.system(size: layout.compact ? 14 : 17, weight: .semibold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
+            Text(value).font(.system(size: layout.compact ? 12 : 15, weight: .semibold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }

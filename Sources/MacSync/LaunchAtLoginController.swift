@@ -45,8 +45,8 @@ final class LaunchAtLoginController: ObservableObject {
         case .notFound:
             enabled = false
             requiresApproval = false
-            isAvailable = false
-            statusMessage = "App non registrabile da questa posizione; spostala in Applicazioni"
+            isAvailable = Bundle.main.bundleURL.path.hasPrefix("/Applications/") || Bundle.main.bundleURL.path.hasPrefix(NSHomeDirectory() + "/Applications/")
+            statusMessage = isAvailable ? "Registrazione da verificare: prova ad attivare oppure apri Elementi login" : "App non registrabile da questa posizione; spostala in Applicazioni"
         @unknown default:
             enabled = false
             requiresApproval = false
@@ -55,8 +55,8 @@ final class LaunchAtLoginController: ObservableObject {
     }
 
     func setEnabled(_ shouldEnable: Bool) {
+        refresh()
         guard isAvailable else {
-            refresh()
             return
         }
         let service = SMAppService.mainApp
@@ -71,7 +71,8 @@ final class LaunchAtLoginController: ObservableObject {
             // Never show a success checkmark on failure; the OS is the
             // source of truth and System Settings may override this switch.
             refresh()
-            statusMessage = "Modifica non riuscita: \(error.localizedDescription)"
+            let detail = error as NSError
+            statusMessage = "Modifica non riuscita: \(detail.domain) [\(detail.code)] — \(error.localizedDescription)"
         }
     }
 

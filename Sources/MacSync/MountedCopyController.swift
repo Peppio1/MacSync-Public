@@ -37,6 +37,7 @@ final class MountedCopyController: ObservableObject {
         if page == .overview {
             active = true; automaticSession = true
             var progress = SyncLiveProgress(started: Date().addingTimeInterval(-155), planned: 46)
+            progress.workStarted = Date().addingTimeInterval(-140)
             progress.processed = 24; progress.phase = "Trasferimento"; progress.currentFile = "Cartella_1 / IMG_0042.dng"
             progress.copiedBytes = 124000000; progress.copySeconds = 10
             liveProgress = progress
@@ -51,6 +52,11 @@ final class MountedCopyController: ObservableObject {
             var progress = ArchiveAuditProgress(started: Date().addingTimeInterval(-30))
             progress.phase = "Verifica SHA-256"; progress.scannedFiles = 240; progress.scannedDirectories = 12
             progress.detectedBytes = 800000000; progress.compared = 96; progress.total = 240
+            progress.source.files = 120; progress.source.directories = 6; progress.source.detectedBytes = 400000000
+            progress.destination = progress.source
+            progress.source.bytesRead = 160000000; progress.source.readSeconds = 8
+            progress.destination.bytesRead = 160000000; progress.destination.readSeconds = 12
+            progress.comparisonStarted = Date().addingTimeInterval(-22)
             progress.bytesRead = 320000000; progress.currentPath = "Foto_caricate / IMG_0042.dng"
             auditProgress = progress; auditStatus = "Verifica in corso"
         }
@@ -118,7 +124,7 @@ final class MountedCopyController: ObservableObject {
             do {
                 let history = try SyncCycleHistory(path:path)
                 try history.markInterrupted(exceptSession:session)
-                let cycle = try history.cycles(limit:1).first
+                let cycle = try history.cycles(limit:1,finishedOnly:true).first
                 let stats = try cycle.map { try history.totals(cycleID:$0.id).stats } ?? SyncDashboardStats()
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.historySessionID==session, !self.active else { return }
@@ -216,6 +222,8 @@ final class MountedCopyController: ObservableObject {
         seedVerifiedCount = 0
         auditStatus = "Verifica in attesa della coda di lavoro"
         queue.async { [weak self] in
+            let auditLog = try? SyncActivityLog(path:db.path)
+            try? auditLog?.record(level:.info,rootID:"app",action:"audit_start",message:settings.mode == .deep ? "Verifica SHA-256 avviata" : "Verifica metadati avviata")
             do {
                 if cancel.isCancelled { throw SeedVerificationError.cancelled }
                 let journal = try ChangeJournal(path:db.path)
@@ -248,6 +256,7 @@ final class MountedCopyController: ObservableObject {
                     try data.write(to:db.deletingLastPathComponent().appendingPathComponent("last-audit.json"),options:.atomic)
                 } catch { storageWarning = " — impossibile salvare lo storico della verifica" }
                 let warning = storageWarning
+                try? auditLog?.record(level:.info,rootID:"app",action:"audit_finish",bytes:report.bytesRead,durationSeconds:report.seconds,message:"Verifica conclusa: \(report.findings.count) elementi; \(report.queuedRepairs) riparazioni accodate" + warning)
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.onQueueChanged?()
@@ -264,6 +273,7 @@ final class MountedCopyController: ObservableObject {
                     self.maintaining = false
                 }
             } catch {
+                try? auditLog?.record(level:cancel.isCancelled ? .info : .error,rootID:"app",action:"audit_error",message:cancel.isCancelled ? "Verifica annullata" : SyncDiagnostic.describe(error))
                 DispatchQueue.main.async { [weak self] in
                     self?.auditStatus = cancel.isCancelled ? "Verifica annullata" : "Verifica non riuscita: " + error.localizedDescription
                     self?.auditProgress = nil
@@ -581,7 +591,7 @@ final class MountedCopyController: ObservableObject {
                 do {
                     let store = try SyncCycleHistory(path:database.path)
                     try store.markInterrupted(exceptSession:sessionID)
-                    try store.begin(id:cycleID,sessionID:sessionID,at:startedAt)
+                    try store.begin(id:cycleID,sessionID:sessionID,at:startedAt,automatic:automatic)
                     history = store
                 } catch { historyError = "Storico non disponibile: " + error.localizedDescription }
                 func publish(force: Bool = false) {
@@ -621,7 +631,7 @@ final class MountedCopyController: ObservableObject {
                         try history?.finish(id:cycleID,at:endedAt,seconds:ProcessInfo.processInfo.systemUptime-startUptime,state:outcomeState)
                         try history?.prune(before:endedAt.addingTimeInterval(-365*86400))
                     } catch { historyError = "Storico incompleto: " + error.localizedDescription }
-                    let saved = try? history?.cycles(limit:1).first
+                    let saved = try? history?.cycles(limit:1,finishedOnly:true).first
                     let finalStats = totals.stats
                     let warning = historyError
                     let finalOutcome = outcomeState
@@ -634,7 +644,7 @@ final class MountedCopyController: ObservableObject {
                         self.historyWarning = warning
                         self.lastRecordedCycle = saved ?? nil
                         self.lastCycleStats = finalStats
-                        self.sessionStats.accumulate(finalStats)
+                        self.sessionStats = finalStats
                         self.completedCycles += 1
                         self.lastCycleAt = endedAt
                         if !automatic {
@@ -675,7 +685,7 @@ final class MountedCopyController: ObservableObject {
                 guard states.values.allSatisfy({ $0.isReady }) else {
                     try? log.record(
                         level: .warning, rootID: "app", action: "connection_wait",
-                        message: "Destinazione non disponibile al controllo pianificato"
+                        message: "Controllo destinazioni — " + String(states.filter { !$0.value.isReady }.map { $0.key + ": " + $0.value.description }.sorted().joined(separator:"; ").prefix(3000))
                     )
                     DispatchQueue.main.async { [weak self] in
                         if !cancellation.isCancelled, self?.active == true {
@@ -739,6 +749,7 @@ final class MountedCopyController: ObservableObject {
                     let highWater = try journal.queueSequence()
                     progress.planned = try journal.plannedUploadCount(throughID:highWater)
                     progress.planned += try mirrorWorker?.plannedCount(throughID:highWater) ?? 0
+                    progress.workStarted = Date()
                     worker.onEvent = observe
                     worker.onJobStarted = jobStarted
                     worker.onPhase = { phase in
@@ -821,7 +832,7 @@ final class MountedCopyController: ObservableObject {
                     totals.stats.deletionsBlocked = policy.enabled
                     try? log.record(
                         level: .error, rootID: "app", action: "cycle",
-                        message: "Errore generale durante il ciclo di copia"
+                        message: "Ciclo sospeso — " + SyncDiagnostic.describe(error)
                     )
                     DispatchQueue.main.async { [weak self] in
                         guard !cancellation.isCancelled else { return }
@@ -833,12 +844,8 @@ final class MountedCopyController: ObservableObject {
             }
             self.timer = timer
             nextScheduledRun = firstRun
-            lastCycleStats = SyncDashboardStats()
-            lastRecordedCycle = nil
+            // Keep the preceding completed cycle visible until this cycle ends.
             liveProgress = nil
-            sessionStats = SyncDashboardStats()
-            lastCycleAt = nil
-            completedCycles = 0
             active = true
             automaticSession = automatic
             mirrorStatus = policy.enabled

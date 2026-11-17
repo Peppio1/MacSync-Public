@@ -462,6 +462,7 @@ struct MacSyncConfigurationView: View {
     @ObservedObject var settings: SyncSettingsController
     @ObservedObject var destinations: DestinationStatusController
     @State private var showSummary = false
+    @State private var showTechnicalLog = false
     @State private var initialMetric: HistoryMetric?
     @StateObject private var loginAtStartup: LaunchAtLoginController
     private let previewScheme: ColorScheme?
@@ -535,7 +536,7 @@ struct MacSyncConfigurationView: View {
     @AppStorage("MacSync.appearance") private var appearance = "system"
 
     var body: some View {
-        MacSyncSectionShell(page: $page, monitoring: model.monitoring, next: copy.nextScheduledRun ?? runtime.nextAutomaticAttempt, showHeader: page == .folders, activity: nil, controls: AnyView(automaticSwitch)) {
+        MacSyncSectionShell(page: $page, monitoring: model.monitoring, next: copy.nextScheduledRun ?? runtime.nextAutomaticAttempt, showHeader: true, activity: nil, controls: AnyView(automaticSwitch)) {
             VStack(alignment: .leading, spacing: 10) {
                 switch page {
                 case .overview: overviewPage
@@ -566,6 +567,7 @@ struct MacSyncConfigurationView: View {
         .sheet(isPresented: $showSummary) {
             SyncHistorySheet(copy:copy,model:model,initialMetric:initialMetric)
         }
+        .sheet(isPresented:$showTechnicalLog) { TechnicalLogSheet(copy:copy) }
     }
     private var globalActivity: String {
         if copy.interruptionRequested { return "Interruzione richiesta" }
@@ -626,29 +628,35 @@ struct MacSyncConfigurationView: View {
                 }
                 if copy.interruptionRequested { Text("Interruzione richiesta: attendo il punto sicuro. La coda viene conservata.").font(.caption) }
                 if !model.message.isEmpty { Text(model.message).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(model.message) }
-                if let scan = model.scanProgress { AuditProgressView(progress: scan) }
-                if copy.liveProgress != nil {
+                if let audit = copy.auditProgress {
+                    CompactArchiveAuditProgress(progress:audit)
+                    if !audit.currentPath.isEmpty { Text(audit.currentPath).font(.caption).lineLimit(1).truncationMode(.middle) }
+                } else if copy.auditBusy || copy.seedBusy || copy.maintaining {
+                    Text(copy.auditBusy ? copy.auditStatus : copy.seedBusy ? copy.seedStatus : copy.maintenanceStatus).font(.caption)
+                } else if copy.liveProgress != nil {
                     LiveSyncPanel(copy: copy)
-                } else if model.scanProgress == nil {
+                } else if let scan = model.scanProgress {
+                    AuditProgressView(progress:scan)
+                } else {
                     Text(copy.active || runtime.nextAutomaticAttempt != nil ? "In attesa del prossimo ciclo" : "Nessun trasferimento in corso").font(.callout).foregroundStyle(.secondary)
                     if !copy.historyWarning.isEmpty { Text(copy.historyWarning).foregroundStyle(.orange) }
                 }
             }
-            MacSyncPanel("Riepilogo sessione", icon: "chart.bar.xaxis") {
+            MacSyncPanel("Riepilogo ultima sincronizzazione", icon: "chart.bar.xaxis") {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 6), spacing: 8) {
                     ForEach(HistoryMetric.main) { metric in
                         Button {
                             initialMetric = metric; showSummary = true
                         } label: {
-                            SyncSummaryMetric(title: metric.title, count: metric.count(copy.sessionStats), symbol: metric.symbol)
-                        }.buttonStyle(.plain).help("Apri dettaglio: " + metric.title)
+                            SyncSummaryMetric(title: metric.title, count: metric.count(copy.lastCycleStats), symbol: metric.symbol)
+                        }.buttonStyle(.plain).disabled(copy.lastRecordedCycle == nil).help("Apri dettaglio: " + metric.title)
                     }
                 }
                 HStack {
-                    Text("Cicli conclusi · I recuperabili sono inclusi negli eliminati.")
+                    Text(copy.lastRecordedCycle.map { "Ultimo ciclo: " + macSyncDateTime($0.started) + " · " + macSyncCycleState($0.state) } ?? "Nessuna sincronizzazione conclusa")
                         .font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    Button("Apri riepilogo…") { initialMetric = nil; showSummary = true }
+                    Button("Riepiloghi precedenti…") { initialMetric = nil; showSummary = true }
                 }
             }
             HStack(alignment: .top, spacing: 8) {
@@ -935,6 +943,7 @@ struct MacSyncConfigurationView: View {
                 Text("Filtri e comandi").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Aggiorna") { copy.refresh() }
+                Button("Log tecnico…") { showTechnicalLog = true }
                 Button("Esporta TSV…") { copy.exportLog() }
                 Button("Storico cicli…") { initialMetric = nil; showSummary = true }.buttonStyle(.borderedProminent)
             }
@@ -994,7 +1003,7 @@ struct MacSyncConfigurationView: View {
                     Text(loginAtStartup.statusMessage)
                         .font(.caption)
                         .foregroundStyle(loginAtStartup.requiresApproval ? .orange : .secondary)
-                    if loginAtStartup.requiresApproval {
+                    if loginAtStartup.requiresApproval || !loginAtStartup.isAvailable || !loginAtStartup.enabled {
                         Button("Apri Elementi login in Impostazioni di Sistema") {
                             loginAtStartup.openSystemSettings()
                         }
@@ -1324,7 +1333,7 @@ struct MacSyncVisibleSwitchStyle: ToggleStyle {
                 .overlay(alignment: configuration.isOn ? .trailing : .leading) {
                     Circle().fill(Color.white).frame(width: 17, height: 17).padding(2)
                 }
-                .opacity(enabled ? 1 : 0.5)
+                .opacity(enabled || configuration.isOn ? 1 : 0.5)
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)

@@ -373,7 +373,7 @@ public final class MountedFolderCopyWorker {
                     level: .warning, rootID: job.rootID, action: "retry",
                     relativePath: job.relativePath,
                     durationSeconds: Date().timeIntervalSince(started),
-                    message: error.localizedDescription
+                    message: SyncDiagnostic.describe(error)
                 )
                 // A lost mount or changed root is not a per-file failure.
                 // Stop the cycle rather than attempting thousands of jobs
@@ -395,12 +395,12 @@ public final class MountedFolderCopyWorker {
                 }
             } catch {
                 summary.failed += 1
-                emit(.failed,job:job,mapping:mapping,seconds:Date().timeIntervalSince(started),detail:"Errore trasferimento")
+                emit(.failed,job:job,mapping:mapping,seconds:Date().timeIntervalSince(started),detail:SyncDiagnostic.describe(error))
                 try log.record(
                     level: .error, rootID: job.rootID, action: "retry",
                     relativePath: job.relativePath,
                     durationSeconds: Date().timeIntervalSince(started),
-                    message: "Errore trasferimento; operazione conservata in coda"
+                    message: SyncDiagnostic.describe(error) + "; operazione conservata in coda"
                 )
             }
         }

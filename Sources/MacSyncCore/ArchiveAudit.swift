@@ -50,7 +50,43 @@ public struct AuditFinding: Codable, Equatable, Sendable, Identifiable {
     public let kind: AuditFindingKind
     public let detail: String
 }
+public struct AuditSideMetrics: Equatable, Sendable {
+    public var files = 0
+    public var directories = 0
+    public var detectedBytes: Int64 = 0
+    public var bytesRead: Int64 = 0
+    public var readSeconds: Double = 0
+    public var scanSeconds: Double = 0
+    public init() {}
+    public var meanReadRate: Double? { readSeconds > 0 && bytesRead > 0 ? Double(bytesRead)/readSeconds : nil }
+    public var scanRate: Double? { scanSeconds > 0 ? Double(files)/scanSeconds : nil }
+    public mutating func record(_ item: TrackedItem) {
+        if item.kind == "file" {
+            files += 1
+            let sum = detectedBytes.addingReportingOverflow(max(0,item.size))
+            detectedBytes = sum.overflow ? Int64.max : sum.partialValue
+        } else if item.kind == "directory" { directories += 1 }
+    }
+    public mutating func read(_ count: Int64, seconds: Double) {
+        let sum = bytesRead.addingReportingOverflow(max(0,count))
+        bytesRead = sum.overflow ? Int64.max : sum.partialValue
+        readSeconds += max(0,seconds)
+    }
+}
+
 public struct ArchiveAuditProgress: Equatable, Sendable {
+    public var source = AuditSideMetrics()
+    public var destination = AuditSideMetrics()
+    public var comparisonStarted: Date?
+    public var scanningDestination = false
+    public var compareRate: Double? {
+        let seconds = source.readSeconds + destination.readSeconds
+        return seconds > 0 && bytesRead > 0 ? Double(bytesRead)/seconds : nil
+    }
+    public func remaining(at now: Date) -> Double? {
+        guard let start = comparisonStarted, phase != "Finalizzazione" else { return nil }
+        return OperationEstimate.remaining(processed:compared,total:total,elapsed:now.timeIntervalSince(start))
+    }
     public let started: Date
     public var phase = "Analisi sorgente e destinazione"
     public var scannedFiles = 0
@@ -122,7 +158,10 @@ public final class ArchiveAudit {
             }
             let sourceStamp = try Self.rootStamp(mapping.source)
             let targetStamp = try Self.rootStamp(mapping.target)
+            var scanStart = ProcessInfo.processInfo.systemUptime
             func scanned(_ item: TrackedItem) {
+                if state.scanningDestination { state.destination.record(item) }
+                else { state.source.record(item) }
                 if item.kind == "file" {
                     state.scannedFiles += 1
                     let n = state.detectedBytes.addingReportingOverflow(max(0,item.size))
@@ -131,13 +170,27 @@ public final class ArchiveAudit {
                 state.currentPath = mapping.rootID + " / " + item.relativePath
                 report()
             }
+            state.scanningDestination = false
+            let sourcePrior = state.source.scanSeconds
+            scanStart = ProcessInfo.processInfo.systemUptime
             state.phase = "Analisi sorgente"; report(force:true)
             let source = try LocalScanner.scan(root:mapping.source,excludeManaged:true,
-                shouldContinue:{ !cancellation.isCancelled },onItem:scanned)
+                shouldContinue:{ !cancellation.isCancelled },onItem:{ item in
+                    state.source.scanSeconds = sourcePrior + ProcessInfo.processInfo.systemUptime-scanStart
+                    scanned(item)
+                })
+            state.source.scanSeconds = sourcePrior + ProcessInfo.processInfo.systemUptime-scanStart
             try mapping.verify()
+            state.scanningDestination = true
+            let targetPrior = state.destination.scanSeconds
+            scanStart = ProcessInfo.processInfo.systemUptime
             state.phase = "Analisi destinazione"; report(force:true)
             let target = try LocalScanner.scan(root:mapping.target,excludeManaged:true,
-                shouldContinue:{ !cancellation.isCancelled },onItem:scanned)
+                shouldContinue:{ !cancellation.isCancelled },onItem:{ item in
+                    state.destination.scanSeconds = targetPrior + ProcessInfo.processInfo.systemUptime-scanStart
+                    scanned(item)
+                })
+            state.destination.scanSeconds = targetPrior + ProcessInfo.processInfo.systemUptime-scanStart
             try mapping.verify()
             guard try Self.rootStamp(mapping.source) == sourceStamp,
                   try Self.rootStamp(mapping.target) == targetStamp else { throw MountedCopyError.volumeChanged }
@@ -151,6 +204,7 @@ public final class ArchiveAudit {
         }
         var findings: [AuditFinding] = []
         var candidates: [(MountedFolderMapping, TrackedItem, String, SeedFileFingerprint?)] = []
+        state.comparisonStarted = Date()
         state.phase = mode == .deep ? "Verifica SHA-256" : "Confronto metadati"
         report(force:true)
         for pair in pairs {
@@ -196,13 +250,19 @@ public final class ArchiveAudit {
                               abs(beforeB.modifiedAt-dst!.modifiedAt) < 0.002 else {
                             throw SeedVerificationError.changedDuringRead
                         }
-                        func read(_ n: Int64) {
+                        var readTick = ProcessInfo.processInfo.systemUptime
+                        func read(_ n: Int64, destination: Bool) {
+                            let now = ProcessInfo.processInfo.systemUptime
                             let sum = state.bytesRead.addingReportingOverflow(n)
                             state.bytesRead = sum.overflow ? Int64.max : sum.partialValue
+                            if destination { state.destination.read(n,seconds:now-readTick) }
+                            else { state.source.read(n,seconds:now-readTick) }
+                            readTick = now
                             report()
                         }
-                        let h1 = try Self.hash(a,expected:beforeA,cancel:cancellation,read:read)
-                        let h2 = try Self.hash(b,expected:beforeB,cancel:cancellation,read:read)
+                        let h1 = try Self.hash(a,expected:beforeA,cancel:cancellation,read:{ read($0,destination:false) })
+                        readTick = ProcessInfo.processInfo.systemUptime
+                        let h2 = try Self.hash(b,expected:beforeB,cancel:cancellation,read:{ read($0,destination:true) })
                         guard try SeededArchiveVerifier.fingerprint(a) == beforeA,
                               try SeededArchiveVerifier.fingerprint(b) == beforeB else {
                             throw SeedVerificationError.changedDuringRead

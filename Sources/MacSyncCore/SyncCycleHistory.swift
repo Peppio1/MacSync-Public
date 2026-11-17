@@ -38,6 +38,7 @@ public struct SyncCycleRecord: Codable, Equatable, Sendable, Identifiable {
     public let ended: Date?
     public let seconds: Double?
     public let state: String
+    public var automatic: Bool? = nil
 }
 public struct SyncHistoryRow: Identifiable, Sendable {
     public let id: Int64
@@ -79,6 +80,7 @@ public struct SyncHistoryTotals: Equatable, Sendable {
 }
 public struct SyncLiveProgress: Equatable, Sendable {
     public let started: Date
+    public var workStarted: Date?
     public var planned: Int
     public var processed = 0
     public var phase = "Verifica"
@@ -89,6 +91,10 @@ public struct SyncLiveProgress: Equatable, Sendable {
     public var meanCopyRate: Double? { copySeconds > 0 ? Double(copiedBytes) / copySeconds : nil }
     public var fraction: Double { planned > 0 ? min(0.99, Double(processed) / Double(planned)) : 0 }
     public init(started: Date, planned: Int = 0) { self.started = started; self.planned = max(0, planned) }
+    public func remaining(at now: Date) -> Double? {
+        guard let workStarted, phase != "Finalizzazione" else { return nil }
+        return OperationEstimate.remaining(processed:processed,total:planned,elapsed:now.timeIntervalSince(workStarted))
+    }
     public mutating func observe(_ event: SyncCycleEvent) {
         if event.kind.isJob { processed += 1 }
         if event.kind == .stageCopy, event.seconds > 0, let bytes = event.bytes {
@@ -124,6 +130,10 @@ public final class SyncCycleHistory {
                     id TEXT PRIMARY KEY, session_id TEXT NOT NULL, started REAL NOT NULL,
                     ended REAL, elapsed REAL, state TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS sync_cycle_mode_v2(
+                    cycle_id TEXT PRIMARY KEY REFERENCES sync_cycles_v1(id) ON DELETE CASCADE,
+                    automatic INTEGER NOT NULL CHECK(automatic IN (0,1))
+                );
                 CREATE INDEX IF NOT EXISTS idx_cycles_started ON sync_cycles_v1(started DESC);
                 CREATE INDEX IF NOT EXISTS idx_cycles_session ON sync_cycles_v1(session_id,started DESC);
                 CREATE TABLE IF NOT EXISTS sync_cycle_events_v1(
@@ -135,11 +145,17 @@ public final class SyncCycleHistory {
         } catch { sqlite3_close(db); db = nil; throw error }
     }
     deinit { if let db { sqlite3_close(db) } }
-    public func begin(id: String, sessionID: String, at: Date) throws {
+    public func begin(id: String, sessionID: String, at: Date, automatic: Bool? = nil) throws {
         let s = try prepare("INSERT INTO sync_cycles_v1(id,session_id,started,state) VALUES(?,?,?,'running');")
         defer { sqlite3_finalize(s) }
         try bind(id,1,s); try bind(sessionID,2,s)
         guard sqlite3_bind_double(s,3,at.timeIntervalSince1970) == SQLITE_OK, sqlite3_step(s) == SQLITE_DONE else { throw failure() }
+        if let automatic {
+            let m = try prepare("INSERT INTO sync_cycle_mode_v2(cycle_id,automatic) VALUES(?,?);")
+            defer { sqlite3_finalize(m) }
+            try bind(id,1,m)
+            guard sqlite3_bind_int(m,2,automatic ? 1 : 0) == SQLITE_OK, sqlite3_step(m) == SQLITE_DONE else { throw failure() }
+        }
     }
     public func finish(id: String, at: Date, seconds: Double, state: String) throws {
         let s = try prepare("UPDATE sync_cycles_v1 SET ended=?,elapsed=?,state=? WHERE id=? AND state='running';")
@@ -161,8 +177,9 @@ public final class SyncCycleHistory {
         for (i,v) in [cycleID,event.rootID,event.kind.rawValue,event.relativePath,payload].enumerated() { try bind(v,Int32(i+1),s) }
         guard sqlite3_step(s) == SQLITE_DONE else { throw failure() }
     }
-    public func cycles(limit: Int = 100, offset: Int = 0) throws -> [SyncCycleRecord] {
-        let s = try prepare("SELECT id,session_id,started,ended,elapsed,state FROM sync_cycles_v1 ORDER BY started DESC,id DESC LIMIT ? OFFSET ?;")
+    public func cycles(limit: Int = 100, offset: Int = 0, finishedOnly: Bool = false) throws -> [SyncCycleRecord] {
+        let filter = finishedOnly ? " WHERE c.state<>'running'" : ""
+        let s = try prepare("SELECT c.id,c.session_id,c.started,c.ended,c.elapsed,c.state,m.automatic FROM sync_cycles_v1 c LEFT JOIN sync_cycle_mode_v2 m ON c.id=m.cycle_id" + filter + " ORDER BY c.started DESC,c.id DESC LIMIT ? OFFSET ?;")
         defer { sqlite3_finalize(s) }
         guard sqlite3_bind_int64(s,1,Int64(max(1,min(limit,500)))) == SQLITE_OK,
               sqlite3_bind_int64(s,2,Int64(max(0,offset))) == SQLITE_OK else { throw failure() }
@@ -173,7 +190,7 @@ public final class SyncCycleHistory {
             result.append(SyncCycleRecord(id: col(s,0),sessionID: col(s,1),
                 started: Date(timeIntervalSince1970: sqlite3_column_double(s,2)),
                 ended: sqlite3_column_type(s,3) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: sqlite3_column_double(s,3)),
-                seconds: sqlite3_column_type(s,4) == SQLITE_NULL ? nil : sqlite3_column_double(s,4), state: col(s,5)))
+                seconds: sqlite3_column_type(s,4) == SQLITE_NULL ? nil : sqlite3_column_double(s,4), state: col(s,5), automatic: sqlite3_column_type(s,6) == SQLITE_NULL ? nil : sqlite3_column_int(s,6) != 0))
         }
     }
     public func events(cycleID: String? = nil, sessionID: String? = nil,
