@@ -37,13 +37,14 @@ public final class MonitorSafetyGate: @unchecked Sendable {
     private let lock = NSLock()
     private var generation = UUID()
     private var auditEpoch = UUID()
+    private var shutdownEpoch = UUID()
     private var ready = false
     private var reconciling = false
     private var lastBlock = "Monitoraggio non pronto"
     public init() {}
     @discardableResult public func invalidate() -> UUID {
         lock.lock(); defer { lock.unlock() }
-        generation = UUID(); auditEpoch = UUID(); ready = false; reconciling = false
+        generation = UUID(); auditEpoch = UUID(); shutdownEpoch = UUID(); ready = false; reconciling = false
         lastBlock = "Monitoraggio arrestato o configurazione modificata"
         return generation
     }
@@ -51,7 +52,7 @@ public final class MonitorSafetyGate: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard generation == token else { return }
         ready = value; reconciling = false
-        if !value { auditEpoch = UUID(); lastBlock = "Monitoraggio non pronto" }
+        if !value { auditEpoch = UUID(); shutdownEpoch = UUID(); lastBlock = "Monitoraggio non pronto" }
     }
     /// Ordinary inventory updates still block all copy/deletion workers.
     /// An already-authorized audit may continue its read-only comparison.
@@ -59,15 +60,24 @@ public final class MonitorSafetyGate: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard generation == token else { return }
         if ready { reconciling = true }
+        shutdownEpoch = UUID()
         ready = false
     }
     public func fail(generation token: UUID, reason: String) {
         lock.lock(); defer { lock.unlock() }
         guard generation == token else { return }
-        ready = false; reconciling = false; auditEpoch = UUID(); lastBlock = reason
+        ready = false; reconciling = false; auditEpoch = UUID(); shutdownEpoch = UUID(); lastBlock = reason
     }
     public var isReady: Bool {
         lock.lock(); defer { lock.unlock() }; return ready
+    }
+    public func shutdownValidationToken() -> UUID? {
+        lock.lock(); defer { lock.unlock() }
+        return ready ? shutdownEpoch : nil
+    }
+    public func shutdownValidationStillValid(_ token: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return ready && shutdownEpoch == token
     }
     public func beginAudit() -> UUID? {
         lock.lock(); defer { lock.unlock() }

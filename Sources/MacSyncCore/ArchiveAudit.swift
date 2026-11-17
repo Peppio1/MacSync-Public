@@ -59,7 +59,7 @@ public struct AuditFinding: Codable, Equatable, Sendable, Identifiable {
     public let kind: AuditFindingKind
     public let detail: String
 }
-public struct AuditSideMetrics: Equatable, Sendable {
+public struct AuditSideMetrics: Codable, Equatable, Sendable {
     public var files = 0
     public var directories = 0
     public var detectedBytes: Int64 = 0
@@ -88,6 +88,8 @@ public struct ArchiveAuditProgress: Equatable, Sendable {
     public var destination = AuditSideMetrics()
     public var comparisonStarted: Date?
     public var scanningDestination = false
+    public var differences: [AuditFinding] = []
+    public var deletionCandidates: Set<String> = []
     public var compareRate: Double? {
         let seconds = source.readSeconds + destination.readSeconds
         return seconds > 0 && bytesRead > 0 ? Double(bytesRead)/seconds : nil
@@ -120,6 +122,13 @@ public struct ArchiveAuditReport: Codable, Equatable, Sendable {
     public let bytesRead: Int64
     public let queuedRepairs: Int
     public let repairRequested: Bool
+    // Optional for decoding reports saved by older versions.
+    public var sourceMetrics: AuditSideMetrics? = nil
+    public var destinationMetrics: AuditSideMetrics? = nil
+    public var deletionCandidates: Set<String>? = nil
+    public var recognizedFiles: Int? = nil
+    public var metadataMatches: Int? = nil
+    public var hashMatches: Int? = nil
     public func count(_ kind: AuditFindingKind) -> Int {
         findings.lazy.filter { $0.kind == kind }.count
     }
@@ -146,10 +155,13 @@ public final class ArchiveAudit {
     public func run(mode: ArchiveAuditMode, repair: Bool = false,
                     cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
                     collectMetadataMatches: Bool = false,
+                    shouldCollectMetadataMatch: (String,String) -> Bool = { _,_ in true },
+                    deletionCandidates: Set<String> = [],
                     onVerifiedFile: (String, String, SeedFileFingerprint, SeedFileFingerprint) -> Void = { _,_,_,_ in },
                     diagnostic: (ArchiveAuditProgress) -> Void = { _ in },
                     progress: (ArchiveAuditProgress) -> Void = { _ in }) throws -> ArchiveAuditReport {
         var state = ArchiveAuditProgress()
+        state.deletionCandidates = deletionCandidates
         let startTick = ProcessInfo.processInfo.systemUptime
         var published: Double = 0
         func check() throws { if cancellation.isCancelled { throw SeedVerificationError.cancelled } }
@@ -224,6 +236,7 @@ public final class ArchiveAudit {
             state.total += paths.count
         }
         var findings: [AuditFinding] = []
+        var metadataMatches = 0, hashMatches = 0
         var candidates: [(MountedFolderMapping, TrackedItem, String, SeedFileFingerprint?)] = []
         state.comparisonStarted = Date()
         state.phase = mode == .deep ? "Verifica SHA-256" : (mode == .intelligent ? "Verifica intelligente" : "Confronto metadati")
@@ -261,7 +274,7 @@ public final class ArchiveAudit {
                         // Metadata equivalence is NOT proof of byte identity.
                         kind = abs(src!.modifiedAt-dst!.modifiedAt) <= 2 ? .matching : .different
                         if kind == .different { detail = "Data di modifica diversa" }
-                        else if collectMetadataMatches {
+                        else if collectMetadataMatches && shouldCollectMetadataMatch(mapping.rootID,path) {
                             let a = try Self.safeURL(path,mapping:mapping,destination:false)
                             let b = try Self.safeURL(path,mapping:mapping,destination:true)
                             let beforeA = try SeededArchiveVerifier.fingerprint(a)
@@ -306,7 +319,7 @@ public final class ArchiveAudit {
                         fingerprint = beforeA
                         kind = h1 == h2 ? .matching : .different
                         if kind == .different { detail = "Contenuto SHA-256 diverso" }
-                        else { onVerifiedFile(mapping.rootID,path,beforeA,beforeB) }
+                        else { detail = "Contenuto SHA-256 corrispondente"; onVerifiedFile(mapping.rootID,path,beforeA,beforeB) }
                     }
                     if repair && (kind == .missing || kind == .different), let src {
                         let url = try Self.safeURL(path,mapping:mapping,destination:false)
@@ -320,9 +333,15 @@ public final class ArchiveAudit {
                     }
                 } catch SeedVerificationError.cancelled { throw SeedVerificationError.cancelled }
                 catch { kind = .uncertain; detail = SyncDiagnostic.describe(error) }
-                findings.append(AuditFinding(rootID:mapping.rootID,relativePath:path,
+                if kind == .matching && item.kind == "file" {
+                    if detail == "Contenuto SHA-256 corrispondente" { hashMatches += 1 }
+                    else { metadataMatches += 1; detail = "Corrispondenza metadati (contenuto non confrontato)" }
+                }
+                let finding = AuditFinding(rootID:mapping.rootID,relativePath:path,
                     sourceRoot:mapping.source.path,targetRoot:mapping.target.path,objectKind:item.kind,
-                    bytes:item.size,kind:kind,detail:detail))
+                    bytes:item.size,kind:kind,detail:detail)
+                findings.append(finding)
+                if item.kind == "file" && kind != .matching { state.differences.append(finding) }
                 state.compared += 1; report()
             }
             try mapping.verify()
@@ -352,11 +371,14 @@ public final class ArchiveAudit {
         if !repairs.isEmpty && !cancellation.mayCommit {
             throw JournalError.database("Riparazioni non accodate: inventario non pronto durante la finalizzazione")
         }
+        state.phase = "Salvataggio operazioni nel database"; state.comparisonStarted = nil; report(force:true)
         let queued = try journal.enqueueAuditRepairs(repairs, shouldContinue:{ cancellation.mayCommit })
         report(force:true)
         return ArchiveAuditReport(mode:mode,started:state.started,ended:Date(),
             seconds:ProcessInfo.processInfo.systemUptime-startTick,findings:findings,
-            bytesRead:state.bytesRead,queuedRepairs:queued,repairRequested:repair)
+            bytesRead:state.bytesRead,queuedRepairs:queued,repairRequested:repair,
+            sourceMetrics:state.source,destinationMetrics:state.destination,
+            deletionCandidates:deletionCandidates,metadataMatches:metadataMatches,hashMatches:hashMatches)
     }
 
     private static func fold(_ path: String) -> String {

@@ -49,6 +49,47 @@ final class SeededArchiveVerifierTests: XCTestCase {
         }
     }
 
+    func testLargeArchiveRecognition200000Files() throws {
+        guard ProcessInfo.processInfo.environment["MACSYNC_LARGE_AUDIT"] == "1" else { throw XCTSkip("Opt-in large local archive benchmark") }
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let count = 200_000
+        let start = Date()
+        let empty = Data()
+        let fixed = Date(timeIntervalSince1970:1_700_000_000)
+        for group in 0..<200 {
+            let name = "group-\(group)"
+            let a = f.source.appendingPathComponent(name), b = f.target.appendingPathComponent(name)
+            try FileManager.default.createDirectory(at:a,withIntermediateDirectories:true)
+            try FileManager.default.createDirectory(at:b,withIntermediateDirectories:true)
+            for index in 0..<1000 {
+                let leaf = "file-\(index).dat"
+                let src = a.appendingPathComponent(leaf), dst = b.appendingPathComponent(leaf)
+                try empty.write(to:src); try empty.write(to:dst)
+                try FileManager.default.setAttributes([.modificationDate:fixed],ofItemAtPath:src.path)
+                try FileManager.default.setAttributes([.modificationDate:fixed],ofItemAtPath:dst.path)
+            }
+        }
+        print("200K fixture created in \(Date().timeIntervalSince(start)) s")
+        try initializeInventory(f)
+        let backup = f.base.appendingPathComponent("before.sqlite")
+        try ArchiveDatabaseSafety.backup(f.db,to:backup)
+        let session = try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let tick = Date()
+        let result = try session.auditAndRecognize(mode:.quick,repair:true)
+        XCTAssertEqual(result.audit.sourceMetrics?.files,count)
+        XCTAssertEqual(result.audit.destinationMetrics?.files,count)
+        XCTAssertEqual(result.audit.bytesRead,0)
+        XCTAssertEqual(result.recognition.matches.count,count)
+        let scan = Date().timeIntervalSince(tick)
+        let commitTick = Date()
+        XCTAssertEqual(try session.approve(report:result.recognition),count)
+        XCTAssertEqual(try f.journal.plannedUploadCount(),200) // matching directories remain safe upserts
+        try ArchiveDatabaseSafety.verify(backup,readOnly:true)
+        XCTAssertEqual(try ChangeJournal(path:backup.path).plannedUploadCount(),count+200)
+        print("400,000 tiny local files; compare \(scan) s; recognition \(Date().timeIntervalSince(commitTick)) s; total \(Date().timeIntervalSince(start)) s; content bytes read 0")
+    }
+
     func testIdenticalSeededFileIsAcknowledgedWithoutAnyDestinationWrite() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }

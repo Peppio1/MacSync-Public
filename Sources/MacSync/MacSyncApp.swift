@@ -426,8 +426,9 @@ struct SyncSummaryMetric: View {
 
     private var tone: Color {
         switch title {
-        case "Nuovi": return MacSyncColors.green(scheme)
-        case "Aggiornati": return MacSyncColors.blue(scheme)
+        case "Nuovi", "Nuovi da copiare": return MacSyncColors.green(scheme)
+        case "Aggiornati", "Da aggiornare": return MacSyncColors.blue(scheme)
+        case "Da eliminare": return MacSyncColors.red(scheme)
         case "Eliminati", "Rimandati": return MacSyncColors.orange(scheme)
         case "Recuperabili": return MacSyncColors.blue(scheme)
         case "Errori": return count > 0 ? MacSyncColors.red(scheme) : Color.secondary
@@ -444,7 +445,7 @@ struct SyncSummaryMetric: View {
             }
             Text(count.formatted()).font(.system(size: layout.compact ? 23 : 26, weight: .semibold, design: .rounded))
                 .monospacedDigit().foregroundStyle(tone).lineLimit(1).minimumScaleFactor(0.6)
-            Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary).lineLimit(1)
+            Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.65)
         }
         .padding(layout.compact ? 7 : 9)
         .frame(maxWidth: .infinity, minHeight: layout.compact ? 63 : 74, alignment: .leading)
@@ -637,6 +638,7 @@ struct MacSyncConfigurationView: View {
                 if !model.message.isEmpty { Text(model.message).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(model.message) }
                 if let audit = copy.auditProgress {
                     CompactArchiveAuditProgress(progress:audit)
+                    AuditFindingCards(model:model,findings:audit.differences,deletionCandidates:audit.deletionCandidates,partial:true)
                     if !audit.currentPath.isEmpty { Text(audit.currentPath).font(.caption).lineLimit(1).truncationMode(.middle) }
                 } else if copy.auditBusy || copy.seedBusy || copy.maintaining {
                     Text(copy.auditBusy ? copy.auditStatus : copy.seedBusy ? copy.seedStatus : copy.maintenanceStatus).font(.caption)
@@ -647,6 +649,12 @@ struct MacSyncConfigurationView: View {
                 } else {
                     Text(copy.active || runtime.nextAutomaticAttempt != nil ? "In attesa del prossimo ciclo" : "Nessun trasferimento in corso").font(.callout).foregroundStyle(.secondary)
                     if !copy.historyWarning.isEmpty { Text(copy.historyWarning).foregroundStyle(.orange) }
+                }
+                if copy.auditProgress == nil, let report = copy.auditReport {
+                    Divider()
+                    Text("Ultima verifica: " + macSyncDateTime(report.ended)).font(.caption.weight(.semibold))
+                    AuditArchiveComparison(source:report.sourceMetrics,destination:report.destinationMetrics,showSpeed:false)
+                    AuditFindingCards(model:model,findings:report.findings,deletionCandidates:report.deletionCandidates ?? [],partial:false)
                 }
             }
             MacSyncPanel("Riepilogo ultima sincronizzazione", icon: "chart.bar.xaxis") {

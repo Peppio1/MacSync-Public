@@ -65,7 +65,7 @@ final class MacSyncUIPreviewTests: XCTestCase {
                     try history.begin(id: "demo-cycle", sessionID: "demo-session", at: now.addingTimeInterval(-318), automatic:true)
                     try history.finish(id: "demo-cycle", at: now, seconds: 318, state: "partial")
                     var lastAudit: ArchiveAuditReport?
-                    if page == .audit {
+                    if page == .audit || page == .overview {
                         let source = scratch.appendingPathComponent("source").resolvingSymlinksInPath()
                         let target = scratch.appendingPathComponent("target").resolvingSymlinksInPath()
                         try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)

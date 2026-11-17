@@ -413,6 +413,25 @@ public final class ChangeJournal {
         }
     }
 
+    /// Exact source inventory comparison used only before requesting a normal shutdown.
+    /// Includes ctime/inode change stamps to detect edits with preserved mtime.
+    public func inventoryMatchesForShutdown(rootID: String, scanned: [TrackedItem]) throws -> Bool {
+        var expected = Dictionary(uniqueKeysWithValues:scanned.map { ($0.relativePath,$0) })
+        let stmt = try prepare("SELECT relative_path,kind,file_size,modified_at,change_stamp FROM file_inventory WHERE root_id=?;")
+        defer { sqlite3_finalize(stmt) }
+        try bind(rootID,at:1,in:stmt)
+        while true {
+            let rc = sqlite3_step(stmt)
+            if rc == SQLITE_DONE { return expected.isEmpty }
+            guard rc == SQLITE_ROW else { throw databaseFailure() }
+            guard let item = expected.removeValue(forKey:columnText(stmt,at:0)), item.kind == columnText(stmt,at:1) else { return false }
+            if item.kind == "file" {
+                guard item.size == sqlite3_column_int64(stmt,2), abs(item.modifiedAt-sqlite3_column_double(stmt,3)) < 0.002,
+                      let stamp = item.changeStamp, sqlite3_column_type(stmt,4) != SQLITE_NULL, stamp == columnText(stmt,at:4) else { return false }
+            }
+        }
+    }
+
     public func databaseIdentity() throws -> String {
         try execute("CREATE TABLE IF NOT EXISTS macsync_identity(id TEXT NOT NULL);")
         try execute("INSERT INTO macsync_identity(id) SELECT lower(hex(randomblob(16))) WHERE NOT EXISTS (SELECT 1 FROM macsync_identity);")

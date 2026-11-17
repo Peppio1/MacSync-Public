@@ -85,6 +85,12 @@ final class ArchiveAuditAndHistoryTests:XCTestCase {
         XCTAssertEqual(report.count(.extra),2)
         XCTAssertEqual(report.queuedRepairs,0)
         XCTAssertEqual(report.bytesRead,0)
+        XCTAssertEqual(report.sourceMetrics?.files,3)
+        XCTAssertEqual(report.destinationMetrics?.files,4)
+        XCTAssertEqual(report.metadataMatches,1)
+        XCTAssertEqual(report.hashMatches,0)
+        let decoded = try JSONDecoder().decode(ArchiveAuditReport.self,from:JSONEncoder().encode(report))
+        XCTAssertEqual(decoded,report)
         XCTAssertTrue(report.findings.allSatisfy{!$0.relativePath.hasPrefix(".macsync-")})
         XCTAssertTrue(try f.journal.pending().isEmpty)
     }

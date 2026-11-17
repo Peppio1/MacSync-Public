@@ -167,7 +167,7 @@ final class MacSyncRuntime: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self, self.auditRevision == revision, self.copy.auditSettings.enabled else { return }
                 if self.model.monitoring && self.model.safetyGate.isReady && !self.folderConfigurationBusy && !self.savingSchedule && !self.shuttingDown && self.copy.liveProgress == nil && !self.copy.interruptionRequested {
-                    self.copy.startArchiveAudit(sources:self.model.configuredPairs(),interactive:false)
+                    self.startScheduledArchiveAudit()
                 } else {
                     self.copy.noteAuditSkipped("monitoraggio locale non pronto; prossimo slot programmato")
                 }
@@ -176,6 +176,22 @@ final class MacSyncRuntime: ObservableObject {
         }
         RunLoop.main.add(timer,forMode:.common)
         auditTimer = timer
+    }
+
+    private func startScheduledArchiveAudit() {
+        guard !shuttingDown, !finalShutdownHolding, !copy.maintaining, !copy.seedBusy, !copy.seedReady, !copy.auditBusy, copy.liveProgress == nil else {
+            copy.noteAuditSkipped("sincronizzazione o manutenzione in corso"); return
+        }
+        configurationRevision += 1
+        let revision = configurationRevision
+        autoTimer?.invalidate(); autoTimer = nil; nextAutomaticAttempt = nil
+        if copy.active { copy.stop() }
+        copy.afterWorkerStopped { [weak self] in
+            guard let self, self.configurationRevision == revision, !self.shuttingDown, !self.finalShutdownHolding, self.copy.auditSettings.enabled else { return }
+            self.autoTimer?.invalidate(); self.autoTimer = nil; self.nextAutomaticAttempt = nil
+            self.copy.startArchiveAudit(sources:self.model.configuredPairs(),interactive:false)
+            if !self.copy.auditBusy { self.scheduleNextAutomaticAttempt() }
+        }
     }
 
     /// No install-capable Sparkle object exists before this gate succeeds.
@@ -535,21 +551,43 @@ final class MacSyncRuntime: ObservableObject {
         guard !finalShutdownChecking, let db = try? copy.historyPath() else { return }
         finalShutdownChecking = true
         let generation = finalShutdownGeneration
-        // Local database check only. No extra SMB enumeration or transfer.
+        let pairs = model.configuredPairs()
+        let gate = model.safetyGate
+        let token = gate.shutdownValidationToken()
+        if finalCheck { finalShutdownStatus = "Controllo finale sorgenti, destinazioni e coda prima dello spegnimento" }
         DispatchQueue.global(qos:.utility).async { [weak self] in
-            let empty = (try? ChangeJournal(path:db).pending(limit:1).isEmpty) == true
+            let empty: Bool = (try? { () throws -> Bool in
+                guard let token, gate.shutdownValidationStillValid(token) else { return false }
+                let journal = try ChangeJournal(path:db)
+                if finalCheck {
+                    guard !pairs.isEmpty else { return false }
+                    let maps = try pairs.map { try MountedFolderMapping(rootID:$0.id,source:URL(fileURLWithPath:$0.path),target:URL(fileURLWithPath:$0.destination),expectedTargetVolume:$0.expected) }
+                    try journal.verifyDirectoryBindings(maps)
+                    for map in maps {
+                        guard gate.shutdownValidationStillValid(token) else { return false }
+                        let scan = try LocalScanner.scan(root:map.source,shouldContinue:{ gate.shutdownValidationStillValid(token) })
+                        guard try journal.inventoryMatchesForShutdown(rootID:map.rootID,scanned:scan) else { return false }
+                    }
+                    try journal.verifyDirectoryBindings(maps)
+                }
+                return try journal.pending(limit:1).isEmpty && gate.shutdownValidationStillValid(token)
+            }()) == true
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.finalShutdownGeneration == generation, !self.shuttingDown else { return }
                 self.finalShutdownChecking = false
                 guard self.finalShutdownSlot == slot, self.copy.automaticCopiesEnabled,
                       !self.suspendedUntilNextLaunch, !self.folderConfigurationBusy, !self.savingSchedule,
-                      self.model.monitoring, self.model.safetyGate.isReady, !self.copy.maintaining,
+                      self.model.monitoring, token.map({ gate.shutdownValidationStillValid($0) }) == true, !self.copy.maintaining,
                       !self.copy.interruptionRequested, self.copy.liveProgress == nil,
                       let cycle = self.copy.lastRecordedCycle,
                       self.copy.historyWarning.isEmpty,
                       FinalShutdownPolicy.mayRequestShutdown(slot:slot,cycleStarted:cycle.started,
                           cycleState:cycle.state,errors:self.copy.lastCycleStats.failed,
                           deferred:self.copy.lastCycleStats.deferred,queueEmpty:empty,monitorReady:true) else {
+                    if finalCheck {
+                        self.resetFinalShutdown(message:"Spegnimento annullato: sorgenti, destinazioni o coda non confermate",resume:true)
+                        return
+                    }
                     if self.finalShutdownHolding {
                         self.finalShutdownHolding = false; self.finalShutdownDeadline = nil
                         self.finalShutdownForcedCycle = false
@@ -583,7 +621,7 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     private func sendFinalShutdownRequest() {
-        // The last queue check and cooldown have completed. osascript asks
+        // The last source/target and queue checks and cooldown have completed. osascript asks
         // System Events to shut down normally, respecting other applications.
         // macOS may request Automation permission or reject the request.
         finalShutdownChecking = true
@@ -618,7 +656,7 @@ final class MacSyncRuntime: ObservableObject {
         nextAutomaticAttempt = nil
         guard !shuttingDown, !savingSchedule, !folderConfigurationBusy, !suspendedUntilNextLaunch, !finalShutdownHolding,
               copy.automaticCopiesEnabled,
-              !copy.active, !copy.interruptionRequested, copy.liveProgress == nil else { return }
+              !copy.active, !copy.maintaining, !copy.auditBusy, !copy.interruptionRequested, copy.liveProgress == nil else { return }
         let schedule = settings.schedule
         let now = Date()
         let next = afterSlot.flatMap {

@@ -182,6 +182,26 @@ public struct MirrorAuthorization: Codable, Equatable, Sendable {
             baselineCount: count)
     }
 
+    /// Read-only candidates for display, not an authorization to execute deletion.
+    /// The ordinary worker must still evaluate every technical and mass-delete protection.
+    public func auditDeletionCandidates(journal: ChangeJournal, mappings: [MountedFolderMapping], shouldContinue: () -> Bool = { true }) throws -> Set<String> {
+        _ = try validated(journal:journal,mappings:mappings)
+        guard let upper = try journal.pendingDeleteUpperBound(afterID:cutoff) else { return [] }
+        var result = Set<String>()
+        var length = Int64.max, cursor: Int64 = 0
+        while true {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            let page = try journal.pendingDeletePage(afterID:cutoff,throughID:upper,previousLength:length,previousID:cursor,limit:1000)
+            if page.isEmpty { break }
+            for job in page where roots[job.rootID] != nil && WindowsPathSafety.validRelativePath(job.relativePath) {
+                result.insert(job.rootID + "\0" + job.relativePath)
+            }
+            guard let last = page.last else { break }
+            length = Int64(last.relativePath.unicodeScalars.count); cursor = last.id
+        }
+        return result
+    }
+
     fileprivate func validated(journal: ChangeJournal, mappings: [MountedFolderMapping]) throws -> [String: MirrorRootIdentity] {
         guard try journal.databaseIdentity() == databaseID,
               try journal.queueSequence() >= cutoff,

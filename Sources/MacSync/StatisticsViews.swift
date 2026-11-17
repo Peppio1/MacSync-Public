@@ -491,7 +491,6 @@ struct ArchiveAuditPanel: View {
     @ObservedObject var model: MacSyncViewModel
     @State private var selectedFinding: AuditFindingKind?
     @State private var showFindings = false
-    @State private var recognize = true
     @Environment(\.macSyncLayout) private var layout
     private var detailFont: Font { .system(size: layout.compact ? 11 : 12) }
 
@@ -515,7 +514,7 @@ struct ArchiveAuditPanel: View {
         }
         .sheet(isPresented: $showFindings) {
             if let report = copy.auditReport {
-                AuditResultSheet(model: model, report: report, kind: selectedFinding)
+                AuditResultSheet(model: model, findings: report.findings, kind: selectedFinding)
             }
         }
     }
@@ -535,16 +534,11 @@ struct ArchiveAuditPanel: View {
                 : "Confronta il contenuto dei file tramite SHA-256; può leggere l’intero archivio via VPN.")
                 .font(detailFont).foregroundStyle(.secondary)
             Divider()
-            MacSyncSwitchRow("Accoda file mancanti e differenti", isOn: $copy.auditSettings.repair)
-            Text("Prepara le copie e gli aggiornamenti necessari.").font(detailFont).foregroundStyle(.secondary)
-            Divider()
-            MacSyncSwitchRow("Riconosci i file già copiati", isOn: $recognize)
-            if recognize && copy.auditBusy { Text("Attivo · bloccato durante la verifica").font(detailFont).foregroundStyle(Color.accentColor) }
-            Text("Riconosce automaticamente i file corrispondenti con il metodo scelto; non modifica le destinazioni. Le copie restano sospese fino alla riattivazione manuale. I soli metadati non provano l'identità del contenuto.")
+            Text("Ogni verifica riconosce i file corrispondenti e accoda quelli mancanti o differenti, dopo il backup del database. I soli metadati non provano l'identità del contenuto. Nessun file sul server viene modificato durante la verifica.")
                 .font(detailFont).foregroundStyle(.secondary)
             Divider()
             MacSyncSwitchRow("Programma verifica automatica", isOn: $copy.auditSettings.enabled)
-            Text("Verifiche periodiche senza riconoscimento automatico.").font(detailFont).foregroundStyle(.secondary)
+            Text("Le verifiche programmate utilizzano lo stesso metodo e preparano la coda.").font(detailFont).foregroundStyle(.secondary)
             if copy.auditSettings.enabled {
                 scheduleControls
                 if let next = runtime.nextAuditAt {
@@ -616,8 +610,7 @@ struct ArchiveAuditPanel: View {
                     Button("Sospendi copie") { runtime.stopCopiesForCurrentLaunch() }
                 } else {
                     Button("Avvia verifica") {
-                        if recognize { runtime.stopCopiesForCurrentLaunch() }
-                        copy.startArchiveAudit(sources: model.configuredPairs(), interactive: true, recognizeExisting: recognize)
+                        copy.startArchiveAudit(sources: model.configuredPairs(), interactive: true)
                     }.buttonStyle(.borderedProminent)
                         .disabled(busy || !model.monitoring || copy.liveProgress != nil || copy.seedReady)
                         .auditPreviewBounds("start", enabled: runtime.previewOnly)
@@ -636,23 +629,15 @@ struct ArchiveAuditPanel: View {
                     Text("Durata: " + elapsedText(report.seconds)).font(detailFont).monospacedDigit()
                 }
                 Divider()
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], alignment: .leading, spacing: 4) {
-                    ForEach(AuditFindingKind.allCases, id: \.rawValue) { kind in
-                        Button {
-                            selectedFinding = kind; showFindings = true
-                        } label: {
-                            resultRow(shortFindingLabel(kind), report.count(kind).formatted())
-                        }.buttonStyle(.plain)
-                            .help(kind.label + " — mostra dettaglio")
-                            .accessibilityLabel(kind.label + ": " + report.count(kind).formatted())
-                    }
-                }
+                AuditArchiveComparison(source:report.sourceMetrics,destination:report.destinationMetrics,showSpeed:false)
+                AuditFindingCards(model:model,findings:report.findings,deletionCandidates:report.deletionCandidates ?? [],partial:false)
                 HStack {
-                    Text("Accodati: \(report.queuedRepairs.formatted())").font(detailFont).foregroundStyle(.secondary)
+                    Text("Solo destinazione: \(report.count(.extra).formatted()) · Non verificabili: \(report.count(.uncertain).formatted())").font(detailFont).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.75)
                     Spacer(minLength: 4)
-                    Button("Visualizza report…") {
-                        selectedFinding = nil; showFindings = true
-                    }
+                    Button("Visualizza report…") { selectedFinding = nil; showFindings = true }
+                }
+                if let metadata = report.metadataMatches, let hashes = report.hashMatches {
+                    Text("Corrispondenze file: metadati \(metadata.formatted()) · SHA-256 \(hashes.formatted())").font(detailFont).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.75)
                 }
             } else {
                 Text("Nessuna verifica completata").font(detailFont).foregroundStyle(.secondary)
@@ -739,19 +724,7 @@ struct CompactArchiveAuditProgress: View {
                     metric("Velocità lettura",SyncLiveProgress.formatRate(progress.compareRate))
                 }
                 Divider()
-                side("Sorgente",progress.source)
-                side("Destinazione",progress.destination)
-            }
-        }
-    }
-    private func side(_ name:String,_ data:AuditSideMetrics) -> some View {
-        VStack(alignment:.leading,spacing:2) {
-            Text(name).font(.caption.weight(.semibold))
-            HStack(spacing:5) {
-                metric("File",data.files.formatted())
-                metric("Cartelle",data.directories.formatted())
-                metric("Dimensione",sizeText(data.detectedBytes))
-                metric(data.bytesRead > 0 ? "Lettura media" : "Scansione",data.bytesRead > 0 ? SyncLiveProgress.formatRate(data.meanReadRate) : data.scanRate.map { "\($0.formatted(.number.precision(.fractionLength(0)))) file/s" } ?? "—")
+                AuditArchiveComparison(source:progress.source,destination:progress.destination,showSpeed:true)
             }
         }
     }
@@ -763,29 +736,93 @@ struct CompactArchiveAuditProgress: View {
     }
 }
 
+struct AuditArchiveComparison: View {
+    let source: AuditSideMetrics?
+    let destination: AuditSideMetrics?
+    let showSpeed: Bool
+    @Environment(\.macSyncLayout) private var layout
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        HStack(alignment:.top,spacing:6) {
+            side("Sorgente",source)
+            side("Destinazione",destination)
+        }
+    }
+    private func side(_ title:String,_ metrics:AuditSideMetrics?) -> some View {
+        VStack(alignment:.leading,spacing:2) {
+            Label(title,systemImage:"folder").font(.caption.weight(.semibold))
+            Divider()
+            row("File",metrics.map { $0.files.formatted() } ?? "—")
+            row("Cartelle",metrics.map { $0.directories.formatted() } ?? "—")
+            row("Dimensione",metrics.map { sizeText($0.detectedBytes) } ?? "—")
+            if showSpeed, let metrics {
+                row(metrics.bytesRead > 0 ? "Lettura media" : "Scansione",metrics.bytesRead > 0 ? SyncLiveProgress.formatRate(metrics.meanReadRate) : metrics.scanRate.map { "\($0.formatted(.number.precision(.fractionLength(0)))) file/s" } ?? "—")
+            }
+        }.padding(layout.compact ? 4 : 6).frame(maxWidth:.infinity,alignment:.leading)
+            .background(MacSyncColors.inset(scheme),in:RoundedRectangle(cornerRadius:6))
+    }
+    private func row(_ label:String,_ value:String) -> some View {
+        HStack(spacing:3) { Text(label).foregroundStyle(.secondary).lineLimit(1); Spacer(minLength:2); Text(value).monospacedDigit().fontWeight(.semibold).lineLimit(1).minimumScaleFactor(0.65) }.font(.system(size:layout.compact ? 10 : 11))
+    }
+}
+
+struct AuditFindingCards: View {
+    @ObservedObject var model: MacSyncViewModel
+    let findings: [AuditFinding]
+    let deletionCandidates: Set<String>
+    let partial: Bool
+    @State private var selection: AuditFindingKind?
+    @State private var showing = false
+    private func rows(_ kind:AuditFindingKind) -> [AuditFinding] {
+        findings.filter { $0.objectKind == "file" && $0.kind == kind && (kind != .extra || deletionCandidates.contains($0.id)) }
+    }
+    var body: some View {
+        VStack(alignment:.leading,spacing:3) {
+            HStack(spacing:6) {
+                card(.missing,"Nuovi da copiare","doc.badge.plus")
+                card(.different,"Da aggiornare","arrow.triangle.2.circlepath")
+                card(.extra,"Da eliminare","trash")
+            }
+            if partial { Text("Differenze rilevate finora · risultati parziali").font(.caption2).foregroundStyle(.secondary) }
+            else { Text("Risultati dell'ultima verifica · eliminazioni soggette alle protezioni").font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.75) }
+        }
+        .sheet(isPresented:$showing) {
+            if let selection {
+                AuditResultSheet(model:model,findings:rows(selection),kind:nil,title:selection == .extra ? "Candidati alla cancellazione" : selection == .missing ? "Nuovi da copiare" : "Da aggiornare")
+            }
+        }
+    }
+    private func card(_ kind:AuditFindingKind,_ title:String,_ symbol:String) -> some View {
+        Button { selection = kind; showing = true } label: {
+            SyncSummaryMetric(title:title,count:rows(kind).count,symbol:symbol)
+        }.buttonStyle(.plain).help("Mostra i file: " + title)
+    }
+}
+
 private struct AuditResultSheet:View {
     @ObservedObject var model:MacSyncViewModel
-    let report:ArchiveAuditReport
+    let findings:[AuditFinding]
     let kind:AuditFindingKind?
+    var title: String? = nil
     @State private var search=""
     @State private var root=""
     @State private var selected:String?
     @State private var message=""
     @Environment(\.dismiss) private var dismiss
     private var rows:[AuditFinding] {
-        report.findings.filter { f in
+        findings.filter { f in
             (kind==nil || kind==f.kind) && (root.isEmpty || root==f.rootID) &&
             (search.isEmpty || f.relativePath.localizedCaseInsensitiveContains(search))
         }
     }
     var body:some View {
         VStack(alignment:.leading,spacing:8) {
-            HStack {Text(kind?.label ?? "Risultato verifica completa").font(.title2.bold());Spacer();Button("Chiudi"){dismiss()} }
+            HStack {Text(title ?? kind?.label ?? "Risultato verifica completa").font(.title2.bold());Spacer();Button("Chiudi"){dismiss()} }
             HStack {
                 TextField("Cerca per percorso",text:$search)
                 Picker("Coppia",selection:$root) {
                     Text("Tutte").tag("")
-                    ForEach(Set(report.findings.map(\.rootID)).sorted(),id:\.self){ Text($0).tag($0) }
+                    ForEach(Set(findings.map(\.rootID)).sorted(),id:\.self){ Text($0).tag($0) }
                 }.frame(width:240)
             }
             Table(rows,selection:$selected) {
@@ -805,7 +842,7 @@ private struct AuditResultSheet:View {
         }.padding(18).frame(width:1000,height:600)
     }
     private func open(_ show:Bool) {
-        guard let f=report.findings.first(where:{$0.id==selected}) else{return}
+        guard let f=findings.first(where:{$0.id==selected}) else{return}
         let destination=f.kind == .extra || f.kind == .matching
         let root=destination ? f.targetRoot:f.sourceRoot
         message=openArchivePath(root:root,relative:f.relativePath,showFile:show,rootID:f.rootID,destination:destination,model:model) ?? ""

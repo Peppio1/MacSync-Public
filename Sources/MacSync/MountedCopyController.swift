@@ -34,14 +34,14 @@ final class MountedCopyController: ObservableObject {
         recentEntries = entries
         previewStatus = "Confronto iniziale non eseguito"
         auditSettings.enabled = false; auditSettings.repair = false; auditSettings.mode = .deep
-        if page == .overview {
+        if page == .overview && lastAudit == nil {
             active = true; automaticSession = true
             var progress = SyncLiveProgress(started: Date().addingTimeInterval(-155), planned: 46)
             progress.workStarted = Date().addingTimeInterval(-140)
             progress.processed = 24; progress.phase = "Trasferimento"; progress.currentFile = "Cartella_1 / IMG_0042.dng"
             progress.copiedBytes = 124000000; progress.copySeconds = 10
             liveProgress = progress
-        } else if page == .audit {
+        } else if page == .audit || page == .overview {
             auditReport = lastAudit
             auditSettings.enabled = true; auditSettings.frequency = "weekly"; auditSettings.weekday = 2; auditSettings.hour = 8; auditSettings.minute = 0
             auditBusy = auditInProgress; maintaining = auditInProgress
@@ -58,6 +58,8 @@ final class MountedCopyController: ObservableObject {
             progress.destination.bytesRead = 160000000; progress.destination.readSeconds = 12
             progress.comparisonStarted = Date().addingTimeInterval(-22)
             progress.bytesRead = 320000000; progress.currentPath = "Foto_caricate / IMG_0042.dng"
+            progress.differences = lastAudit?.findings.filter { $0.objectKind == "file" && $0.kind != .matching } ?? []
+            progress.deletionCandidates = lastAudit?.deletionCandidates ?? []
             auditProgress = progress; auditStatus = "Verifica in corso"
         }
     }
@@ -187,14 +189,14 @@ final class MountedCopyController: ObservableObject {
     /// Both scheduled audit and ordinary copy use the SAME serial queue.
     /// A request during an active cycle waits for that cycle to finish.
     func startArchiveAudit(sources: [(id:String,path:String,destination:String,expected:VolumeFingerprint?)],
-                           interactive: Bool, recognizeExisting: Bool = false) {
+                           interactive: Bool) {
         guard monitorGate.isReady, !interruptionRequested, liveProgress == nil, !auditBusy && !maintaining && !seedBusy && !seedReady else {
             if !interactive { noteAuditSkipped("verifica, conferma o manutenzione in corso") }
             return
         }
         let settings = auditSettings
-        let recognize = interactive && recognizeExisting
-        guard !recognize || (!active && liveProgress == nil && !interruptionRequested) else { auditStatus = "Sospendi le copie prima del riconoscimento"; return }
+        guard !active && liveProgress == nil && !interruptionRequested else { auditStatus = "Sospendi le copie prima del riconoscimento"; return }
+        let authorization = mirrorEnabled ? mirrorAuthorization : nil
         let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
         guard !configured.isEmpty,
               configured.allSatisfy({ !$0.path.isEmpty && !$0.destination.isEmpty && $0.expected?.isStrongIdentity == true })
@@ -206,8 +208,7 @@ final class MountedCopyController: ObservableObject {
                 ? "La verifica SHA-256 legge integralmente i file confrontabili, anche via VPN. "
                 : settings.mode == .intelligent ? "Metadati e SHA-256 per file di uguale dimensione con date differenti. "
                 : "La verifica rapida confronta percorso, dimensione e data; non garantisce identità del contenuto. ")
-                + (settings.repair ? "Le differenze sicure verranno accodate come copie/aggiornamenti." : recognize ? "Nessuna riparazione verrà accodata." : "Modalità solo diagnostica.")
-                + (recognize ? " I file corrispondenti saranno riconosciuti automaticamente nella coda, senza scrivere sulle destinazioni." : "")
+                + "I file corrispondenti saranno riconosciuti e le differenze sicure accodate automaticamente dopo un backup del database. Nessuna scrittura sulle destinazioni."
                 + " Nessun file presente soltanto sul server verrà cancellato."
             alert.addButton(withTitle:"Avvia verifica"); alert.addButton(withTitle:"Annulla")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -231,7 +232,7 @@ final class MountedCopyController: ObservableObject {
             var last=ArchiveAuditProgress(started:started)
             last.phase="Preparazione verifica"
             var currentRoot="app"
-            try? auditLog?.record(level:.info,rootID:"app",action:"audit_start",message:"ID \(auditID) — " + (settings.mode.label + " avviata") + "; riconoscimento: \(recognize); riparazioni: \(settings.repair)")
+            try? auditLog?.record(level:.info,rootID:"app",action:"audit_start",message:"ID \(auditID) — " + settings.mode.label + " avviata; riconoscimento e accodamento automatici")
             do {
                 if cancel.isCancelled { throw SeedVerificationError.cancelled }
                 let journal = try ChangeJournal(path:db.path)
@@ -243,9 +244,6 @@ final class MountedCopyController: ObservableObject {
                 currentRoot="app"
                 last.phase="Controllo identità cartelle"
                 try journal.verifyDirectoryBindings(maps,allowNewTarget:interactive)
-                let report: ArchiveAuditReport
-                let recognition: SeedVerificationReport?
-                let acknowledged: Int
                 let diagnostic: (ArchiveAuditProgress) -> Void = { last=$0 }
                 let progress: (ArchiveAuditProgress) -> Void = { snapshot in
                     DispatchQueue.main.async { [weak self] in
@@ -253,28 +251,39 @@ final class MountedCopyController: ObservableObject {
                         self?.auditStatus = snapshot.phase
                     }
                 }
-                if recognize {
-                    let local = try SeededArchiveSession(database:db,mappings:maps)
-                    let result = try local.auditAndRecognize(mode:settings.mode,repair:settings.repair,cancellation:cancel,diagnostic:diagnostic,progress:progress)
-                    report = result.audit; recognition = result.recognition
-                    var recognitionProgress = last
-                    recognitionProgress.phase = "Riconoscimento automatico"
-                    recognitionProgress.comparisonStarted = Date()
-                    recognitionProgress.total = result.recognition.matches.count
-                    recognitionProgress.compared = 0
-                    recognitionProgress.currentPath = ""
+                // Verify and preserve a standalone local snapshot before ANY queue updates.
+                last.phase = "Backup preventivo database"; progress(last)
+                let backupDir = db.deletingLastPathComponent().appendingPathComponent("audit-backups",isDirectory:true)
+                try FileManager.default.createDirectory(at:backupDir,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+                let backup = backupDir.appendingPathComponent(auditID+".sqlite")
+                try ArchiveDatabaseSafety.backup(db,to:backup)
+                try? auditLog?.record(level:.info,rootID:"app",action:"audit_backup",message:backup.path)
+                guard cancel.mayCommit else { throw SeedVerificationError.cancelled }
+                let candidates = (try? authorization?.auditDeletionCandidates(journal:journal,mappings:maps,shouldContinue:{ !cancel.isCancelled })) ?? []
+                let local = try SeededArchiveSession(database:db,mappings:maps)
+                let result = try local.auditAndRecognize(mode:settings.mode,repair:true,cancellation:cancel,diagnostic:diagnostic,progress:progress,deletionCandidates:candidates)
+                var report = result.audit
+                let recognition = result.recognition
+                var recognitionProgress = last
+                recognitionProgress.phase = "Riconoscimento automatico"
+                recognitionProgress.comparisonStarted = Date()
+                recognitionProgress.total = recognition.matches.count
+                recognitionProgress.compared = 0
+                recognitionProgress.currentPath = ""
+                diagnostic(recognitionProgress); progress(recognitionProgress)
+                let acknowledged = try local.approve(report:recognition,cancellation:cancel,progress:{ processed,total in
+                    recognitionProgress.compared = processed
+                    recognitionProgress.total = total
                     diagnostic(recognitionProgress); progress(recognitionProgress)
-                    acknowledged = try local.approve(report:result.recognition,cancellation:cancel,progress:{ processed,total in
-                        recognitionProgress.compared = processed
-                        recognitionProgress.total = total
-                        diagnostic(recognitionProgress); progress(recognitionProgress)
-                    })
-                    try? auditLog?.record(level:.info,rootID:"app",action:"seed_recognized",message:settings.mode.label + ": " + String(acknowledged) + " file riconosciuti automaticamente; nessuna scrittura sul server")
-                } else {
-                    report = try ArchiveAudit(journal:journal,mappings:maps).run(mode:settings.mode,repair:settings.repair,cancellation:cancel,diagnostic:diagnostic,progress:progress)
-                    recognition = nil; acknowledged = 0
-                }
-
+                },onCommit:{
+                    recognitionProgress.phase = "Finalizzazione database"
+                    recognitionProgress.comparisonStarted = nil
+                    diagnostic(recognitionProgress); progress(recognitionProgress)
+                })
+                report.recognizedFiles = acknowledged
+                let savedReport = report
+                try? auditLog?.record(level:.info,rootID:"app",action:"seed_recognized",message:settings.mode.label + ": " + String(acknowledged) + " file riconosciuti automaticamente; nessuna scrittura sul server")
+ 
                 var storageWarning = ""
                 do {
                     let data = try JSONEncoder().encode(report)
@@ -287,17 +296,15 @@ final class MountedCopyController: ObservableObject {
                 }
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
-                    self.onQueueChanged?()
-                    self.auditReport = report
-                    if let recognition {
-                        self.seedReady = false; self.seedVerifiedCount = acknowledged
-                        self.seedInspectedCount = recognition.inspected; self.seedReadBytes = recognition.bytesRead
-                        self.seedStatus = "Allineamento automatico: \(acknowledged) file riconosciuti su \(recognition.verifiedCount) candidati"
-                    }
-                    self.auditStatus = "Verifica conclusa: " + String(report.queuedRepairs) + " riparazioni accodate" + (recognize ? "; \(acknowledged) file riconosciuti" : "") + warning
+                    self.auditReport = savedReport
+                    self.seedReady = false; self.seedVerifiedCount = acknowledged
+                    self.seedInspectedCount = recognition.inspected; self.seedReadBytes = recognition.bytesRead
+                    self.seedStatus = "Allineamento automatico: \(acknowledged) file riconosciuti su \(recognition.verifiedCount) candidati"
+                    self.auditStatus = "Verifica conclusa: " + String(savedReport.queuedRepairs) + " riparazioni accodate; \(acknowledged) file riconosciuti" + warning
                     self.auditProgress = nil
                     self.auditBusy = false
                     self.maintaining = false
+                    self.onQueueChanged?()
                 }
             } catch {
                 let block=gate.auditBlockReason(auditToken)
@@ -316,6 +323,7 @@ final class MountedCopyController: ObservableObject {
                     self?.auditProgress = nil
                     self?.auditBusy = false
                     self?.maintaining = false
+                    self?.onQueueChanged?()
                 }
             }
         }

@@ -29,7 +29,7 @@ permissions:
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 35
+    timeout-minutes: 60
     outputs:
       approved_brand: ${{ steps.brand.outputs.approved }}
     steps:
@@ -52,6 +52,10 @@ jobs:
           echo "Approved original: $approved"
       - name: Tests
         run: swift test -Xswiftc -warnings-as-errors
+      - name: Large archive recognition benchmark (200000 files per side)
+        env:
+          MACSYNC_LARGE_AUDIT: '1'
+        run: swift test -Xswiftc -warnings-as-errors --filter SeededArchiveVerifierTests/testLargeArchiveRecognition200000Files
       - name: Release build for Apple Silicon and Intel
         run: |
           set -euo pipefail

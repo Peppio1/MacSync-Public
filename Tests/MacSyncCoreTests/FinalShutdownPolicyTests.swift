@@ -9,6 +9,17 @@ final class FinalShutdownPolicyTests: XCTestCase {
         policy.enabled = true; policy.weekdays = []
         XCTAssertNil(policy.next(after:Date()))
     }
+    func testShutdownValidationTokenInvalidatedByOrdinaryReconciliation() {
+        let gate = MonitorSafetyGate()
+        let generation = gate.invalidate()
+        gate.setReady(true,generation:generation)
+        guard let token = gate.shutdownValidationToken() else { return XCTFail("Missing token") }
+        XCTAssertTrue(gate.shutdownValidationStillValid(token))
+        gate.beginReconciliation(generation:generation)
+        gate.setReady(true,generation:generation)
+        XCTAssertFalse(gate.shutdownValidationStillValid(token))
+        XCTAssertNotNil(gate.shutdownValidationToken())
+    }
     func testNextSlotIsFutureAndSelectedWeekday() throws {
         var calendar = Calendar(identifier:.gregorian)
         calendar.timeZone = try XCTUnwrap(TimeZone(identifier:"Europe/Rome"))

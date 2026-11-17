@@ -186,7 +186,8 @@ public final class SeededArchiveVerifier {
     public func approve(
         report: SeedVerificationReport,
         cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
-        progress: ((Int, Int) -> Void)? = nil
+        progress: ((Int, Int) -> Void)? = nil,
+        onCommit: () -> Void = {}
     ) throws -> Int {
         var stillValid: [SeedVerifiedMatch] = []
         for (index, match) in report.matches.enumerated() {
@@ -210,6 +211,7 @@ public final class SeededArchiveVerifier {
             }
         }
         if !cancellation.mayCommit { throw SeedVerificationError.cancelled }
+        onCommit()
         let sources = mappings.mapValues { $0.source.path }
         let changed = try journal.acknowledgeVerifiedFiles(
             stillValid, sourceRoots: sources, shouldContinue: { cancellation.mayCommit }
@@ -382,7 +384,8 @@ public struct SeededArchiveSession: Sendable {
         repair: Bool = false,
         cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
         diagnostic: (ArchiveAuditProgress) -> Void = { _ in },
-        progress: (ArchiveAuditProgress) -> Void = { _ in }
+        progress: (ArchiveAuditProgress) -> Void = { _ in },
+        deletionCandidates: Set<String> = []
     ) throws -> (audit: ArchiveAuditReport, recognition: SeedVerificationReport) {
         let journal = try openJournal()
         let upper = try journal.pendingUploadUpperBound() ?? 0
@@ -406,6 +409,10 @@ public struct SeededArchiveSession: Sendable {
         var matches: [SeedVerifiedMatch] = []
         let report = try ArchiveAudit(journal:journal,mappings:mappings).run(
             mode:mode,repair:repair,cancellation:cancellation,collectMetadataMatches:true,
+            shouldCollectMetadataMatch:{ root,path in
+                let key = root + "\0" + path
+                return pending[key] != nil && !ambiguous.contains(key)
+            },deletionCandidates:deletionCandidates,
             onVerifiedFile: { root,path,source,target in
                 let key = root + "\0" + path
                 guard !ambiguous.contains(key), let job = pending[key] else { return }
@@ -426,10 +433,11 @@ public struct SeededArchiveSession: Sendable {
     public func approve(
         report: SeedVerificationReport,
         cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
-        progress: ((Int, Int) -> Void)? = nil
+        progress: ((Int, Int) -> Void)? = nil,
+        onCommit: () -> Void = {}
     ) throws -> Int {
         let journal = try openJournal()
         let verifier = try SeededArchiveVerifier(journal: journal, mappings: mappings)
-        return try verifier.approve(report: report, cancellation: cancellation, progress:progress)
+        return try verifier.approve(report: report, cancellation: cancellation, progress:progress,onCommit:onCommit)
     }
 }
