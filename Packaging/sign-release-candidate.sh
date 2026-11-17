@@ -36,7 +36,7 @@ cat > signing-output/appcast.xml <<XML
 <sparkle:version>180</sparkle:version>
 <sparkle:shortVersionString>0.18.0</sparkle:shortVersionString>
 <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-<description>Identità grafica, installer DMG e guida al primo avvio.</description>
+<description>Riepilogo per ciclo, avanzamento ed ETA, diagnostica e log tecnico, controlli cartelle e miglioramenti alla verifica archivio.</description>
 <enclosure url="https://github.com/Peppio1/MacSync-Public/releases/download/v0.18.0/$name" sparkle:edSignature="$sig" length="$length" type="application/octet-stream"/>
 </item></channel></rss>
 XML
