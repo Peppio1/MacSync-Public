@@ -2,19 +2,19 @@
 
 **Sincronizzazione unidirezionale nativa per macOS, verso cartelle locali o condivisioni SMB.**
 
-![Versione](https://img.shields.io/badge/version-0.15.0-blue)
+![Versione](https://img.shields.io/badge/version-0.16.0--dev-blue)
 ![Piattaforma](https://img.shields.io/badge/platform-macOS-lightgrey)
 [![macOS CI](https://github.com/Peppio1/MacSync-Public/actions/workflows/macos-ci.yml/badge.svg?branch=main)](https://github.com/Peppio1/MacSync-Public/actions/workflows/macos-ci.yml)
 
 MacSync è un'applicazione desktop sviluppata in Swift e SwiftUI per replicare cartelle di lavoro del Mac su una destinazione locale o di rete, senza installare componenti sul server. La sorgente rimane l'unica fonte di verità: nessuna sincronizzazione inversa.
 
-> **Stato: v0.15.0 — consolidamento in validazione; pre-release solo dopo CI verde.** I test su cartelle locali macOS sono superati. Il collaudo su iMac, SMB/VPN reale e applicazione installata è ancora necessario. Non utilizzare con dati di produzione prima del collaudo.
+> **Stato: v0.16.0 in sviluppo — rilevamento aggiornamenti; installazione automatica non attiva.** La pre-release v0.15.0 è la baseline convalidata. I test su cartelle locali macOS sono superati. Il collaudo su iMac, SMB/VPN reale e applicazione installata è ancora necessario. Non utilizzare con dati di produzione prima del collaudo.
 
 ## Download
 
-### MacSync v0.15.0 — candidata alla baseline
+### MacSync v0.15.0 — pre-release convalidata
 
-La distribuzione universale Intel/Apple Silicon sarà disponibile nella [pre-release v0.15.0](https://github.com/Peppio1/MacSync-Public/releases/tag/v0.15.0) soltanto dopo il superamento del workflow di consolidamento. Il pacchetto previsto è `MacSync-v0.15.0-macOS-universal.zip`, accompagnato dal checksum SHA-256. Non notarizzato; solo per collaudo.
+[Scarica MacSync v0.15.0 (universale)](https://github.com/Peppio1/MacSync-Public/releases/download/v0.15.0/MacSync-v0.15.0-macOS-universal.zip) · [SHA-256](https://github.com/Peppio1/MacSync-Public/releases/download/v0.15.0/MacSync-v0.15.0-macOS-universal.zip.sha256) · [Release](https://github.com/Peppio1/MacSync-Public/releases/tag/v0.15.0). Non notarizzato, solo per collaudo.
 
 ### MacSync v0.14.3 — ultima build già verificata
 
@@ -155,6 +155,13 @@ Il successivo obiettivo è consolidare la v0.15.0 e procedere con le funzionalit
 ## Cronologia e changelog
 
 Le versioni sono riportate dalla più recente alla più vecchia. Lo storico descrive lo sviluppo progressivo: le impostazioni e i limiti delle vecchie versioni non sostituiscono quelli della versione attuale.
+
+### v0.16.0 — sviluppo aggiornamenti (prima fase)
+
+- Pannello aggiornamenti nelle Impostazioni e comando dalla barra menu.
+- Controllo manuale e automatico delle release stabili; nessuna installazione non autenticata.
+- Preparazione componente di snapshot di recupero, da integrare nel ciclo di arresto e installazione.
+- Sparkle, firma Ed25519, appcast e rollback operativo ancora da completare; nessuna release v0.16.0 pubblicata.
 
 ### v0.15.0 — consolidamento
 

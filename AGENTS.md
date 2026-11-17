@@ -22,3 +22,6 @@ Consultare [README.md](README.md) e [architettura corrente](docs/ARCHITECTURE.md
 ## Riferimenti
 
 [Baseline convalidata](https://github.com/Peppio1/MacSync-Public/actions/runs/43985988474) · [Rollback](https://github.com/Peppio1/MacSync-Public/tree/rollback-v0.14.3-validated) · [Storico sviluppo](docs/DEVELOPMENT_HISTORY.md).
+
+## Aggiornamenti v0.16.0
+Non abilitare installazione automatica o manuale in-app senza firma Ed25519 verificata, feed e chiave pubblica incorporata, shutdown con backup verificato e rollback collaudati. Non pubblicare chiavi private nel repository o nei log. Baseline rollback-before-v0.16.0-updater.

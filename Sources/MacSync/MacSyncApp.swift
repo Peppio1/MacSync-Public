@@ -1108,11 +1108,12 @@ struct MacSyncConfigurationView: View {
             }
             }.frame(maxWidth:.infinity,alignment:.topLeading)
             }.fixedSize(horizontal:false,vertical:true)
+            SoftwareUpdatesPanel(updates: runtime.updates)
             MacSyncPanel("Informazioni", icon: "info.circle", accent: false) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("MacSync · v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.15.0")").font(.subheadline.weight(.semibold))
-                        Text("Registro SQLite locale · Aggiornamenti manuali").font(.caption).foregroundStyle(.secondary)
+                        Text("MacSync · v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.16.0")").font(.subheadline.weight(.semibold))
+                        Text("Registro SQLite locale").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
                     Button("Esporta registro…") { copy.exportLog() }
@@ -1520,6 +1521,9 @@ private struct MacSyncStatusMenu: View {
                 NSApplication.shared.activate(ignoringOtherApps: true)
             }
             Divider()
+            Button("Controlla aggiornamenti…") { runtime.updates.check() }
+                .disabled(runtime.shuttingDown)
+            Divider()
             Button("Esci") {
                 NSApplication.shared.terminate(nil)
             }
@@ -1551,5 +1555,38 @@ struct MacSyncApp: App {
             )
         }
         .menuBarExtraStyle(.window)
+    }
+}
+
+ 
+struct SoftwareUpdatesPanel: View {
+    @ObservedObject var updates: SoftwareUpdateController
+    var body: some View {
+        MacSyncPanel("Aggiornamenti software", icon: "arrow.triangle.2.circlepath", accent: false) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(updates.versionLabel).font(.subheadline.weight(.semibold))
+                    Text("Ultimo controllo: " + (updates.lastCheck.map(macSyncDateTime) ?? "mai"))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if updates.checking { ProgressView().controlSize(.small) }
+                Button("Controlla") { updates.check() }.disabled(updates.checking)
+            }
+            MacSyncSwitchRow("Controllo automatico", isOn: Binding(
+                get: { updates.automatic }, set: { updates.setAutomatic($0) }))
+            if !updates.status.isEmpty {
+                HStack {
+                    Text(updates.status).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    if updates.available != nil {
+                        Button("Dettagli…") { updates.showAvailable() }
+                    }
+                }
+            }
+            Label("Installazione manuale; firma degli aggiornamenti non ancora configurata.", systemImage: "shield")
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }

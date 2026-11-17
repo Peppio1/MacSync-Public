@@ -18,6 +18,7 @@ final class MacSyncRuntime: ObservableObject {
     let previewOnly: Bool
     let model: MacSyncViewModel
     let copy: MountedCopyController
+    let updates: SoftwareUpdateController
     let settings: SyncSettingsController
     let destinations = DestinationStatusController()
 
@@ -42,6 +43,7 @@ final class MacSyncRuntime: ObservableObject {
         model = MacSyncViewModel(previewOnly: previewOnly)
         copy = MountedCopyController(previewOnly: previewOnly,monitorGate:model.safetyGate)
         settings = SyncSettingsController(previewOnly: previewOnly)
+        updates = SoftwareUpdateController(previewOnly: previewOnly)
         guard !previewOnly else {
             automaticStatus = "Copie automatiche abilitate"
             nextAutomaticAttempt = Date().addingTimeInterval(900)
@@ -70,6 +72,7 @@ final class MacSyncRuntime: ObservableObject {
         // automatic attempt is scheduled according to the chosen frequency.
         scheduleNextAutomaticAttempt()
         scheduleArchiveAudit()
+        updates.start()
     }
 
     deinit { autoTimer?.invalidate(); auditTimer?.invalidate() }
@@ -102,6 +105,7 @@ final class MacSyncRuntime: ObservableObject {
     func requestShutdown(_ completion: @escaping @MainActor () -> Void) {
         guard !shuttingDown else { return }
         shuttingDown = true
+        updates.stop()
         shutdownCompletion = completion
         folderEditCancellation?.cancel()
         stopAllOperations()

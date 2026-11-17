@@ -74,3 +74,7 @@ Ancora richiesti: durata reale e risorse dell'app installata, arresto/riavvio ef
 ## Rollback e privacy
 
 Baseline convalidata conservata nel ramo [rollback-before-endurance-validation](https://github.com/Peppio1/MacSync-Public/tree/rollback-before-endurance-validation). Il rollback Git protegge il codice, non i dati: interrompere tutte le istanze, conservare archivio corrente, verificare compatibilità di schema e preferenze e ripristinare eventualmente solo snapshot coerenti con autorizzazioni revocate. Non pubblicare percorsi privati, credenziali, database o dati reali.
+
+## Aggiornamenti v0.16.0 (sviluppo)
+
+Controller indipendente dal runtime di copia, disattivato in preview, arrestato durante shutdown. Il controllo consulta solo la release stabile pubblica GitHub; non scarica né esegue codice. Il componente UpdateRecoverySnapshot è una primitiva, non ancora collegata a un installatore. Vedi [piano e limiti](UPDATES.md).
