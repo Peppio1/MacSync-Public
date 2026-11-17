@@ -13,9 +13,21 @@ curl --fail --location --silent --show-error --retry 2 \
 mkdir "$work/sdk"
 tar -xJf "$work/sparkle.tar.xz" -C "$work/sdk"
 sign="$(find "$work/sdk" -type f -path '*/bin/sign_update' -print -quit)"
-framework="$(find "$work/sdk" -type d -name Sparkle.framework -print -quit)"
 test -x "$sign"
+# The tarball supplies signing tools; use the official SPM XCFramework
+# for compilation because its public module headers/map are provided.
+curl --fail --location --silent --show-error --retry 2 \
+  "https://github.com/sparkle-project/Sparkle/releases/download/2.10.0/Sparkle-for-Swift-Package-Manager.zip" \
+  --output "$work/sparkle-spm.zip"
+(cd "$work" && printf '%s  %s\n' '17e28312b8e18ab7cdbbe09a6fb28cc55a5479ec6c371dbc07cdecd2a14fd959' sparkle-spm.zip | shasum -a 256 -c -)
+mkdir "$work/spm"
+ditto -x -k "$work/sparkle-spm.zip" "$work/spm"
+framework="$(find "$work/spm" -type d -path '*/macos-*/Sparkle.framework' -print -quit)"
 test -d "$framework"
+find "$framework" -name '*.modulemap' -print
+test -f "$framework/Modules/module.modulemap"
+test -d "$framework/Headers"
+lipo "$framework/Sparkle" -verify_arch arm64 x86_64
 
 # Verify the external binary can be linked and loaded by the existing
 # Swift 5.9 / Xcode toolchain, including both architectures. Never start
@@ -36,6 +48,7 @@ struct Probe {
 SWIFT
 for arch in arm64 x86_64; do
   swiftc -parse-as-library -warnings-as-errors -target "$arch-apple-macos13.0" \
+    -Xcc "-fmodule-map-file=$work/Probe.app/Contents/Frameworks/Sparkle.framework/Modules/module.modulemap" \
     -F "$work/Probe.app/Contents/Frameworks" -framework Sparkle \
     -Xlinker -rpath -Xlinker '@loader_path/../Frameworks' \
     "$work/probe.swift" -o "$work/probe-$arch"
