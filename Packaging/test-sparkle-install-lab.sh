@@ -50,8 +50,8 @@ make_fixture() {
   codesign --force --sign - "$app"
   codesign --verify --deep --strict "$app"
 }
-make_fixture "$root/target/MacSync.app" 0.16.0 160 appcast.xml
-make_fixture "$root/new/MacSync.app" 0.16.1 161 appcast.xml
+make_fixture "$root/target/MacSync.app" 0.17.0 170 appcast.xml
+make_fixture "$root/new/MacSync.app" 0.17.1 171 appcast.xml
 ditto -c -k --sequesterRsrc --keepParent "$root/new/MacSync.app" "$root/www/update.zip"
 sig="$("$sign" -f "$key" -p "$root/www/update.zip")"
 "$sign" -f "$key" --verify "$root/www/update.zip" "$sig"
@@ -59,8 +59,8 @@ length="$(stat -f %z "$root/www/update.zip")"
 cat > "$root/www/appcast.xml" <<XML
 <?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel>
-<title>MacSync isolated test</title><item><title>MacSync 0.16.1</title>
-<sparkle:version>161</sparkle:version><sparkle:shortVersionString>0.16.1</sparkle:shortVersionString>
+<title>MacSync isolated test</title><item><title>MacSync 0.17.1</title>
+<sparkle:version>171</sparkle:version><sparkle:shortVersionString>0.17.1</sparkle:shortVersionString>
 <enclosure url="$feed/update.zip" sparkle:edSignature="$sig" length="$length" type="application/octet-stream"/>
 </item></channel></rss>
 XML
@@ -81,12 +81,12 @@ subprocess.run([sys.argv[1], sys.argv[2]], check=True, timeout=150)
 PY
   for i in $(seq 1 40); do
     result="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$root/target/MacSync.app/Contents/Info.plist" 2>/dev/null || true)"
-    test "$result" = 0.16.1 && break
+    test "$result" = 0.17.1 && break
     sleep 0.5
   done
-  test "$result" = 0.16.1
+  test "$result" = 0.17.1
   codesign --verify --deep --strict "$root/target/MacSync.app"
-  echo "Sparkle isolated installation 0.16.0 -> 0.16.1 succeeded."
+  echo "Sparkle isolated installation 0.17.0 -> 0.17.1 succeeded."
 }
 phase rollback prepare
 install_valid
@@ -102,7 +102,7 @@ phase success finish
 # signed feed and signature intact. No replacement may occur.
 mkdir "$root/bad"
 labid="org.macsync.ci.install-lab-tampered"
-make_fixture "$root/bad/MacSync.app" 0.16.0 160 appcast.xml
+make_fixture "$root/bad/MacSync.app" 0.17.0 170 appcast.xml
 # Use the same identifier as the update; distinct preferences are reset.
 # Distinct bundle ID itself would otherwise mask the signature test.
  /usr/libexec/PlistBuddy -c 'Set CFBundleIdentifier org.macsync.ci.install-lab' "$root/bad/MacSync.app/Contents/Info.plist"
@@ -128,7 +128,7 @@ print(r.stdout)
 if r.returncode not in (12,13) or "LAB: downloading" not in r.stdout or "SUSparkleErrorDomain:4005" not in r.stdout:
     raise SystemExit("Tampered test did not reach download followed by an updater error")
 PY
-test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$root/bad/MacSync.app/Contents/Info.plist")" = 0.16.0
+test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$root/bad/MacSync.app/Contents/Info.plist")" = 0.17.0
 codesign --verify --deep --strict "$root/bad/MacSync.app"
 echo "Tampered archive did not replace the original application."
 phase tampered finish

@@ -2,13 +2,13 @@
 
 **Sincronizzazione unidirezionale nativa per macOS, verso cartelle locali o condivisioni SMB.**
 
-![Versione](https://img.shields.io/badge/version-0.16.0--dev-blue)
+![Versione](https://img.shields.io/badge/version-0.17.0--dev-blue)
 ![Piattaforma](https://img.shields.io/badge/platform-macOS-lightgrey)
 [![macOS CI](https://github.com/Peppio1/MacSync-Public/actions/workflows/macos-ci.yml/badge.svg?branch=main)](https://github.com/Peppio1/MacSync-Public/actions/workflows/macos-ci.yml)
 
 MacSync è un'applicazione desktop sviluppata in Swift e SwiftUI per replicare cartelle di lavoro del Mac su una destinazione locale o di rete, senza installare componenti sul server. La sorgente rimane l'unica fonte di verità: nessuna sincronizzazione inversa.
 
-> **Stato: v0.16.0 candidata in validazione — aggiornamenti firmati con conferma e recupero assistito.** La pre-release v0.15.0 è l’ultima pubblicata. CI macOS: 177 test superati, 0 errori, 48 anteprime, installazione Sparkle 0.16.0 → 0.16.1 e rifiuto ZIP manomesso convalidati nel [run 44066873367](https://github.com/Peppio1/MacSync-Public/actions/runs/44066873367). Il collaudo integrato aggiornamento/riavvio/recupero e la firma del nuovo candidato sono in validazione. Collaudo fisico su iMac, SMB/VPN e Gatekeeper ancora necessario. Non utilizzare dati reali prima del collaudo.
+> **Stato: v0.17.0 in validazione — icone, DMG e guida.** La v0.16.0 è convalidata in CI e firmata (run 44068276632), non pubblicata. L’ultima pre-release pubblica rimane v0.15.0. La nuova build non è da considerare definitiva finché il PNG esatto approvato non è presente e i nuovi test non sono superati. Collaudo fisico su iMac/SMB/VPN e Gatekeeper ancora necessario.
 
 ## Download
 
@@ -16,9 +16,9 @@ MacSync è un'applicazione desktop sviluppata in Swift e SwiftUI per replicare c
 
 [Scarica MacSync v0.15.0 (universale)](https://github.com/Peppio1/MacSync-Public/releases/download/v0.15.0/MacSync-v0.15.0-macOS-universal.zip) · [SHA-256](https://github.com/Peppio1/MacSync-Public/releases/download/v0.15.0/MacSync-v0.15.0-macOS-universal.zip.sha256) · [Release](https://github.com/Peppio1/MacSync-Public/releases/tag/v0.15.0). Non notarizzato, solo per collaudo.
 
-### MacSync v0.16.0 — candidata non pubblicata
+### MacSync v0.17.0 — in validazione, non pubblicata
 
-[Ultimo laboratorio di installazione superato](https://github.com/Peppio1/MacSync-Public/actions/runs/44066873367) · [Workflow correnti](https://github.com/Peppio1/MacSync-Public/actions). Gli artefatti CI richiedono accesso GitHub e scadono dopo 7 giorni. Nessuna release stabile: pacchetti ad hoc, non notarizzati, solo per test. Non usare le fixture del laboratorio come applicazioni reali.
+[v0.16.0: collaudo integrato e firma superati](https://github.com/Peppio1/MacSync-Public/actions/runs/44068276632) · [Workflow correnti](https://github.com/Peppio1/MacSync-Public/actions). Gli artefatti CI richiedono accesso GitHub e scadono dopo 7 giorni. Nessuna release stabile: pacchetti ad hoc, non notarizzati, solo per test. Non usare le fixture del laboratorio come applicazioni reali.
 
 ## Funzionalità
 
@@ -73,7 +73,7 @@ La CI assembla anche un bundle MacSync.app con firma ad hoc, non notarizzato. I 
 
 ### 1. Installazione su macOS
 
-Scaricare il pacchetto di prova, estrarre lo ZIP scaricato e, se presente un secondo archivio MacSync-prototype.zip, estrarre anche quello. Spostare MacSync.app nella cartella Applicazioni e avviarla. MacSync è un'applicazione della barra dei menu: da lì si apre la finestra di configurazione.
+Scaricare il pacchetto di prova. Aprire il DMG, trascinare MacSync.app su Applicazioni, leggere la guida illustrata inclusa, espellere il volume e avviare MacSync da Applicazioni. In alternativa estrarre lo ZIP e spostare MacSync.app in Applicazioni. MacSync è un'applicazione della barra dei menu: da lì si apre la finestra di configurazione.
 
 Essendo una build non notarizzata, macOS potrebbe impedirne l'apertura. Verificare provenienza e integrità del pacchetto prima di autorizzare eventualmente la singola applicazione nelle impostazioni Privacy e sicurezza. Non disattivare globalmente Gatekeeper. Usare soltanto file sintetici per il collaudo.
 
@@ -134,11 +134,11 @@ Se MacSync non si avvia e l’installatore è terminato, apri nel Finder la cart
 
 ## Stato della validazione
 
-Baseline pubblicata v0.15.0: [workflow 44047883363](https://github.com/Peppio1/MacSync-Public/actions/runs/44047883363). Ultima validazione completata v0.16.0: [56555ce](https://github.com/Peppio1/MacSync-Public/commit/56555ce8670b720e7ecec3841412791c448e1fe3), [workflow 44066873367](https://github.com/Peppio1/MacSync-Public/actions/runs/44066873367).
+Baseline pubblicata v0.15.0: [workflow 44047883363](https://github.com/Peppio1/MacSync-Public/actions/runs/44047883363). Ultima validazione completata v0.16.0: [e6ace65](https://github.com/Peppio1/MacSync-Public/commit/e6ace651f865f783779621bdc88e7d22d58d2cd4), [workflow 44068276632](https://github.com/Peppio1/MacSync-Public/actions/runs/44068276632).
 
 | Verifica | Risultato |
 |---|---|
-| Suite ordinaria | 177 superati, 0 falliti, 1 rendering opt-in separato (178 rilevati nell’ultimo run concluso) |
+| Suite ordinaria | 177 superati, 0 falliti, 2 opt-in (UI e recupero eseguiti separatamente); 179 rilevati |
 | Test integrato: due coppie, disconnessione simulata, backup e ripresa | Superato |
 | Carico sintetico: 40 cartelle, 360 file, quattro cicli di modifica | Superato |
 | Mirror definitivo e con recupero | Superato |
@@ -147,22 +147,30 @@ Baseline pubblicata v0.15.0: [workflow 44047883363](https://github.com/Peppio1/M
 | Compilazione universale v0.15.0 e v0.16.0 | Superata |
 | Firma Ed25519 di produzione (candidato precedente) | Superata nel run 44063365937 |
 | Installazione Sparkle e rifiuto archivio alterato | Superati nel run 44066873367 |
-| Recupero e preflight su processi separati, firma ultima build | In validazione |
+| Recupero e preflight su processi separati, firma v0.16.0 | Superati (44068276632) |
+| Branding, DMG, guida e regressione v0.17.0 | In validazione |
 | Durata reale e risorse app installata | Da collaudare |
 | Interazioni UI, avvio al login, arresto e SMB/VPN reale | Da collaudare |
 
-Il successivo obiettivo è completare la candidata v0.16.0, poi v0.17.0 (icone, DMG, guida) e collaudo reale. Nessuna versione 1.0 stabile è dichiarata.
+Il successivo obiettivo è validare v0.17.0, poi candidata 1.0.0-rc.1 e collaudo reale. Nessuna versione 1.0 stabile è dichiarata.
 
 ## Cronologia e changelog
 
 Le versioni sono riportate dalla più recente alla più vecchia. Lo storico descrive lo sviluppo progressivo: le impostazioni e i limiti delle vecchie versioni non sostituiscono quelli della versione attuale.
 
-### v0.16.0 — sistema aggiornamenti (candidata)
+### v0.17.0 — branding e installer (in validazione)
+
+- Icona Finder/Applicazioni .icns, marchio nella sidebar e simbolo monocromatico template della menu bar. Ilmaster approvato viene riconosciuto tramite SHA-256; fallback esclusivamente CI se assente.
+- DMG grafico drag-and-drop, guida HTML illustrata offline e ZIP universale per Sparkle.
+- Controlli risorse, montaggio e firma del DMG, regressione completa e test Sparkle isolati. Nessuna pubblicazione automatica.
+- [Guida installazione e distribuzione](docs/INSTALLATION.md).
+
+### v0.16.0 — sistema aggiornamenti (validato in CI)
 
 - Pannello aggiornamenti nelle Impostazioni e comando dalla barra menu.
 - Controllo manuale e automatico delle release stabili; nessuna installazione non autenticata.
 - Sparkle 2.10.0 integrato; feed e archivio firmati, conferma, arresto dei worker, backup e recupero assistito del solo bundle.
-- Firma di produzione e installazione isolata già provate; collaudo integrato del riavvio e firma dell’ultima build in validazione. Nessuna release v0.16.0 pubblicata.
+- Firma di produzione, installazione isolata e collaudo integrato del riavvio/rollback superati nel run 44068276632. Nessuna release v0.16.0 pubblicata.
 
 ### v0.15.0 — consolidamento
 
@@ -234,6 +242,8 @@ Per le modifiche tecniche dettagliate di ogni versione consultare lo [storico co
 
 ## Documentazione
 
+- [Installazione e primo avvio](docs/INSTALLATION.md)
+- [Aggiornamenti e recupero](docs/UPDATES.md)
 - [Architettura tecnica](docs/ARCHITECTURE.md)
 - [Contesto di sviluppo e regole di sicurezza](AGENTS.md)
 - [Note storiche di sviluppo](docs/DEVELOPMENT_HISTORY.md)

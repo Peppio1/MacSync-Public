@@ -11,6 +11,11 @@ on:
       - '.github/workflows/macos-ci.yml'
       - '.github/workflows/macos-ui-preview.yml'
   workflow_dispatch:
+    inputs:
+      sign_candidate:
+        description: 'Sign the verified candidate (approved branding required)'
+        type: boolean
+        default: false
 
 # One automatic macOS runner for functional tests, release and UI previews.
 # The separate UI workflow remains available for manual preview-only runs.
@@ -24,7 +29,9 @@ permissions:
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 25
+    timeout-minutes: 35
+    outputs:
+      approved_brand: ${{ steps.brand.outputs.approved }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -33,6 +40,16 @@ jobs:
         run: |
           xcodebuild -version
           swift --version
+      - name: Prepare branding and verify all icon resolutions
+        id: brand
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/macsync-packaging"
+          "$RUNNER_TEMP/macsync-packaging/bin/python" -m pip install --disable-pip-version-check -r Packaging/requirements-packaging.txt
+          bash Packaging/prepare-branding.sh "$RUNNER_TEMP/macsync-branding" "$RUNNER_TEMP/macsync-packaging/bin/python"
+          approved="$("$RUNNER_TEMP/macsync-packaging/bin/python" -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["approved_original"]).lower())' "$RUNNER_TEMP/macsync-branding/branding-provenance.json")"
+          echo "approved=$approved" >> "$GITHUB_OUTPUT"
+          echo "Approved original: $approved"
       - name: Tests
         run: swift test -Xswiftc -warnings-as-errors
       - name: Release build for Apple Silicon and Intel
@@ -81,6 +98,10 @@ jobs:
           codesign --force --sign - dist/MacSync.app/Contents/MacOS/MacSyncRecovery
           mkdir -p dist/MacSync.app/Contents/Resources
           install -m 755 "Packaging/Ripristina MacSync.command" "dist/MacSync.app/Contents/Resources/Ripristina MacSync.command"
+          for f in MacSync.icns MacSyncBrand.png MacSyncMenuTemplate.png branding-provenance.json; do
+            install -m 644 "$RUNNER_TEMP/macsync-branding/$f" "dist/MacSync.app/Contents/Resources/$f"
+          done
+          install -m 644 "Packaging/Guida installazione.html" "dist/MacSync.app/Contents/Resources/Guida installazione.html"
           framework="$(find "$RUNNER_TEMP/macsync-swift-build-arm64/artifacts" -type d -path '*/macos-*/Sparkle.framework' -print -quit)"
           test -d "$framework"
           mkdir -p dist/MacSync.app/Contents/Frameworks
@@ -95,6 +116,9 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundlePackageType' "$info")" = APPL
           test "$(/usr/libexec/PlistBuddy -c 'Print LSMinimumSystemVersion' "$info")" = 13.0
           test "$(/usr/libexec/PlistBuddy -c 'Print LSUIElement' "$info")" = true
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIconFile' "$info")" = MacSync.icns
+          test "$version" = 0.17.0
+          test -s dist/MacSync.app/Contents/Resources/MacSync.icns
           test -x "$exe"
           lipo "$exe" -info
           lipo "$exe" -verify_arch arm64 x86_64
@@ -113,6 +137,8 @@ jobs:
           lipo "$unpacked/Contents/MacOS/MacSyncRecovery" -verify_arch arm64 x86_64
           codesign --verify --strict "$unpacked/Contents/MacOS/MacSyncRecovery"
           (cd dist && shasum -a 256 "$zip" > "$zip.sha256")
+      - name: Create graphical DMG and verify mounted contents
+        run: bash Packaging/build-dmg.sh dist/MacSync.app "$RUNNER_TEMP/macsync-branding" dist "$RUNNER_TEMP/macsync-packaging/bin/python"
       - name: Validate Sparkle 2.10.0 with disposable signing keys
         run: |
           set -euo pipefail
@@ -124,11 +150,14 @@ jobs:
           path: |
             dist/MacSync-v*-macOS-universal.zip
             dist/MacSync-v*-macOS-universal.zip.sha256
+            dist/MacSync-v*-macOS-universal.dmg
+            dist/MacSync-v*-macOS-universal.dmg.sha256
           if-no-files-found: error
           retention-days: 7
       - name: Capture production SwiftUI components with AppKit
         env:
           MACSYNC_UI_PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
+          MACSYNC_BRAND_PREVIEW_DIR: ${{ runner.temp }}/macsync-branding
         run: swift test --skip-build --filter MacSyncUIPreviewTests
       - name: Check 48 PNG artifacts
         env:
@@ -177,46 +206,24 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  publish-v0150:
-    # Explicit one-version gate. Never publish ordinary pushes or failed builds.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[publish-v0.15.0]')
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v5
+      - name: Upload packaging and branding previews
+        uses: actions/upload-artifact@v6
         with:
-          persist-credentials: false
-      - uses: actions/download-artifact@v5
-        with:
-          name: MacSync-macOS-universal
-          path: release-assets
-      - name: Verify exact build and publish pre-release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tag=v0.15.0
-          asset=MacSync-v0.15.0-macOS-universal.zip
-          # Avoid publishing a superseded commit or overwriting any release.
-          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
-          (cd release-assets && sha256sum -c "$asset.sha256")
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release already exists: refusing to overwrite"; exit 1
-          fi
-          if existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null)"; then
-            test "$existing" = "$GITHUB_SHA"
-          else
-            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
-          fi
-          gh release create "$tag" "release-assets/$asset" "release-assets/$asset.sha256" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --title "MacSync v0.15.0 — Baseline di validazione" --notes-file docs/RELEASE_v0.15.0.md
+          name: MacSync-Branding-and-Installer
+          path: |
+            ${{ runner.temp }}/macsync-branding/MacSyncBrand.png
+            ${{ runner.temp }}/macsync-branding/MacSyncMenuTemplate.png
+            ${{ runner.temp }}/macsync-branding/MacSync.icns
+            ${{ runner.temp }}/macsync-branding/MacSync-DMG-Background.png
+            ${{ runner.temp }}/macsync-branding/branding-provenance.json
+            Packaging/Guida installazione.html
+          if-no-files-found: error
+          retention-days: 7
 
   validate-production-signature:
     # Only an explicit, trusted push to main can request the protected signing environment.
     # This job creates candidate artifacts; it cannot publish or mutate the repository.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[verify-signing-key]')
+    if: needs.build.outputs.approved_brand == 'true' && github.ref == 'refs/heads/main' && ((github.event_name == 'push' && contains(github.event.head_commit.message, '[verify-signing-key]')) || (github.event_name == 'workflow_dispatch' && inputs.sign_candidate))
     needs: build
     runs-on: macos-15
     timeout-minutes: 12
@@ -234,15 +241,21 @@ jobs:
       - name: Verify exact protected candidate and prepare signing tools
         run: |
           set -euo pipefail
-          (cd signing-input && shasum -a 256 -c MacSync-v0.16.0-macOS-universal.zip.sha256)
+          (cd signing-input && shasum -a 256 -c MacSync-v0.17.0-macOS-universal.zip.sha256)
+          (cd signing-input && shasum -a 256 -c MacSync-v0.17.0-macOS-universal.dmg.sha256)
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          printf '%s  %s\n' '0dd750be1d060b75f6b4075122e7ef2bf7f59d74090a3872217dc9a417bd5620' 'Packaging/Branding/MacSync-Approved-Original.png' | shasum -a 256 -c -
+          mkdir "$RUNNER_TEMP/verify-branded-package"
+          ditto -x -k signing-input/MacSync-v0.17.0-macOS-universal.zip "$RUNNER_TEMP/verify-branded-package"
+          python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["approved_original"] is True and d["source_sha256"]=="0dd750be1d060b75f6b4075122e7ef2bf7f59d74090a3872217dc9a417bd5620"' "$RUNNER_TEMP/verify-branded-package/MacSync.app/Contents/Resources/branding-provenance.json"
+          codesign --verify --deep --strict "$RUNNER_TEMP/verify-branded-package/MacSync.app"
           bash Packaging/prepare-release-signing.sh
       - name: Validate production key and sign candidate without publishing
         env:
           MACSYNC_SPARKLE_PRIVATE_KEY: ${{ secrets.MACSYNC_SPARKLE_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          bash Packaging/sign-release-candidate.sh signing-input/MacSync-v0.16.0-macOS-universal.zip
+          bash Packaging/sign-release-candidate.sh signing-input/MacSync-v0.17.0-macOS-universal.zip
       - uses: actions/upload-artifact@v6
         with:
           name: MacSync-signed-release-candidate

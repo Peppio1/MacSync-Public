@@ -1,8 +1,8 @@
 # AGENTS.md — MacSync
 
-## Stato corrente — v0.16.0 (candidata aggiornamenti)
+## Stato corrente — v0.17.0 (branding e DMG)
 
-Repository pubblico: Peppio1/MacSync-Public. Ultima pre-release v0.15.0. Ultima CI conclusa con successo: commit 56555ce, run 44066873367, 177 test, 48 PNG, installazione Sparkle e rifiuto ZIP manomesso. v0.16.0: recupero e preflight integrati su processi separati e firma della nuova build in validazione. Collaudo fisico ancora obbligatorio.
+Repository pubblico: Peppio1/MacSync-Public. Ultima pre-release pubblica v0.15.0. v0.16.0 validata e firmata, commit e6ace65, run 44068276632: 177 test, 2 opt-in eseguiti separatamente, 48 PNG, installazione, rollback e riavvio su fixture, firma Ed25519. v0.17.0 in validazione: branding, DMG, guida. Non sostituire il PNG approvato con un'icona diversa; placeholder solo CI, vietato firmare con placeholder. Collaudo fisico obbligatorio.
 
 Consultare [README.md](README.md) e [architettura corrente](docs/ARCHITECTURE.md). Le istruzioni storiche sono conservate in [AGENTS_HISTORY.md](docs/AGENTS_HISTORY.md); NON applicare le vecchie specifiche al posto dei comportamenti correnti.
 
@@ -27,3 +27,6 @@ Consultare [README.md](README.md) e [architettura corrente](docs/ARCHITECTURE.md
 Non abilitare installazione automatica o manuale in-app senza firma Ed25519 verificata, feed e chiave pubblica incorporata, shutdown con backup verificato e rollback collaudati. Non pubblicare chiavi private nel repository o nei log. Baseline rollback-before-v0.16.0-updater.
 
 La procedura corrente è in docs/UPDATES.md. Il secret MACSYNC_SPARKLE_PRIVATE_KEY è già configurato e verificato: non rigenerarlo. Il workflow protetto può firmare solo candidati dopo regressione verde. Non pubblicare automaticamente, non ripristinare mai un DB precedente. Rollback codice: rollback-before-v0160-integrated-recovery-signing.
+
+## v0.17.0
+Vedere docs/INSTALLATION.md e Packaging/Branding/README.md. Rollback della v0.16.0: rollback-v0.16.0-validated-before-v0.17.0. Non modificare il motore o i percorsi dati per interventi grafici. Firma solo dopo originale verificato e CI verde. Non pubblicare automaticamente.

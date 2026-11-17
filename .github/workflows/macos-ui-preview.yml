@@ -18,9 +18,15 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+      - name: Prepare branding preview
+        run: |
+          python3 -m venv "$RUNNER_TEMP/macsync-packaging"
+          "$RUNNER_TEMP/macsync-packaging/bin/python" -m pip install --disable-pip-version-check -r Packaging/requirements-packaging.txt
+          bash Packaging/prepare-branding.sh "$RUNNER_TEMP/macsync-branding" "$RUNNER_TEMP/macsync-packaging/bin/python"
       - name: Capture production SwiftUI components with AppKit
         env:
           MACSYNC_UI_PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
+          MACSYNC_BRAND_PREVIEW_DIR: ${{ runner.temp }}/macsync-branding
         run: swift test --filter MacSyncUIPreviewTests
       - name: Check 48 PNG artifacts
         env:

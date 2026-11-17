@@ -25,7 +25,7 @@ final class SoftwareUpdateController: ObservableObject {
     private static let skipKey = "MacSync.updates.skippedStableTag"
 
     init(previewOnly: Bool = false, defaults: UserDefaults = .standard,
-         installed: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.16.0",
+         installed: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.17.0",
          checkRelease: @escaping (String) async throws -> UpdateCheckResult = StableUpdateDiscovery.check) {
         self.previewOnly = previewOnly
         self.defaults = defaults

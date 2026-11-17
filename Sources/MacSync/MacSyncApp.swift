@@ -1112,7 +1112,7 @@ struct MacSyncConfigurationView: View {
             MacSyncPanel("Informazioni", icon: "info.circle", accent: false) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("MacSync · v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.16.0")").font(.subheadline.weight(.semibold))
+                        Text("MacSync · v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.17.0")").font(.subheadline.weight(.semibold))
                         Text("Registro SQLite locale").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -1367,11 +1367,9 @@ struct MacSyncSectionShell<Content: View>: View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 9) {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 19, weight: .semibold))
-                        .foregroundStyle(MacSyncColors.blue(scheme))
+                    MacSyncBrandMark()
                         .frame(width: 36, height: 36)
-                        .background(MacSyncColors.blue(scheme).opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                        .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("MacSync").font(.system(size: 21, weight: .bold))
                         Text("Sincronizzazione").font(.system(size: 11)).foregroundStyle(.secondary)
@@ -1549,10 +1547,13 @@ struct MacSyncApp: App {
         }
         .defaultSize(width: 1180, height: 820)
 
-        MenuBarExtra("MacSync", systemImage: "arrow.triangle.2.circlepath") {
+        MenuBarExtra {
             MacSyncStatusMenu(
                 model: runtime.model, copy: runtime.copy, runtime: runtime
             )
+        } label: {
+            MacSyncMenuBarMark()
+                .accessibilityLabel("MacSync")
         }
         .menuBarExtraStyle(.window)
     }
