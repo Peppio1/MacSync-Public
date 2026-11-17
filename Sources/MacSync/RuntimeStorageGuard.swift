@@ -40,50 +40,53 @@ final class RuntimeStorageGuard {
         guard defaults.synchronize() else { throw UpdateTransactionMarker.MarkerError.invalid }
     }
 
-    private static func verifyBundle(_ url: URL) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-        process.arguments = ["--verify", "--deep", "--strict", url.path]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw JournalError.database("Firma del bundle non verificabile")
-        }
-    }
-
     func beginSignedUpdate(previous: String, requested: String, snapshot: URL) throws {
         let backupApp = snapshot.appendingPathComponent("MacSync.app")
-        try Self.verifyBundle(backupApp)
+        try ApplicationRollback.validateBundle(backupApp, version: previous)
         let marker = try UpdateTransactionMarker(previousVersion: previous, requestedVersion: requested,
                                                  snapshotName: snapshot.lastPathComponent)
+        let manifest = try ApplicationRecoveryManifest(application: Bundle.main.bundleURL, marker: marker)
+        try manifest.write(to: snapshot.appendingPathComponent("recovery.json"))
+        let helper = backupApp.appendingPathComponent("Contents/MacOS/MacSyncRecovery")
+        guard FileManager.default.isExecutableFile(atPath: helper.path) else {
+            throw ApplicationRollback.Failure("Strumento di recupero mancante.")
+        }
+        let wrapper = snapshot.appendingPathComponent("Ripristina MacSync.command")
+        let source = backupApp.appendingPathComponent("Contents/Resources/Ripristina MacSync.command")
+        try FileManager.default.copyItem(at: source, to: wrapper)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: wrapper.path)
         try marker.write(to: folder.appendingPathComponent("update-pending.json"))
         try Self.disableCopyAuthorizations(.standard)
     }
 
-    private static func inspectPendingUpdate(folder: URL, database: URL, defaults: UserDefaults) throws {
+    private static func inspectPendingUpdate(folder: URL, database: URL, defaults: UserDefaults) throws -> URL? {
         let url = folder.appendingPathComponent("update-pending.json")
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         // Run before creating any operational model, watcher or copy worker.
         try disableCopyAuthorizations(defaults)
         let marker = try UpdateTransactionMarker.read(from: url)
         let snapshot = folder.appendingPathComponent("update-backups", isDirectory: true)
             .appendingPathComponent(marker.snapshotName, isDirectory: true)
         try ArchiveDatabaseSafety.verify(snapshot.appendingPathComponent("inventory.sqlite"), readOnly: true)
-        try verifyBundle(snapshot.appendingPathComponent("MacSync.app"))
+        try ApplicationRollback.validateBundle(snapshot.appendingPathComponent("MacSync.app"), version: marker.previousVersion)
         try ArchiveDatabaseSafety.verify(database)
-        try verifyBundle(Bundle.main.bundleURL)
-        let actual = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        guard let actual = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              actual == marker.previousVersion || actual == marker.requestedVersion else {
+            throw ApplicationRollback.Failure("Versione inattesa. Apri il backup e usa il recupero solo a MacSync chiuso: " + snapshot.path)
+        }
+        try ApplicationRollback.validateBundle(Bundle.main.bundleURL, version: actual)
         let alert = NSAlert()
         alert.messageText = actual == marker.requestedVersion ? "Aggiornamento verificato" : "Aggiornamento non completato"
         alert.informativeText = "Archivio e copia della versione precedente verificati.\nBackup: " + snapshot.path +
             "\n\nLe copie automatiche, le cancellazioni e le verifiche pianificate restano disattivate: controlla la configurazione e riabilitale esplicitamente. Non verrà ripristinato automaticamente un database precedente."
         alert.addButton(withTitle: "Continua")
-        alert.addButton(withTitle: "Esci")
-        if alert.runModal() != .alertFirstButtonReturn { Darwin.exit(0) }
-        // Previous bundle and snapshot remain available for manual recovery.
-        try FileManager.default.removeItem(at: url)
+        alert.addButton(withTitle: "Apri backup ed esci")
+        if alert.runModal() != .alertFirstButtonReturn {
+            NSWorkspace.shared.open(snapshot)
+            Darwin.exit(0)
+        }
+        // Keep the marker through all subsequent database initialization.
+        return url
     }
 
     static func acquireOrExit() -> RuntimeStorageGuard {
@@ -99,7 +102,7 @@ final class RuntimeStorageGuard {
             let previousIdentity = defaults.string(forKey:"MacSync.databaseFileIdentity.v014")
             guard exists || previousIdentity == nil else { throw JournalError.database("Database operativo mancante: ripristinare una copia verificata") }
             if exists { try ArchiveDatabaseSafety.verify(db) }
-            try inspectPendingUpdate(folder: folder, database: db, defaults: defaults)
+            let pendingUpdate = try inspectPendingUpdate(folder: folder, database: db, defaults: defaults)
             let currentIdentity = exists ? try ArchiveDatabaseSafety.fileIdentity(db) : nil
             let restored = previousIdentity != nil && currentIdentity != previousIdentity
             if !defaults.bool(forKey:"MacSync.safetyMigration.v014") || restored {
@@ -143,6 +146,7 @@ final class RuntimeStorageGuard {
                     try ArchiveDatabaseSafety.backup(db,to:day)
                 } else { try ArchiveDatabaseSafety.verify(day,readOnly:true) }
             }
+            if let pendingUpdate { try FileManager.default.removeItem(at: pendingUpdate) }
             return RuntimeStorageGuard(lock:lock, folder:folder)
         } catch {
             let alert = NSAlert()

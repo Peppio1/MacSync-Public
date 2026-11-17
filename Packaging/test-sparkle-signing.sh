@@ -105,3 +105,8 @@ if "$sign" -f "$work/test-key" --verify "$work/altered.xml"; then
   echo "ERROR: altered feed accepted"; exit 1
 fi
 echo "Sparkle framework linking, signing and tamper rejection passed"
+
+# Reuse only disposable keys and the verified official CLI distribution.
+cli="$(find "$work/sdk" -type f -name sparkle-cli -print -quit)"
+test -x "$cli"
+bash Packaging/test-sparkle-install-lab.sh "$archive" "$sign" "$cli" "$work/test-key"

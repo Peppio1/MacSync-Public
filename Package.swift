@@ -18,6 +18,7 @@ let package = Package(
             dependencies: ["MacSyncCore", "Sparkle"],
             linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
         ),
+        .executableTarget(name: "MacSyncRecovery", dependencies: ["MacSyncCore"]),
         .testTarget(
             name: "MacSyncCoreTests",
             dependencies: ["MacSyncCore"]

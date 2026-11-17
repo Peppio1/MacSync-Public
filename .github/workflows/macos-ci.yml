@@ -60,6 +60,10 @@ jobs:
             lipo "$output" -info
             lipo "$output" -verify_arch "$arch"
             test "$(lipo "$output" -archs)" = "$arch"
+            helper="$bin/MacSyncRecovery"
+            test -x "$helper"
+            lipo "$helper" -verify_arch "$arch"
+            install -m 755 "$helper" "$slices/recovery-$arch.macho"
           done
       - name: Assemble and verify universal ad hoc bundle
         run: |
@@ -71,6 +75,12 @@ jobs:
           file dist/MacSync.app/Contents/MacOS/MacSync
           chmod 755 dist/MacSync.app/Contents/MacOS/MacSync
           cp Packaging/Info.plist dist/MacSync.app/Contents/Info.plist
+          lipo -create "$RUNNER_TEMP/macsync-release-slices/recovery-arm64.macho" "$RUNNER_TEMP/macsync-release-slices/recovery-x86_64.macho" -output dist/MacSync.app/Contents/MacOS/MacSyncRecovery
+          chmod 755 dist/MacSync.app/Contents/MacOS/MacSyncRecovery
+          lipo dist/MacSync.app/Contents/MacOS/MacSyncRecovery -verify_arch arm64 x86_64
+          codesign --force --sign - dist/MacSync.app/Contents/MacOS/MacSyncRecovery
+          mkdir -p dist/MacSync.app/Contents/Resources
+          install -m 755 "Packaging/Ripristina MacSync.command" "dist/MacSync.app/Contents/Resources/Ripristina MacSync.command"
           framework="$(find "$RUNNER_TEMP/macsync-swift-build-arm64/artifacts" -type d -path '*/macos-*/Sparkle.framework' -print -quit)"
           test -d "$framework"
           mkdir -p dist/MacSync.app/Contents/Frameworks
@@ -100,6 +110,8 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print SUPublicEDKey' "$unpacked/Contents/Info.plist")" = 'SDsuoQo3jF5WNHSC1yo6B92Nanc9bBdjHJ8O474h9LU='
           lipo "$unpacked/Contents/Frameworks/Sparkle.framework/Sparkle" -verify_arch arm64 x86_64
           lipo "$unpacked/Contents/MacOS/MacSync" -verify_arch arm64 x86_64
+          lipo "$unpacked/Contents/MacOS/MacSyncRecovery" -verify_arch arm64 x86_64
+          codesign --verify --strict "$unpacked/Contents/MacOS/MacSyncRecovery"
           (cd dist && shasum -a 256 "$zip" > "$zip.sha256")
       - name: Validate Sparkle 2.10.0 with disposable signing keys
         run: |

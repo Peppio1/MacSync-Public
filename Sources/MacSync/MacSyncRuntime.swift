@@ -114,7 +114,7 @@ final class MacSyncRuntime: ObservableObject {
               let installed = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
               release.isNewer(than: installed), release.tagName.hasPrefix("v"),
               SignedUpdatePolicy.assetURL(version: String(release.tagName.dropFirst())) != nil,
-              Bundle.main.bundleURL.pathExtension == "app",
+              ApplicationRollback.allowedInstallLocation(Bundle.main.bundleURL),
               !Bundle.main.bundleURL.path.contains("/AppTranslocation/"),
               Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String == SignedUpdatePolicy.publicKey,
               Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String == SignedUpdatePolicy.feedURL else {
