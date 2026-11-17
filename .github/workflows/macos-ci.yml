@@ -43,7 +43,7 @@ jobs:
             swift build -c release --arch "$arch" --scratch-path "$scratch" -Xswiftc -warnings-as-errors
             bin="$(swift build -c release --arch "$arch" --scratch-path "$scratch" --show-bin-path)"
             cp "$bin/MacSync" "$RUNNER_TEMP/MacSync-$arch"
-            lipo -verify_arch "$arch" "$RUNNER_TEMP/MacSync-$arch"
+            lipo "$RUNNER_TEMP/MacSync-$arch" -verify_arch "$arch"
           done
       - name: Assemble and verify universal ad hoc bundle
         run: |
@@ -63,7 +63,7 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print LSUIElement' "$info")" = true
           test -x "$exe"
           lipo -info "$exe"
-          lipo -verify_arch arm64 x86_64 "$exe"
+          lipo "$exe" -verify_arch arm64 x86_64
           codesign --force --sign - dist/MacSync.app
           codesign --verify --deep --strict --verbose=2 dist/MacSync.app
           zip="MacSync-v$version-macOS-universal.zip"
@@ -72,7 +72,7 @@ jobs:
           ditto -x -k "dist/$zip" "$RUNNER_TEMP/macsync-package-check"
           unpacked="$RUNNER_TEMP/macsync-package-check/MacSync.app"
           codesign --verify --deep --strict --verbose=2 "$unpacked"
-          lipo -verify_arch arm64 x86_64 "$unpacked/Contents/MacOS/MacSync"
+          lipo "$unpacked/Contents/MacOS/MacSync" -verify_arch arm64 x86_64
           (cd dist && shasum -a 256 "$zip" > "$zip.sha256")
       - uses: actions/upload-artifact@v6
         with:
