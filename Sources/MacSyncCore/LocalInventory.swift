@@ -150,15 +150,20 @@ public enum LocalScanner {
         }
 
         var enumerationError: Error?
+        var enumerationErrorURL: URL?
         let enumerator = FileManager.default.enumerator(
             at: target, includingPropertiesForKeys: Array(keys), options: [],
             errorHandler: { url, error in
-                visit(url)
+                // Keep the escaping Foundation handler independent of the
+                // synchronous onVisit callback. Publish its path before throwing.
+                enumerationErrorURL = url
                 enumerationError = error
                 return false
             }
         )
         guard let enumerator else {
+            if let url = enumerationErrorURL { visit(url) }
+            if let enumerationError { throw enumerationError }
             throw JournalError.database("Cannot enumerate source directory")
         }
         for case let file as URL in enumerator {
@@ -183,7 +188,10 @@ public enum LocalScanner {
                 break
             }
         }
-        if let enumerationError { throw enumerationError }
+        if let enumerationError {
+            if let url = enumerationErrorURL { visit(url) }
+            throw enumerationError
+        }
         try assertRootUnchanged()
         return found
     }
