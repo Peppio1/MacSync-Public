@@ -202,6 +202,16 @@ public struct MirrorAuthorization: Codable, Equatable, Sendable {
         return result
     }
 
+    /// Rebuild after an explicit full audit, using the original authorized
+    /// deletion evidence only. Runtime mirror checks still apply.
+    public func completeQueueRebuild(journal:ChangeJournal,mappings:[MountedFolderMapping],token:String,
+                                     report:ArchiveAuditReport,shouldContinue:() -> Bool) throws -> Int {
+        _ = try validated(journal:journal,mappings:mappings)
+        let extras = Set(report.findings.filter { $0.kind == .extra && roots[$0.rootID] != nil }.map(\.id))
+        return try journal.completeQueueRebuild(token:token,verifiedExtraIDs:extras,
+                                                authorizationCutoff:cutoff,shouldContinue:shouldContinue)
+    }
+
     fileprivate func validated(journal: ChangeJournal, mappings: [MountedFolderMapping]) throws -> [String: MirrorRootIdentity] {
         guard try journal.databaseIdentity() == databaseID,
               try journal.queueSequence() >= cutoff,
@@ -466,6 +476,9 @@ public final class MirrorDeletionWorker {
     public func runOnce(maxFiles: Int = 25) throws -> MirrorDeletionSummary {
         if authorization != nil { return try runCycle(pageSize: maxFiles) }
         var result = MirrorDeletionSummary()
+        guard try journal.queueRebuildToken() == nil else {
+            result.blocked=true; result.detail="Nuova verifica archivio necessaria dopo svuotamento coda"; return result
+        }
         guard !cancellation.isCancelled else {
             result.blocked = true
             result.detail = "Operazioni annullate"
@@ -569,6 +582,9 @@ public final class MirrorDeletionWorker {
     public func runCycle(pageSize: Int = 100, throughID: Int64? = nil) throws -> MirrorDeletionSummary {
         guard let authorization else { return try runOnce(maxFiles: 100) }
         var result = MirrorDeletionSummary()
+        guard try journal.queueRebuildToken() == nil else {
+            result.blocked=true; result.detail="Nuova verifica archivio necessaria dopo svuotamento coda"; return result
+        }
         guard !cancellation.isCancelled,operationAllowed() else { return result }
         try verifyBeforeSynchronization()
         guard !cancellation.isCancelled else { return result }

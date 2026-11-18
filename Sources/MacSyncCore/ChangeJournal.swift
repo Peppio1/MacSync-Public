@@ -28,8 +28,10 @@ public enum JournalError: Error, LocalizedError {
 /// executes file transfers or deletions.
 public final class ChangeJournal {
     private var connection: OpaquePointer?
+    private let databasePath: String
 
     public init(path: String) throws {
+        self.databasePath = path
         var handle: OpaquePointer?
         guard sqlite3_open(path, &handle) == SQLITE_OK else {
             let description = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
@@ -53,6 +55,8 @@ public final class ChangeJournal {
                 );
                 """)
             try execute("CREATE TABLE IF NOT EXISTS publication_intents(job_id INTEGER PRIMARY KEY, root_id TEXT NOT NULL, relative_path TEXT NOT NULL);")
+            try execute("CREATE TABLE IF NOT EXISTS queue_rebuild_hold(singleton INTEGER PRIMARY KEY CHECK(singleton=1), token TEXT NOT NULL);")
+            try execute("CREATE TABLE IF NOT EXISTS retired_delete_evidence(job_id INTEGER PRIMARY KEY);")
             try execute("CREATE TABLE IF NOT EXISTS directory_bindings(root_id TEXT NOT NULL, role TEXT NOT NULL, stamp TEXT NOT NULL, PRIMARY KEY(root_id,role));")
             try execute("CREATE INDEX IF NOT EXISTS idx_queue_pending ON change_queue(completed, id);")
             try execute("CREATE INDEX IF NOT EXISTS idx_queue_uploads ON change_queue(completed, kind, id);")
@@ -76,6 +80,93 @@ public final class ChangeJournal {
 
     deinit {
         if let connection { sqlite3_close(connection) }
+    }
+
+    /// Persisted across application restart. No transfer or delete is
+    /// permitted until an explicit complete archive audit rebuilds the queue.
+    public func queueRebuildToken() throws -> String? {
+        let stmt = try prepare("SELECT token FROM queue_rebuild_hold WHERE singleton=1;")
+        defer { sqlite3_finalize(stmt) }
+        let rc = sqlite3_step(stmt)
+        if rc == SQLITE_DONE { return nil }
+        guard rc == SQLITE_ROW else { throw databaseFailure() }
+        return columnText(stmt,at:0)
+    }
+
+    /// Requires the caller to have drained BOTH sync and inventory workers.
+    /// Keep historical IDs, deletion evidence and all publication intents.
+    /// No filesystem work on the source or destination.
+    @discardableResult
+    public func resetPendingQueue(backup: URL) throws -> Int {
+        try ArchiveDatabaseSafety.backup(URL(fileURLWithPath:databasePath),to:backup)
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            try execute("INSERT OR IGNORE INTO retired_delete_evidence(job_id) SELECT id FROM change_queue WHERE completed=0 AND kind='delete';")
+            try execute("UPDATE change_queue SET completed=1 WHERE completed=0;")
+            let count = Int(sqlite3_changes(connection))
+            let stmt = try prepare("INSERT OR REPLACE INTO queue_rebuild_hold(singleton,token) VALUES(1,?);")
+            defer { sqlite3_finalize(stmt) }
+            try bind(UUID().uuidString,at:1,in:stmt)
+            guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseFailure() }
+            try execute("COMMIT;")
+            return count
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    /// Only revalidate old deletion evidence from the same authorization.
+    /// Do not generate DELETEs from arbitrary server-only findings.
+    /// Original IDs and timestamps preserve the original authorization cutoff.
+    @discardableResult
+    public func completeQueueRebuild(token:String, verifiedExtraIDs:Set<String> = [],
+                                     authorizationCutoff:Int64 = Int64.max,
+                                     shouldContinue:() -> Bool = { true }) throws -> Int {
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            guard try queueRebuildToken() == token, shouldContinue() else { throw SeedVerificationError.cancelled }
+            let query = try prepare("""
+                SELECT q.id,q.root_id,q.relative_path FROM retired_delete_evidence e
+                JOIN change_queue q ON q.id=e.job_id
+                WHERE q.completed=1 AND q.kind='delete' AND q.id>?;
+                """)
+            defer { sqlite3_finalize(query) }
+            guard sqlite3_bind_int64(query,1,authorizationCutoff) == SQLITE_OK else { throw databaseFailure() }
+            var eligible:[Int64] = []
+            var rc = sqlite3_step(query)
+            while rc == SQLITE_ROW {
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                let root = columnText(query,at:1), path = columnText(query,at:2)
+                if verifiedExtraIDs.contains(root + "\0" + path) && WindowsPathSafety.validRelativePath(path) {
+                    eligible.append(sqlite3_column_int64(query,0))
+                }
+                rc = sqlite3_step(query)
+            }
+            guard rc == SQLITE_DONE else { throw databaseFailure() }
+            let update = try prepare("""
+                UPDATE change_queue SET completed=0
+                WHERE id=? AND completed=1 AND kind='delete'
+                  AND NOT EXISTS(SELECT 1 FROM file_inventory f WHERE f.root_id=change_queue.root_id AND f.relative_path=change_queue.relative_path)
+                  AND NOT EXISTS(SELECT 1 FROM change_queue newer WHERE newer.root_id=change_queue.root_id AND newer.relative_path=change_queue.relative_path AND (newer.completed=0 OR newer.id>change_queue.id));
+                """)
+            defer { sqlite3_finalize(update) }
+            var restored=0
+            for id in eligible {
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                sqlite3_reset(update); sqlite3_clear_bindings(update)
+                guard sqlite3_bind_int64(update,1,id) == SQLITE_OK,
+                      sqlite3_step(update) == SQLITE_DONE else { throw databaseFailure() }
+                restored += Int(sqlite3_changes(connection))
+            }
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            try execute("DELETE FROM queue_rebuild_hold WHERE singleton=1;")
+            try execute("COMMIT;")
+            return restored
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
     }
 
     @discardableResult

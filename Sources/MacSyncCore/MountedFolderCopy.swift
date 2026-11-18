@@ -268,6 +268,7 @@ public final class MountedFolderCopyWorker {
             summary.disabled = true
             return summary
         }
+        guard try journal.queueRebuildToken() == nil else { summary.interrupted=true; return summary }
         var jobs = try journal.pendingUploads(limit: maxJobs, afterID: nextAfterID)
         if jobs.isEmpty && nextAfterID != 0 {
             nextAfterID = 0
@@ -289,6 +290,7 @@ public final class MountedFolderCopyWorker {
             summary.disabled = true
             return summary
         }
+        guard try journal.queueRebuildToken() == nil else { summary.interrupted=true; return summary }
         guard let pendingUpper = try journal.pendingUploadUpperBound() else { onPlan?(0); return summary }
         let upper = min(pendingUpper, throughID ?? Int64.max)
         onPlan?(try journal.plannedUploadCount(throughID: upper))

@@ -10,11 +10,18 @@ final class MountedCopyController: ObservableObject {
     private let monitorGate: MonitorSafetyGate
     var onQueueChanged: (() -> Void)?
     @Published private(set) var interruptionRequested = false
+    @Published private(set) var queueRebuildRequired = false
 
     init(previewOnly: Bool = false, monitorGate: MonitorSafetyGate = MonitorSafetyGate()) {
         self.previewOnly = previewOnly
         self.monitorGate = monitorGate
         if !previewOnly {
+            do {
+                let db = try Self.databaseURL()
+                if FileManager.default.fileExists(atPath:db.path) {
+                    queueRebuildRequired = try ChangeJournal(path:db.path).queueRebuildToken() != nil
+                }
+            } catch { queueRebuildRequired = true }
             UserDefaults.standard.set(automaticCopiesEnabled, forKey:"MacSync.autoCopiesEnabled.v2")
             UserDefaults.standard.set(false, forKey:"MacSync.autoCopiesEnabled")
         }
@@ -183,7 +190,7 @@ final class MountedCopyController: ObservableObject {
     private var loadingLastAudit = false
     private var auditRevision = 0
     func loadLastAudit() {
-        guard !previewOnly, auditReport == nil, !auditBusy, !loadingLastAudit else { return }
+        guard !previewOnly, !queueRebuildRequired, auditReport == nil, !auditBusy, !loadingLastAudit else { return }
         loadingLastAudit = true
         let revision = auditRevision
         DispatchQueue.global(qos:.utility).async { [weak self] in
@@ -213,7 +220,10 @@ final class MountedCopyController: ObservableObject {
             if !interactive { noteAuditSkipped("verifica, conferma o manutenzione in corso") }
             return
         }
-        let settings = auditSettings
+        if queueRebuildRequired && !interactive { noteAuditSkipped("avvia manualmente la verifica dopo lo svuotamento"); return }
+        var effectiveSettings = auditSettings
+        if queueRebuildRequired && effectiveSettings.mode == .quick { effectiveSettings.mode = .intelligent }
+        let settings = effectiveSettings
         guard !active && liveProgress == nil && !interruptionRequested else { auditStatus = "Sospendi le copie prima del riconoscimento"; return }
         let authorization = mirrorEnabled ? mirrorAuthorization : nil
         let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
@@ -257,6 +267,8 @@ final class MountedCopyController: ObservableObject {
             do {
                 if cancel.isCancelled { throw SeedVerificationError.cancelled }
                 let journal = try ChangeJournal(path:db.path)
+                let rebuildToken = try journal.queueRebuildToken()
+                if rebuildToken != nil && !interactive { throw SeedVerificationError.cancelled }
                 let maps = try configured.map {
                     currentRoot=$0.id
                     return try MountedFolderMapping(rootID:$0.id,source:URL(fileURLWithPath:$0.path),
@@ -310,6 +322,18 @@ final class MountedCopyController: ObservableObject {
                 },onCounts:{ files,directories in recognizedFiles = files; recognizedDirectories = directories })
                 report.recognizedFiles = recognizedFiles
                 report.recognizedDirectories = recognizedDirectories
+                if let rebuildToken {
+                    guard cancel.mayCommit else { throw SeedVerificationError.cancelled }
+                    if let authorization {
+                        // Invalid historical authorization must not bypass the hold.
+                        _ = try authorization.completeQueueRebuild(journal:journal,mappings:maps,token:rebuildToken,report:report,shouldContinue:{cancel.mayCommit})
+                    } else {
+                        _ = try journal.completeQueueRebuild(token:rebuildToken,shouldContinue:{cancel.mayCommit})
+                    }
+                    let freshCandidates = (try? authorization?.auditDeletionCandidates(journal:journal,mappings:maps,shouldContinue:{!cancel.isCancelled})) ?? []
+                    report.deletionCandidates = freshCandidates
+                    report.displayCounts = .calculate(report.findings,deletionCandidates:freshCandidates)
+                }
                 recognitionProgress.phase = "Salvataggio report"
                 recognitionProgress.comparisonStarted = nil
                 progress(recognitionProgress)
@@ -329,6 +353,7 @@ final class MountedCopyController: ObservableObject {
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.auditReport = savedReport
+                    if rebuildToken != nil { self.queueRebuildRequired = false }
                     self.seedReady = false; self.seedVerifiedCount = acknowledged
                     self.seedInspectedCount = recognition.inspected; self.seedReadBytes = recognition.bytesRead
                     self.seedStatus = "Allineamento automatico: \(acknowledged) elementi riconosciuti su \(recognition.verifiedCount) candidati"
@@ -777,6 +802,7 @@ final class MountedCopyController: ObservableObject {
                     publish(force:true)
                     // A persistent safety latch blocks the ENTIRE cycle,
                     // even when mirror has subsequently been disabled.
+                    guard try journal.queueRebuildToken() == nil else { throw JournalError.database("Avvia una nuova verifica archivio prima di sincronizzare") }
                     if let reason = try journal.mirrorBlockReason() {
                         throw MirrorDeletionFailure.bulkDeletion(reason)
                     }
@@ -1369,6 +1395,47 @@ final class MountedCopyController: ObservableObject {
                     self?.maintenanceCandidates = []
                     self?.maintenanceStatus = "Pulizia temporanei interrotta: "
                         + error.localizedDescription
+                }
+            }
+        }
+    }
+
+    /// Called by the runtime only after the copy and monitor queues drain.
+    func resetPendingQueueAfterDrain(completion: @escaping @MainActor (Bool) -> Void) {
+        guard !previewOnly, !active, !auditBusy, !seedBusy else { completion(false); return }
+        maintaining = true
+        maintenanceStatus = "Backup e svuotamento della coda…"
+        auditRevision += 1
+        invalidateSeedReport()
+        queue.async { [weak self] in
+            do {
+                let db = try Self.databaseURL()
+                let id=UUID().uuidString
+                let parent = db.deletingLastPathComponent().appendingPathComponent("queue-reset-backups",isDirectory:true)
+                try FileManager.default.createDirectory(at:parent,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+                let old = db.deletingLastPathComponent().appendingPathComponent("last-audit.json")
+                if FileManager.default.fileExists(atPath:old.path) {
+                    try FileManager.default.copyItem(at:old,to:parent.appendingPathComponent(id+"-last-audit.json"))
+                }
+                let journal = try ChangeJournal(path:db.path)
+                let count = try journal.resetPendingQueue(backup:parent.appendingPathComponent(id+".sqlite"))
+                try? SyncActivityLog(path:db.path).record(level:.info,rootID:"app",action:"queue_reset",message:"\(count) operazioni ritirate; backup verificato, nuova verifica manuale obbligatoria")
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { completion(false); return }
+                    self.queueRebuildRequired=true
+                    self.auditReport=nil
+                    self.auditStatus="Coda svuotata: avvia una nuova verifica archivio"
+                    self.maintenanceStatus="Coda svuotata (\(count) operazioni). Backup verificato."
+                    self.maintaining=false
+                    self.onQueueChanged?()
+                    completion(true)
+                }
+            } catch {
+                let detail=SyncDiagnostic.describe(error)
+                DispatchQueue.main.async { [weak self] in
+                    self?.maintenanceStatus="Svuotamento non riuscito: "+detail
+                    self?.maintaining=false
+                    completion(false)
                 }
             }
         }

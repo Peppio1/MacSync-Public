@@ -90,6 +90,31 @@ final class SeededArchiveVerifierTests: XCTestCase {
         print("400,000 tiny local files; compare \(scan) s; recognition \(Date().timeIntervalSince(commitTick)) s; total \(Date().timeIntervalSince(start)) s; content bytes read 0")
     }
 
+    func testQueueResetPersistsHoldAndAuditRebuildsOnlyRealMissingFile() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let date=Date(timeIntervalSinceNow:-600)
+        try write("matching",to:f.source.appendingPathComponent("same.jpg"),date:date)
+        try write("matching",to:f.target.appendingPathComponent("same.jpg"),date:date)
+        try write("new",to:f.source.appendingPathComponent("missing.jpg"),date:date)
+        try initializeInventory(f)
+        let backup=f.base.appendingPathComponent("reset.sqlite")
+        XCTAssertEqual(try f.journal.resetPendingQueue(backup:backup),2)
+        let reopened=try ChangeJournal(path:f.db.path)
+        let token=try XCTUnwrap(reopened.queueRebuildToken())
+        XCTAssertEqual(try reopened.plannedUploadCount(),0)
+        XCTAssertEqual(try LocalInventory(path:f.db.path).itemCount(rootID:"photos"),2)
+        XCTAssertEqual(try ChangeJournal(path:backup.path).plannedUploadCount(),2)
+        let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let result=try session.auditAndRecognize(mode:.intelligent,repair:true)
+        _ = try session.approve(report:result.recognition)
+        XCTAssertEqual(try reopened.pending().map(\.relativePath),["missing.jpg"])
+        XCTAssertNotNil(try reopened.queueRebuildToken())
+        XCTAssertThrowsError(try reopened.completeQueueRebuild(token:"wrong"))
+        XCTAssertEqual(try reopened.completeQueueRebuild(token:token),0)
+        XCTAssertNil(try reopened.queueRebuildToken())
+    }
+
     func testSpecialExistingNamesReadOnlyRecognitionDoesNotRename() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at:f.base) }

@@ -620,7 +620,7 @@ struct MacSyncConfigurationView: View {
                     Spacer()
                     globalControls
                     if !copy.active && copy.liveProgress == nil && !copy.maintaining && !copy.seedBusy && model.scanProgress == nil {
-                        Button("Avvia sincronizzazione") { runtime.startManualSynchronization() }.buttonStyle(.borderedProminent).disabled(!model.monitoring || runtime.savingSchedule)
+                        Button("Avvia sincronizzazione") { runtime.startManualSynchronization() }.buttonStyle(.borderedProminent).disabled(!model.monitoring || runtime.savingSchedule || copy.queueRebuildRequired)
                     }
                     Menu("Comandi") {
                         Button("Ferma tutto") { runtime.stopAllOperations() }
@@ -1228,6 +1228,24 @@ struct MacSyncConfigurationView: View {
             }
             }.frame(maxWidth:.infinity,alignment:.topLeading)
             }.fixedSize(horizontal:false,vertical:true)
+            MacSyncPanel("Manutenzione e diagnostica",icon:"wrench") {
+                HStack {
+                    VStack(alignment:.leading,spacing:4) {
+                        Text("Svuota coda").font(.subheadline.weight(.semibold))
+                        Text("Ritira le operazioni pendenti, conserva inventario e storico. Backup preventivo obbligatorio.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        if copy.queueRebuildRequired {
+                            Text("Sincronizzazione sospesa: avvia una nuova verifica archivio.").font(.caption).foregroundStyle(.orange)
+                        } else {
+                            Text(copy.maintenanceStatus).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                    Button("Svuota coda…") { runtime.resetPendingQueue() }
+                        .buttonStyle(MacSyncStopStyle())
+                        .disabled(copy.maintaining || copy.auditBusy || copy.seedBusy || runtime.folderConfigurationBusy || runtime.savingSchedule)
+                }
+            }
             SoftwareUpdatesPanel(updates: runtime.updates)
             MacSyncPanel("Informazioni", icon: "info.circle", accent: false) {
                 HStack {

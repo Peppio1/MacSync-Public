@@ -75,6 +75,7 @@ final class MacSyncRuntime: ObservableObject {
             guard let self, !self.shuttingDown else { return }
             self.model.refreshPendingCount()
             if !self.copy.active && self.nextAutomaticAttempt == nil { self.scheduleNextAutomaticAttempt() }
+            if !self.copy.queueRebuildRequired && self.nextAuditAt == nil { self.scheduleArchiveAudit() }
         }
         if Bundle.main.bundleURL.pathExtension.lowercased() == "app" {
             UNUserNotificationCenter.current().delegate = notificationDelegate
@@ -160,7 +161,7 @@ final class MacSyncRuntime: ObservableObject {
         auditTimer = nil
         nextAuditAt = nil
         let policy = copy.auditSettings
-        guard policy.enabled, let next = policy.next(after:Date()) else { return }
+        guard !copy.queueRebuildRequired, policy.enabled, let next = policy.next(after:Date()) else { return }
         nextAuditAt = next
         let revision = auditRevision
         let timer = Timer(fire:next,interval:0,repeats:false) { [weak self] _ in
@@ -266,8 +267,48 @@ final class MacSyncRuntime: ObservableObject {
         let complete = shutdownCompletion; shutdownCompletion = nil; complete?()
     }
 
+    func resetPendingQueue() {
+        guard !previewOnly,!shuttingDown,!folderConfigurationBusy,!savingSchedule,
+              !copy.maintaining,!copy.auditBusy,!copy.seedBusy else { return }
+        let confirm=NSAlert()
+        confirm.messageText="Svuotare la coda di sincronizzazione?"
+        confirm.informativeText="Verrà creato un backup verificato del database. Nessun file sul Mac o sul server verrà eliminato. Le copie e le cancellazioni rimarranno sospese fino a una nuova verifica archivio avviata manualmente."
+        confirm.alertStyle = .warning
+        confirm.addButton(withTitle:"Svuota coda")
+        confirm.addButton(withTitle:"Annulla")
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
+        folderConfigurationBusy=true
+        stopAllOperations()
+        copy.maintaining=true
+        copy.afterWorkerStopped { [weak self] in
+            guard let self else { return }
+            self.model.afterMonitorStopped { [weak self] in
+                guard let self else { return }
+                guard !self.shuttingDown else {
+                    self.copy.maintaining=false
+                    self.folderConfigurationBusy=false
+                    self.finishShutdownIfReady()
+                    return
+                }
+                self.copy.resetPendingQueueAfterDrain { [weak self] success in
+                    guard let self else { return }
+                    self.folderConfigurationBusy=false
+                    if !self.shuttingDown {
+                        self.model.startMonitoring()
+                        if success {
+                            self.suspendedUntilNextLaunch=false
+                            self.automaticStatus="Attendo una nuova verifica archivio manuale"
+                        }
+                        self.scheduleArchiveAudit()
+                    }
+                    self.finishShutdownIfReady()
+                }
+            }
+        }
+    }
+
     func startManualSynchronization() {
-        guard !previewOnly, !shuttingDown, !savingSchedule, !folderConfigurationBusy, !finalShutdownHolding,
+        guard !previewOnly, !shuttingDown, !savingSchedule, !folderConfigurationBusy, !finalShutdownHolding, !copy.queueRebuildRequired,
               model.monitoring, model.safetyGate.isReady, !copy.active, !copy.maintaining,
               !copy.seedBusy, !copy.seedReady, !copy.interruptionRequested else { return }
         configurationRevision += 1
@@ -655,7 +696,7 @@ final class MacSyncRuntime: ObservableObject {
         autoTimer = nil
         nextAutomaticAttempt = nil
         guard !shuttingDown, !savingSchedule, !folderConfigurationBusy, !suspendedUntilNextLaunch, !finalShutdownHolding,
-              copy.automaticCopiesEnabled,
+              copy.automaticCopiesEnabled, !copy.queueRebuildRequired,
               !copy.active, !copy.maintaining, !copy.auditBusy, !copy.interruptionRequested, copy.liveProgress == nil else { return }
         let schedule = settings.schedule
         let now = Date()
