@@ -9,7 +9,20 @@ cli="$3"
 key="$4"
 root="$(mktemp -d "$RUNNER_TEMP/macsync-install-lab.XXXXXXXX")"
 server=""
-trap 'if test -n "$server"; then kill "$server" 2>/dev/null || true; fi; rm -rf "$root"' EXIT
+stage="initial setup"
+cleanup() {
+  rc=$?
+  trap - EXIT
+  if test "$rc" -ne 0; then
+    printf 'LAB: failed in stage %s (exit %s)\n' "$stage" "$rc" >&2
+    # Only the isolated loopback HTTP log, never key material or shell tracing.
+    if test -f "$root/http.log"; then tail -n 25 "$root/http.log" >&2 || true; fi
+  fi
+  if test -n "$server"; then kill "$server" 2>/dev/null || true; fi
+  rm -rf "$root"
+  exit "$rc"
+}
+trap cleanup EXIT
 test -x "$cli"
 cat > "$root/pub.swift" <<'SWIFT'
 import Foundation
@@ -18,8 +31,10 @@ let text = try String(contentsOfFile: CommandLine.arguments[1], encoding: .utf8)
 let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(base64Encoded: text)!)
 print(key.publicKey.rawRepresentation.base64EncodedString())
 SWIFT
+stage="derive test public key"
 public="$(swift "$root/pub.swift" "$key")"
 mkdir "$root/www" "$root/base" "$root/target" "$root/new"
+stage="extract candidate fixture"
 ditto -x -k "$archive" "$root/base"
 # Serve only test output on loopback using an ephemeral kernel-selected port.
 cat > "$root/server.py" <<'PY'
@@ -27,17 +42,29 @@ import functools, http.server, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(root / "www"))
 with http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler) as server:
-    (root / "port").write_text(str(server.server_port))
+    temporary = root / "port.tmp"
+    temporary.write_text(str(server.server_port))
+    temporary.replace(root / "port")
     server.serve_forever()
 PY
+stage="start isolated HTTP server"
 python3 "$root/server.py" "$root" > "$root/http.log" 2>&1 &
 server=$!
-for i in $(seq 1 100); do test -s "$root/port" && break; sleep 0.1; done
+for i in $(seq 1 300); do
+  if test -s "$root/port"; then break; fi
+  kill -0 "$server" 2>/dev/null || { echo "LAB: HTTP server exited before readiness" >&2; exit 1; }
+  sleep 0.1
+done
 test -s "$root/port"
 feed="http://127.0.0.1:$(cat "$root/port")"
+stage="check isolated HTTP readiness"
+curl --fail --silent --show-error --max-time 5 "$feed/" >/dev/null
+echo "LAB: isolated HTTP server ready"
 labid="org.macsync.ci.install-lab"
 make_fixture() {
   app="$1"; version="$2"; build="$3"; feedname="$4"
+  stage="prepare fixture $version"
+  echo "LAB: preparing fixture $version"
   ditto "$root/base/MacSync.app" "$app"
   info="$app/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c "Set CFBundleIdentifier $labid" "$info"
@@ -52,6 +79,7 @@ make_fixture() {
 }
 make_fixture "$root/target/MacSync.app" 0.18.1 181 appcast.xml
 make_fixture "$root/new/MacSync.app" 0.18.2 182 appcast.xml
+stage="build and sign test archive"
 ditto -c -k --sequesterRsrc --keepParent "$root/new/MacSync.app" "$root/www/update.zip"
 sig="$("$sign" -f "$key" -p "$root/www/update.zip")"
 "$sign" -f "$key" --verify "$root/www/update.zip" "$sig"
@@ -71,10 +99,13 @@ XML
 export MACSYNC_RECOVERY_LAB_ROOT="$root"
 export MACSYNC_RECOVERY_LAB_PUBLIC="$public"
 phase() {
+  stage="recovery $1 / $2"
+  echo "LAB: $stage"
   MACSYNC_RECOVERY_LAB_SCENARIO="$1" MACSYNC_RECOVERY_LAB_PHASE="$2" \
     swift test --skip-build --filter UpdateRecoveryIntegrationTests/testPersistentRecoveryAndStartupGate
 }
 install_valid() {
+  stage="valid Sparkle install"
   python3 - "$cli" "$root/target/MacSync.app" <<'PY'
 import subprocess, sys
 subprocess.run([sys.argv[1], sys.argv[2]], check=True, timeout=150)
@@ -108,6 +139,7 @@ make_fixture "$root/bad/MacSync.app" 0.18.1 181 appcast.xml
  /usr/libexec/PlistBuddy -c 'Set CFBundleIdentifier org.macsync.ci.install-lab' "$root/bad/MacSync.app/Contents/Info.plist"
 codesign --force --sign - "$root/bad/MacSync.app"
 phase tampered prepare
+stage="tampered archive rejection"
 python3 - "$root/www/update.zip" <<'PY'
 from pathlib import Path
 import sys
