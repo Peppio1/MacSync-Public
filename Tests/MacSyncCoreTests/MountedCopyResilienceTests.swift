@@ -101,6 +101,46 @@ final class MountedCopyResilienceTests: XCTestCase {
         XCTAssertTrue(try pending(f).isEmpty)
     }
 
+    func testQueueResetRebindsInterruptedPublicationWithoutOverwritingIndependentTarget() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        // The normal inventory is present for a rebuild.
+        _ = try LocalInventory(path:f.db).reconcile(rootID:"photos",root:f.src)
+        let journal=try ChangeJournal(path:f.db)
+        // The fixture initially enqueues an upload manually; retain only
+        // the most recent event as the worker's normal current event.
+        let jobs=try journal.pending()
+        for job in jobs.dropLast() { try journal.markCompleted(id:job.id) }
+        let w=try worker(f)
+        var partial:URL?
+        w.checkpoint={phase,url in
+            if phase == .beforePublish { partial=url; throw SimulatedFailure.connectionLost }
+        }
+        XCTAssertEqual(try w.runCycle(enabled:true).failed,1)
+        let preserved=try XCTUnwrap(partial)
+        let old=try XCTUnwrap(journal.pending().first)
+        XCTAssertTrue(try journal.hasPublicationIntent(old))
+        XCTAssertEqual(try journal.resetPendingQueue(backup:f.base.appendingPathComponent("reset.sqlite")),1)
+        let target=f.dst.appendingPathComponent("photo.psd")
+        try write("independent target",to:target)
+        let reopened=try ChangeJournal(path:f.db)
+        let token=try XCTUnwrap(reopened.queueRebuildToken())
+        XCTAssertTrue(try worker(f).runCycle(enabled:true).interrupted)
+        let session=try SeededArchiveSession(database:URL(fileURLWithPath:f.db),mappings:[f.mapping])
+        let result=try session.auditAndRecognize(mode:.intelligent,repair:true)
+        _ = try session.approve(report:result.recognition)
+        _ = try reopened.completeQueueRebuild(token:token)
+        let new=try XCTUnwrap(reopened.pending().first)
+        XCTAssertNotEqual(old.id,new.id)
+        let retry=try worker(f)
+        retry.checkpoint={phase,_ in if phase == .beforeStageCopy { XCTFail("Uncertain old publication must not overwrite independent file") } }
+        XCTAssertEqual(try retry.runCycle(enabled:true).deferred,1)
+        XCTAssertEqual(try read(target),"independent target")
+        XCTAssertTrue(FileManager.default.fileExists(atPath:preserved.path))
+        XCTAssertTrue(try reopened.hasPublicationIntent(new))
+        XCTAssertEqual(try reopened.pending().count,1)
+    }
+
     func testInterruptedStagingPreservesOldFileAndReopensQueue() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }

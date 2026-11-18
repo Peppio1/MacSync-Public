@@ -84,6 +84,46 @@ final class MirrorDeletionTests: XCTestCase {
         )
     }
 
+    func testQueueResetRestoresOnlyAuthorizedDeletionAndNeverReplaysIt() throws {
+        let f=try fixture(fileCount:4)
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        try deleteSource(f,name:"photo0.dng") // before consent
+        let authorization=try MirrorAuthorization.capture(journal:f.journal,mappings:[f.mapping])
+        try deleteSource(f,name:"photo1.dng")
+        try deleteSource(f,name:"photo2.dng")
+        let original=try XCTUnwrap(f.journal.pending().first{$0.relativePath=="photo1.dng"})
+        try Data("server only".utf8).write(to:f.destination.appendingPathComponent("independent.dng"))
+        XCTAssertEqual(try f.journal.resetPendingQueue(backup:f.base.appendingPathComponent("reset.sqlite")),3)
+        let reopened=try ChangeJournal(path:f.database)
+        let token=try XCTUnwrap(reopened.queueRebuildToken())
+        // A reappearing source path produces a new event while the hold is active.
+        try Data("returned".utf8).write(to:f.source.appendingPathComponent("photo2.dng"))
+        try LocalInventory(path:f.database).reconcile(rootID:"photos",root:f.source)
+        let session=try SeededArchiveSession(database:URL(fileURLWithPath:f.database),mappings:[f.mapping])
+        let result=try session.auditAndRecognize(mode:.intelligent,repair:true)
+        _ = try session.approve(report:result.recognition)
+        XCTAssertThrowsError(try authorization.completeQueueRebuild(journal:reopened,mappings:[f.mapping],token:token,report:result.audit,shouldContinue:{false}))
+        XCTAssertNotNil(try reopened.queueRebuildToken())
+        XCTAssertEqual(try reopened.plannedDeleteCount(afterID:0),0)
+        XCTAssertEqual(try authorization.completeQueueRebuild(journal:reopened,mappings:[f.mapping],token:token,report:result.audit,shouldContinue:{true}),1)
+        XCTAssertEqual(try reopened.pending().filter{$0.kind == .delete}.map(\.id),[original.id])
+        XCTAssertTrue(try reopened.pending().contains{$0.kind == .upsert && $0.relativePath=="photo2.dng"})
+        // Simulate a completed, verified deletion then an independent file
+        // appearing at the same destination path.
+        let target=f.destination.appendingPathComponent("photo1.dng")
+        try FileManager.default.removeItem(at:target)
+        XCTAssertTrue(try reopened.acknowledgeDeletion(id:original.id,rootID:"photos",relativePath:"photo1.dng"))
+        try Data("unrelated replacement".utf8).write(to:target)
+        _ = try reopened.resetPendingQueue(backup:f.base.appendingPathComponent("second-reset.sqlite"))
+        let second=try XCTUnwrap(reopened.queueRebuildToken())
+        let next=try session.auditAndRecognize(mode:.intelligent,repair:true)
+        _ = try session.approve(report:next.recognition)
+        XCTAssertEqual(try authorization.completeQueueRebuild(journal:reopened,mappings:[f.mapping],token:second,report:next.audit,shouldContinue:{true}),0)
+        XCTAssertEqual(try reopened.plannedDeleteCount(afterID:0),0)
+        XCTAssertEqual(try String(contentsOf:target,encoding:.utf8),"unrelated replacement")
+        XCTAssertTrue(FileManager.default.fileExists(atPath:f.destination.appendingPathComponent("independent.dng").path))
+    }
+
     func testDeletionDisabledByDefaultAndInvalidRetentionRejected() throws {
         XCTAssertThrowsError(try MirrorDeletionPolicy(enabled: true, recoveryEnabled: true, retentionDays: 31))
         XCTAssertThrowsError(try MirrorDeletionPolicy(enabled: true, recoveryEnabled: true, retentionDays: -1))

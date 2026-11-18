@@ -91,6 +91,53 @@ final class SeededArchiveVerifierTests: XCTestCase {
         print("400,000 tiny local files and 96,000 directories; compare \(scan) s; recognition \(Date().timeIntervalSince(commitTick)) s; total \(Date().timeIntervalSince(start)) s; content bytes read 0")
     }
 
+    func testLargeArchiveQueues50000GenuineDifferencesAfterReset() throws {
+        guard ProcessInfo.processInfo.environment["MACSYNC_LARGE_AUDIT"] == "1" else { throw XCTSkip("Opt-in large differences regression") }
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let count=50_000, groups=500
+        let old=Date(timeIntervalSince1970:1_700_000_000)
+        for group in 0..<groups {
+            let a=f.source.appendingPathComponent("group-\(group)")
+            let b=f.target.appendingPathComponent("group-\(group)")
+            try FileManager.default.createDirectory(at:a,withIntermediateDirectories:true)
+            try FileManager.default.createDirectory(at:b,withIntermediateDirectories:true)
+            for index in 0..<(count/groups) {
+                let name="photo-\(index).dat"
+                let src=a.appendingPathComponent(name),dst=b.appendingPathComponent(name)
+                // Half differ by length; half by same-length content with
+                // different modification times so intelligent SHA is required.
+                try Data("source".utf8).write(to:src)
+                try Data((index.isMultiple(of:2) ? "old" : "target").utf8).write(to:dst)
+                try FileManager.default.setAttributes([.modificationDate:old],ofItemAtPath:src.path)
+                try FileManager.default.setAttributes([.modificationDate:old.addingTimeInterval(-60)],ofItemAtPath:dst.path)
+            }
+        }
+        try initializeInventory(f)
+        XCTAssertEqual(try f.journal.resetPendingQueue(backup:f.base.appendingPathComponent("before-reset.sqlite")),count+groups)
+        let reopened=try ChangeJournal(path:f.db.path)
+        let token=try XCTUnwrap(reopened.queueRebuildToken())
+        XCTAssertEqual(try reopened.plannedUploadCount(),0)
+        let start=Date()
+        let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let result=try session.auditAndRecognize(mode:.intelligent,repair:true)
+        XCTAssertEqual(result.audit.count(.different),count)
+        XCTAssertEqual(result.audit.count(.uncertain),0)
+        XCTAssertEqual(result.audit.count(.matching),groups)
+        XCTAssertEqual(result.audit.findings.filter{$0.detail=="Dimensione diversa"}.count,count/2)
+        XCTAssertEqual(result.audit.findings.filter{$0.detail=="Contenuto SHA-256 diverso"}.count,count/2)
+        XCTAssertEqual(result.audit.bytesRead,Int64(count/2*12))
+        XCTAssertEqual(result.audit.queuedRepairs,count)
+        XCTAssertEqual(try session.approve(report:result.recognition),0)
+        XCTAssertEqual(try reopened.completeQueueRebuild(token:token),0)
+        XCTAssertEqual(try reopened.plannedUploadCount(),count)
+        XCTAssertEqual(try reopened.plannedDeleteCount(afterID:0),0)
+        XCTAssertNil(try reopened.queueRebuildToken())
+        XCTAssertEqual(try String(contentsOf:f.target.appendingPathComponent("group-0/photo-0.dat"),encoding:.utf8),"old")
+        XCTAssertEqual(try String(contentsOf:f.target.appendingPathComponent("group-0/photo-1.dat"),encoding:.utf8),"target")
+        print("50,000 genuine differences queued after reset, no destination writes; \(Date().timeIntervalSince(start)) s")
+    }
+
     func testQueueResetPersistsHoldAndAuditRebuildsOnlyRealMissingFile() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at:f.base) }

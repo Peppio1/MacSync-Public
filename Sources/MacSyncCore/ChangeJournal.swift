@@ -59,6 +59,7 @@ public final class ChangeJournal {
             try execute("CREATE TABLE IF NOT EXISTS transfer_recovery(job_id INTEGER PRIMARY KEY, root_id TEXT NOT NULL, relative_path TEXT NOT NULL, record TEXT NOT NULL);")
             try execute("CREATE TABLE IF NOT EXISTS queue_rebuild_hold(singleton INTEGER PRIMARY KEY CHECK(singleton=1), token TEXT NOT NULL);")
             try execute("CREATE TABLE IF NOT EXISTS retired_delete_evidence(job_id INTEGER PRIMARY KEY);")
+            try execute("CREATE TABLE IF NOT EXISTS retired_publication_evidence(job_id INTEGER PRIMARY KEY);")
             try execute("CREATE TABLE IF NOT EXISTS verified_content_cache(root_id TEXT NOT NULL, relative_path TEXT NOT NULL, binding TEXT NOT NULL, source_stamp TEXT NOT NULL, target_stamp TEXT NOT NULL, PRIMARY KEY(root_id,relative_path));")
             try execute("CREATE TABLE IF NOT EXISTS directory_bindings(root_id TEXT NOT NULL, role TEXT NOT NULL, stamp TEXT NOT NULL, PRIMARY KEY(root_id,role));")
             try execute("CREATE INDEX IF NOT EXISTS idx_queue_pending ON change_queue(completed, id);")
@@ -150,6 +151,7 @@ public final class ChangeJournal {
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
             try execute("INSERT OR IGNORE INTO retired_delete_evidence(job_id) SELECT id FROM change_queue WHERE completed=0 AND kind='delete';")
+            try execute("INSERT OR IGNORE INTO retired_publication_evidence(job_id) SELECT q.id FROM change_queue q JOIN publication_intents p ON p.job_id=q.id WHERE q.completed=0 AND q.kind='upsert';")
             try clearVerifiedContentCache()
             try clearUploadRetries()
             try execute("UPDATE change_queue SET completed=1 WHERE completed=0;")
@@ -209,6 +211,24 @@ public final class ChangeJournal {
                       sqlite3_step(update) == SQLITE_DONE else { throw databaseFailure() }
                 restored += Int(sqlite3_changes(connection))
             }
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            // A retired deletion is evidence for THIS rebuild, not a
+            // permanent right to delete a future, unrelated destination.
+            // Its original queue row and the verified backup retain history.
+            try execute("DELETE FROM retired_delete_evidence;")
+            // Even a metadata match cannot prove that an interrupted
+            // publication actually succeeded. Requeue unresolved retired
+            // publication paths for live SHA-256 reconciliation; existing
+            // audit/monitor jobs win. No physical files are touched here.
+            try execute("""
+                INSERT INTO change_queue(root_id,relative_path,kind,recorded_at)
+                SELECT DISTINCT q.root_id,q.relative_path,'upsert',strftime('%s','now')
+                FROM retired_publication_evidence e
+                JOIN change_queue q ON q.id=e.job_id
+                JOIN publication_intents p ON p.job_id=q.id
+                JOIN file_inventory f ON f.root_id=q.root_id AND f.relative_path=q.relative_path AND f.kind='file'
+                WHERE NOT EXISTS(SELECT 1 FROM change_queue newer WHERE newer.root_id=q.root_id AND newer.relative_path=q.relative_path AND newer.completed=0);
+                """)
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             try execute("DELETE FROM queue_rebuild_hold WHERE singleton=1;")
             try execute("COMMIT;")
@@ -372,6 +392,45 @@ public final class ChangeJournal {
         guard sqlite3_bind_int64(stmt,1,job.id)==SQLITE_OK else { throw databaseFailure() }
         try bind(job.rootID,at:2,in:stmt); try bind(job.relativePath,at:3,in:stmt)
         guard sqlite3_step(stmt)==SQLITE_DONE else { throw databaseFailure() }
+    }
+
+    /// Carry an unresolved publication across a queue reset. The recovery
+    /// record still contains the original target/source/volume fingerprints.
+    /// Ambiguous multiple intents are left untouched and the job is deferred.
+    func adoptRetiredPublication(_ job:QueuedChange) throws {
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            guard try uploadIsCurrent(job) else { throw MountedCopyError.sourceChanging }
+            let query=try prepare("""
+                SELECT p.job_id FROM retired_publication_evidence e
+                JOIN publication_intents p ON p.job_id=e.job_id
+                WHERE p.root_id=? AND p.relative_path=? AND p.job_id<>?;
+                """)
+            defer { sqlite3_finalize(query) }
+            try bind(job.rootID,at:1,in:query); try bind(job.relativePath,at:2,in:query)
+            guard sqlite3_bind_int64(query,3,job.id)==SQLITE_OK else { throw databaseFailure() }
+            var ids:[Int64]=[]
+            var rc=sqlite3_step(query)
+            while rc==SQLITE_ROW { ids.append(sqlite3_column_int64(query,0)); rc=sqlite3_step(query) }
+            guard rc==SQLITE_DONE else { throw databaseFailure() }
+            if let old=ids.first {
+                guard ids.count==1, try !hasPublicationIntent(job), try transferRecovery(job)==nil else {
+                    throw MountedCopyError.destinationChanging
+                }
+                for table in ["publication_intents","transfer_recovery"] {
+                    let move=try prepare("UPDATE \(table) SET job_id=? WHERE job_id=? AND root_id=? AND relative_path=?;")
+                    defer { sqlite3_finalize(move) }
+                    guard sqlite3_bind_int64(move,1,job.id)==SQLITE_OK,
+                          sqlite3_bind_int64(move,2,old)==SQLITE_OK else { throw databaseFailure() }
+                    try bind(job.rootID,at:3,in:move); try bind(job.relativePath,at:4,in:move)
+                    guard sqlite3_step(move)==SQLITE_DONE else { throw databaseFailure() }
+                }
+                let remove=try prepare("DELETE FROM retired_publication_evidence WHERE job_id=?;")
+                defer { sqlite3_finalize(remove) }
+                guard sqlite3_bind_int64(remove,1,old)==SQLITE_OK,sqlite3_step(remove)==SQLITE_DONE else { throw databaseFailure() }
+            }
+            try execute("COMMIT;")
+        } catch { try? execute("ROLLBACK;"); throw error }
     }
 
     public func recordPublicationIntent(_ job: QueuedChange) throws {

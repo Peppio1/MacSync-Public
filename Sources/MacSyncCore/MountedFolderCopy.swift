@@ -353,6 +353,7 @@ public final class MountedFolderCopyWorker {
                 }
                 // Only an interrupted publication pays the cost of a full
                 // content comparison. Never infer completion from size alone.
+                try journal.adoptRetiredPublication(job)
                 let previousPublication = try journal.hasPublicationIntent(job)
                 // Only hash an ordinary existing queued file if its size and
                 // mtime look equal. A same-size/same-date edit still copies

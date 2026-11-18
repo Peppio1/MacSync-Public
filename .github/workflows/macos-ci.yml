@@ -61,6 +61,11 @@ jobs:
         env:
           MACSYNC_LARGE_AUDIT: '1'
         run: swift test -Xswiftc -warnings-as-errors --filter SeededArchiveVerifierTests/testLargeArchiveRecognition200000Files
+      - name: Large genuine differences after queue reset (50000 files)
+        if: github.ref == 'refs/heads/develop-v0.18.2' || (github.event_name == 'workflow_dispatch' && inputs.large_audit)
+        env:
+          MACSYNC_LARGE_AUDIT: '1'
+        run: swift test -Xswiftc -warnings-as-errors --filter SeededArchiveVerifierTests/testLargeArchiveQueues50000GenuineDifferencesAfterReset
       - name: Release build for Apple Silicon and Intel
         run: |
           set -euo pipefail
