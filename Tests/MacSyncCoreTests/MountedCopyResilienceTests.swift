@@ -43,6 +43,64 @@ final class MountedCopyResilienceTests: XCTestCase {
     }
     private func read(_ url: URL) throws -> String { try String(contentsOf: url, encoding: .utf8) }
 
+    func testPersistentBackoffFollowsJobAndExpiresAfterReopen() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let first=try ChangeJournal(path:f.db)
+        let job=try XCTUnwrap(first.pending().first)
+        let now=Date()
+        try first.recordRetry(job,rootWide:false,reason:"permission",now:now,initial:30)
+        let reopened=try ChangeJournal(path:f.db)
+        XCTAssertTrue(try reopened.retryBlocked(job,now:now.addingTimeInterval(29)))
+        XCTAssertFalse(try reopened.retryBlocked(job,now:now.addingTimeInterval(31)))
+        try reopened.recordRetry(job,rootWide:false,reason:"permission",now:now.addingTimeInterval(31),initial:30)
+        XCTAssertTrue(try reopened.retryBlocked(job,now:now.addingTimeInterval(60)))
+        XCTAssertFalse(try reopened.retryBlocked(job,now:now.addingTimeInterval(92)))
+        try reopened.clearUploadRetries()
+        XCTAssertFalse(try reopened.retryBlocked(job,now:now))
+    }
+
+    func testUncertainNewPublicationNeverOverwritesIndependentTargetOnRetry() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let target=f.dst.appendingPathComponent("photo.psd")
+        let w=try worker(f)
+        w.checkpoint={ phase,_ in
+            if phase == .beforePublish { throw SimulatedFailure.connectionLost }
+        }
+        XCTAssertEqual(try w.runCycle(enabled:true).failed,1)
+        try write("arrived independently",to:target)
+        let retry=try worker(f)
+        retry.checkpoint={ phase,_ in
+            if phase == .beforeStageCopy { XCTFail("An uncertain publication must not overwrite a newly arrived file") }
+        }
+        XCTAssertEqual(try retry.runCycle(enabled:true).deferred,1)
+        XCTAssertEqual(try read(target),"arrived independently")
+        XCTAssertEqual(try pending(f).count,1)
+    }
+
+    func testKnownUnpublishedTemporaryIsRetiredAndTransferRestartsFromZero() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let w=try worker(f)
+        var partial:URL?
+        w.checkpoint={phase,url in
+            if phase == .beforePublish { partial=url; throw SimulatedFailure.connectionLost }
+        }
+        XCTAssertEqual(try w.runCycle(enabled:true).failed,1)
+        let old=try XCTUnwrap(partial)
+        XCTAssertTrue(FileManager.default.fileExists(atPath:old.path))
+        let retry=try worker(f)
+        retry.checkpoint={ phase,url in
+            if phase == .beforeStageCopy {
+                XCTAssertNotEqual(old,url)
+                XCTAssertFalse(FileManager.default.fileExists(atPath:old.path))
+            }
+        }
+        XCTAssertEqual(try retry.runCycle(enabled:true).created,1)
+        XCTAssertTrue(try pending(f).isEmpty)
+    }
+
     func testInterruptedStagingPreservesOldFileAndReopensQueue() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }

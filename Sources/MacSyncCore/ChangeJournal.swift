@@ -151,6 +151,7 @@ public final class ChangeJournal {
         do {
             try execute("INSERT OR IGNORE INTO retired_delete_evidence(job_id) SELECT id FROM change_queue WHERE completed=0 AND kind='delete';")
             try clearVerifiedContentCache()
+            try clearUploadRetries()
             try execute("UPDATE change_queue SET completed=1 WHERE completed=0;")
             let count = Int(sqlite3_changes(connection))
             let stmt = try prepare("INSERT OR REPLACE INTO queue_rebuild_hold(singleton,token) VALUES(1,?);")

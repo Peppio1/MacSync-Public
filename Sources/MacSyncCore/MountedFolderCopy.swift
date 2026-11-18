@@ -241,7 +241,7 @@ public final class MountedFolderCopyWorker {
 
     // Internal fault injection for deterministic core tests, never configured
     // by the application or exposed to users.
-    enum Checkpoint: Equatable { case beforeStageCopy, afterStageCopy, afterBackup, afterPublish, beforeBackupCleanup, beforeFailedStageCleanup }
+    enum Checkpoint: Equatable { case beforeStageCopy, afterStageCopy, afterBackup, beforePublish, afterPublish, beforeBackupCleanup, beforeFailedStageCleanup }
     var checkpoint: ((Checkpoint, URL) throws -> Void)?
 
     public init(
@@ -586,23 +586,37 @@ public final class MountedFolderCopyWorker {
         return folder.appendingPathComponent(record.name)
     }
 
-    private func discardVerifiedStage(_ record:RecoveryRecord,mapping:MountedFolderMapping) throws {
+    private func discardVerifiedStage(_ record:RecoveryRecord,mapping:MountedFolderMapping,confirmedTarget:URL? = nil) throws {
         let url=try verifyRecovery(record,mapping:mapping)
         guard let actual=try optionalSnapshot(url) else { return }
-        guard actual==record.stage,actual.kind == .file else { throw MountedCopyError.destinationChanging }
+        guard actual.kind == .file else { throw MountedCopyError.destinationChanging }
+        if actual != record.stage {
+            // A completed hard link changes ctime. Only remove the staging
+            // name when it is still the same inode AND the already verified
+            // definitive file is another link to that very object.
+            guard let confirmedTarget, actual.device==record.stage.device,actual.inode==record.stage.inode,
+                  actual.size==record.stage.size,actual.mtime==record.stage.mtime,
+                  try readSnapshot(confirmedTarget)==actual else { throw MountedCopyError.destinationChanging }
+        }
         let anchor=try AnchoredDirectory(url.deletingLastPathComponent(),expectedVolume:mapping.targetVolume)
         let s=try anchor.leaf(record.name)
         guard UInt64(s.st_ino)==actual.inode,Int64(s.st_size)==actual.size,
               Int64(s.st_ctimespec.tv_sec)==actual.ctimeSeconds,
               Int64(s.st_ctimespec.tv_nsec)==actual.ctimeNanoseconds,
               try readSnapshot(url)==actual else { throw MountedCopyError.destinationChanging }
+        if actual != record.stage {
+            guard let confirmedTarget, s.st_nlink>=2,
+                  try readSnapshot(confirmedTarget)==actual else { throw MountedCopyError.destinationChanging }
+        }
         try anchor.remove(record.name,matching:s,shouldContinue:operationAllowed)
     }
 
     private func recoverConfirmedStage(_ job:QueuedChange,mapping:MountedFolderMapping) {
         do {
             guard let record=try recoveryRecord(job) else { return }
-            try discardVerifiedStage(record,mapping:mapping)
+            let dst=try mapping.fileURL(relativePath:job.relativePath,destination:true)
+            try ensureSafeParents(dst,under:mapping.target,create:false)
+            try discardVerifiedStage(record,mapping:mapping,confirmedTarget:dst)
             try journal.clearTransferRecovery(job)
         } catch {
             try? log.record(level:.warning,rootID:job.rootID,action:"staging_retained",relativePath:job.relativePath,message:"Temporaneo di recupero non verificabile; conservato")
@@ -625,7 +639,8 @@ public final class MountedFolderCopyWorker {
         try ensureSafeParents(dst,under:mapping.target,create:false)
         let src=try mapping.fileURL(relativePath:job.relativePath,destination:false)
         try ensureSafeParents(src,under:mapping.source,create:false)
-        guard try readSnapshot(src).kind == .file else { throw MountedCopyError.sourceMissing }
+        let currentSource=try readSnapshot(src)
+        guard currentSource.kind == .file else { throw MountedCopyError.sourceMissing }
         if publicationUncertain {
             let current=try optionalSnapshot(dst)
             // Permit retry ONLY against the same old target (or its still
@@ -635,7 +650,18 @@ public final class MountedFolderCopyWorker {
             if current != record.originalTarget {
                 guard let current, current.kind == .file,
                       current.device==record.stage.device,current.inode==record.stage.inode,
-                      current.size==record.stage.size,current.mtime==record.stage.mtime else {
+                      current.size==record.stage.size,current.mtime==record.stage.mtime,
+                      currentSource==record.source else {
+                    throw MountedCopyError.destinationChanging
+                }
+                // An inode match alone is not evidence that the bytes are
+                // ours: another writer can preserve length and mtime.
+                try WindowsPathSafety.checkNames(relativePath:job.relativePath,under:mapping.source)
+                try WindowsPathSafety.checkNames(relativePath:job.relativePath,under:mapping.target)
+                let token=SeedVerificationCancellation(shouldContinue:operationAllowed)
+                let verifier=try SeededArchiveVerifier(journal:journal,mappings:[mapping])
+                guard try verifier.verifyOne(job,mapping:mapping,cancellation:token,onBytesRead:{_ in}) != nil,
+                      try readSnapshot(src)==currentSource,try optionalSnapshot(dst)==current else {
                     throw MountedCopyError.destinationChanging
                 }
             }
@@ -821,6 +847,8 @@ public final class MountedFolderCopyWorker {
                       Int64(originalStat.st_ctimespec.tv_nsec) == originalTarget.ctimeNanoseconds else { throw MountedCopyError.destinationChanging }
                 try journal.recordPublicationIntent(job)
                 publicationAttempted = true
+                try checkpoint?(.beforePublish, staging)
+                try verifyPublication()
                 try stageAnchor.publish(staging.lastPathComponent,matching:stagedStat,to:destAnchor,
                     as:dst.lastPathComponent,replacing:originalStat,shouldContinue:operationAllowed,onMethod: { method in
                         try? self.log.record(level:.info,rootID:job.rootID,action:"publish_method",relativePath:job.relativePath,message:method)
@@ -831,6 +859,8 @@ public final class MountedFolderCopyWorker {
                 // newly arrived file after an initially absent destination.
                 try journal.recordPublicationIntent(job)
                 publicationAttempted = true
+                try checkpoint?(.beforePublish, staging)
+                try verifyPublication()
                 try stageAnchor.publish(staging.lastPathComponent,matching:stagedStat,to:destAnchor,
                     as:dst.lastPathComponent,replacing:nil,shouldContinue:operationAllowed,preferredMethod:method,onMethod: { method in
                         try? self.log.record(level:.info,rootID:job.rootID,action:"publish_method",relativePath:job.relativePath,message:method)
