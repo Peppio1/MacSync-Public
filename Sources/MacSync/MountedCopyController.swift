@@ -298,6 +298,7 @@ final class MountedCopyController: ObservableObject {
                 recognitionProgress.compared = 0
                 recognitionProgress.currentPath = ""
                 diagnostic(recognitionProgress); progress(recognitionProgress)
+                var recognizedFiles = 0, recognizedDirectories = 0
                 let acknowledged = try local.approve(report:recognition,cancellation:cancel,progress:{ processed,total in
                     recognitionProgress.compared = processed
                     recognitionProgress.total = total
@@ -306,13 +307,14 @@ final class MountedCopyController: ObservableObject {
                     recognitionProgress.phase = "Finalizzazione database"
                     recognitionProgress.comparisonStarted = nil
                     diagnostic(recognitionProgress); progress(recognitionProgress)
-                })
-                report.recognizedFiles = acknowledged
+                },onCounts:{ files,directories in recognizedFiles = files; recognizedDirectories = directories })
+                report.recognizedFiles = recognizedFiles
+                report.recognizedDirectories = recognizedDirectories
                 recognitionProgress.phase = "Salvataggio report"
                 recognitionProgress.comparisonStarted = nil
                 progress(recognitionProgress)
                 let savedReport = report
-                try? auditLog?.record(level:.info,rootID:"app",action:"seed_recognized",message:settings.mode.label + ": " + String(acknowledged) + " file riconosciuti automaticamente; nessuna scrittura sul server")
+                try? auditLog?.record(level:.info,rootID:"app",action:"seed_recognized",message:settings.mode.label + ": " + String(recognizedFiles) + " file e " + String(recognizedDirectories) + " cartelle riconosciuti automaticamente; nessuna scrittura sul server")
  
                 var storageWarning = ""
                 do {
@@ -329,8 +331,8 @@ final class MountedCopyController: ObservableObject {
                     self.auditReport = savedReport
                     self.seedReady = false; self.seedVerifiedCount = acknowledged
                     self.seedInspectedCount = recognition.inspected; self.seedReadBytes = recognition.bytesRead
-                    self.seedStatus = "Allineamento automatico: \(acknowledged) file riconosciuti su \(recognition.verifiedCount) candidati"
-                    self.auditStatus = "Verifica conclusa: " + String(savedReport.queuedRepairs) + " riparazioni accodate; \(acknowledged) file riconosciuti" + warning
+                    self.seedStatus = "Allineamento automatico: \(acknowledged) elementi riconosciuti su \(recognition.verifiedCount) candidati"
+                    self.auditStatus = "Verifica conclusa: " + String(savedReport.queuedRepairs) + " riparazioni accodate; \(savedReport.recognizedFiles ?? 0) file e \(savedReport.recognizedDirectories ?? 0) cartelle riconosciuti" + warning
                     self.auditProgress = nil
                     self.auditBusy = false
                     self.maintaining = false

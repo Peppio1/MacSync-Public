@@ -214,6 +214,7 @@ public struct ArchiveAuditReport: Codable, Equatable, Sendable {
     public var destinationMetrics: AuditSideMetrics? = nil
     public var deletionCandidates: Set<String>? = nil
     public var recognizedFiles: Int? = nil
+    public var recognizedDirectories: Int? = nil
     public var metadataMatches: Int? = nil
     public var hashMatches: Int? = nil
     public var displayCounts: AuditFindingCounts? = nil
@@ -246,6 +247,7 @@ public final class ArchiveAudit {
                     shouldCollectMetadataMatch: (String,String) -> Bool = { _,_ in true },
                     deletionCandidates: Set<String> = [],
                     onVerifiedFile: (String, String, SeedFileFingerprint, SeedFileFingerprint) -> Void = { _,_,_,_ in },
+                    onVerifiedDirectory: (String, String, SeedFileFingerprint, SeedFileFingerprint) -> Void = { _,_,_,_ in },
                     diagnostic: (ArchiveAuditProgress) -> Void = { _ in },
                     progress: (ArchiveAuditProgress) -> Void = { _ in }) throws -> ArchiveAuditReport {
         var state = ArchiveAuditProgress()
@@ -363,8 +365,36 @@ public final class ArchiveAudit {
                         detail = "Percorso ambiguo, tipo incompatibile o collegamento simbolico"
                     } else if src == nil { kind = .extra }
                     else if dst == nil { kind = .missing }
-                    else if item.kind == "directory" { kind = .matching }
-                    else if src!.size != dst!.size { kind = .different; detail = "Dimensione diversa" }
+                    else if item.kind == "directory" {
+                        kind = .matching
+                        if collectMetadataMatches && shouldCollectMetadataMatch(mapping.rootID,path) {
+                            let a = try Self.safeURL(path,mapping:mapping,destination:false)
+                            let b = try Self.safeURL(path,mapping:mapping,destination:true)
+                            let beforeA = try SeededArchiveVerifier.fingerprint(a,directory:true)
+                            let beforeB = try SeededArchiveVerifier.fingerprint(b,directory:true)
+                            guard try SeededArchiveVerifier.fingerprint(a,directory:true) == beforeA,
+                                  try SeededArchiveVerifier.fingerprint(b,directory:true) == beforeB else {
+                                throw SeedVerificationError.changedDuringRead
+                            }
+                            onVerifiedDirectory(mapping.rootID,path,beforeA,beforeB)
+                        }
+                    }
+                    else if src!.size != dst!.size {
+                        // Independently re-read both sides before declaring a size mismatch.
+                        let a = try Self.safeURL(path,mapping:mapping,destination:false)
+                        let b = try Self.safeURL(path,mapping:mapping,destination:true)
+                        let beforeA = try SeededArchiveVerifier.fingerprint(a)
+                        let beforeB = try SeededArchiveVerifier.fingerprint(b)
+                        guard beforeA.size == src!.size, beforeB.size == dst!.size,
+                              abs(beforeA.modifiedAt-src!.modifiedAt)<0.002,
+                              abs(beforeB.modifiedAt-dst!.modifiedAt)<0.002,
+                              try SeededArchiveVerifier.fingerprint(a) == beforeA,
+                              try SeededArchiveVerifier.fingerprint(b) == beforeB else {
+                            throw SeedVerificationError.changedDuringRead
+                        }
+                        fingerprint = beforeA
+                        kind = .different; detail = "Dimensione diversa"
+                    }
                     else if mode == .quick || (mode == .intelligent && abs(src!.modifiedAt-dst!.modifiedAt) <= 2) {
                         // Metadata equivalence is NOT proof of byte identity.
                         kind = abs(src!.modifiedAt-dst!.modifiedAt) <= 2 ? .matching : .different

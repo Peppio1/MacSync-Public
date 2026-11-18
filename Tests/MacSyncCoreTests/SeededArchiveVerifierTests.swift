@@ -80,14 +80,45 @@ final class SeededArchiveVerifierTests: XCTestCase {
         XCTAssertEqual(result.audit.sourceMetrics?.files,count)
         XCTAssertEqual(result.audit.destinationMetrics?.files,count)
         XCTAssertEqual(result.audit.bytesRead,0)
-        XCTAssertEqual(result.recognition.matches.count,count)
+        XCTAssertEqual(result.recognition.matches.count,count+200)
         let scan = Date().timeIntervalSince(tick)
         let commitTick = Date()
-        XCTAssertEqual(try session.approve(report:result.recognition),count)
-        XCTAssertEqual(try f.journal.plannedUploadCount(),200) // matching directories remain safe upserts
+        XCTAssertEqual(try session.approve(report:result.recognition),count+200)
+        XCTAssertEqual(try f.journal.plannedUploadCount(),0)
         try ArchiveDatabaseSafety.verify(backup,readOnly:true)
         XCTAssertEqual(try ChangeJournal(path:backup.path).plannedUploadCount(),count+200)
         print("400,000 tiny local files; compare \(scan) s; recognition \(Date().timeIntervalSince(commitTick)) s; total \(Date().timeIntervalSince(start)) s; content bytes read 0")
+    }
+
+    func testMatchingDirectoryAcknowledgedIndependentlyOfMissingChild() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        try write("missing",to:f.source.appendingPathComponent("roll/photo.jpg"))
+        try FileManager.default.createDirectory(at:f.target.appendingPathComponent("roll"),withIntermediateDirectories:true)
+        try initializeInventory(f)
+        let session = try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let result = try session.auditAndRecognize(mode:.intelligent,repair:true)
+        XCTAssertEqual(result.recognition.matches.map(\.relativePath),["roll"])
+        var files = -1, directories = -1
+        XCTAssertEqual(try session.approve(report:result.recognition,onCounts:{ files=$0; directories=$1 }),1)
+        XCTAssertEqual(files,0)
+        XCTAssertEqual(directories,1)
+        XCTAssertEqual(try f.journal.pending().map(\.relativePath),["roll/photo.jpg"])
+    }
+
+    func testMatchingDirectoryReplacedBeforeApprovalStaysPending() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let src = f.source.appendingPathComponent("roll"), dst = f.target.appendingPathComponent("roll")
+        try FileManager.default.createDirectory(at:src,withIntermediateDirectories:true)
+        try FileManager.default.createDirectory(at:dst,withIntermediateDirectories:true)
+        try initializeInventory(f)
+        let session = try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let result = try session.auditAndRecognize(mode:.intelligent)
+        try FileManager.default.moveItem(at:dst,to:f.target.appendingPathComponent("old-roll"))
+        try FileManager.default.createDirectory(at:dst,withIntermediateDirectories:true)
+        XCTAssertEqual(try session.approve(report:result.recognition),0)
+        XCTAssertEqual(try f.journal.pending().map(\.relativePath),["roll"])
     }
 
     func testIdenticalSeededFileIsAcknowledgedWithoutAnyDestinationWrite() throws {

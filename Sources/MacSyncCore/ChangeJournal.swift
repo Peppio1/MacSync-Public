@@ -270,9 +270,10 @@ public final class ChangeJournal {
     public func acknowledgeVerifiedFiles(
         _ entries: [SeedVerifiedMatch],
         sourceRoots: [String: String],
-        shouldContinue: () -> Bool = { true }
+        shouldContinue: () -> Bool = { true },
+        onCounts: (Int, Int) -> Void = { _,_ in }
     ) throws -> Int {
-        guard !entries.isEmpty else { return 0 }
+        guard !entries.isEmpty else { onCounts(0,0); return 0 }
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
             let sql = """
@@ -283,9 +284,8 @@ public final class ChangeJournal {
                        SELECT 1 FROM file_inventory f
                         WHERE f.root_id=change_queue.root_id
                           AND f.relative_path=change_queue.relative_path
-                          AND f.kind='file'
-                          AND f.file_size=?
-                          AND ABS(f.modified_at - ?) < 0.002
+                          AND f.kind=?
+                          AND (f.kind='directory' OR (f.file_size=? AND ABS(f.modified_at - ?) < 0.002))
                    )
                    AND EXISTS (
                        SELECT 1 FROM watched_roots w
@@ -302,6 +302,7 @@ public final class ChangeJournal {
             let statement = try prepare(sql)
             defer { sqlite3_finalize(statement) }
             var changed = 0
+            var directories = 0
             for entry in entries {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 guard let root = sourceRoots[entry.rootID] else { continue }
@@ -311,15 +312,20 @@ public final class ChangeJournal {
                 else { throw databaseFailure() }
                 try bind(entry.rootID, at: 2, in: statement)
                 try bind(entry.relativePath, at: 3, in: statement)
-                guard sqlite3_bind_int64(statement, 4, entry.source.size) == SQLITE_OK,
-                      sqlite3_bind_double(statement, 5, entry.source.modifiedAt) == SQLITE_OK
+                guard entry.objectKind == "file" || entry.objectKind == "directory" else { continue }
+                try bind(entry.objectKind,at:4,in:statement)
+                guard sqlite3_bind_int64(statement, 5, entry.source.size) == SQLITE_OK,
+                      sqlite3_bind_double(statement, 6, entry.source.modifiedAt) == SQLITE_OK
                 else { throw databaseFailure() }
-                try bind(root, at: 6, in: statement)
+                try bind(root, at: 7, in: statement)
                 guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseFailure() }
-                changed += Int(sqlite3_changes(connection))
+                let delta = Int(sqlite3_changes(connection))
+                changed += delta
+                if entry.objectKind == "directory" { directories += delta }
             }
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             try execute("COMMIT;")
+            onCounts(changed-directories,directories)
             return changed
         } catch {
             try? execute("ROLLBACK;")

@@ -71,6 +71,7 @@ public struct SeedVerifiedMatch: Sendable {
     public let source: SeedFileFingerprint
     public let target: SeedFileFingerprint
     public let verifiedBytes: Int64
+    public var objectKind: String = "file"
 }
 
 public struct SeedVerificationProgress: Sendable {
@@ -187,7 +188,8 @@ public final class SeededArchiveVerifier {
         report: SeedVerificationReport,
         cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
         progress: ((Int, Int) -> Void)? = nil,
-        onCommit: () -> Void = {}
+        onCommit: () -> Void = {},
+        onCounts: (Int, Int) -> Void = { _,_ in }
     ) throws -> Int {
         var stillValid: [SeedVerifiedMatch] = []
         var lastProgress = ProcessInfo.processInfo.systemUptime
@@ -206,8 +208,9 @@ public final class SeededArchiveVerifier {
                 try mapping.verify()
                 let src = try safePath(match.relativePath, mapping: mapping, destination: false)
                 let dst = try safePath(match.relativePath, mapping: mapping, destination: true)
-                guard try Self.fingerprint(src) == match.source,
-                      try Self.fingerprint(dst) == match.target else { continue }
+                guard match.objectKind == "file" || match.objectKind == "directory",
+                      try Self.fingerprint(src,directory:match.objectKind == "directory") == match.source,
+                      try Self.fingerprint(dst,directory:match.objectKind == "directory") == match.target else { continue }
                 try mapping.verify()
                 stillValid.append(match)
             } catch {
@@ -220,7 +223,7 @@ public final class SeededArchiveVerifier {
         onCommit()
         let sources = mappings.mapValues { $0.source.path }
         let changed = try journal.acknowledgeVerifiedFiles(
-            stillValid, sourceRoots: sources, shouldContinue: { cancellation.mayCommit }
+            stillValid, sourceRoots: sources, shouldContinue: { cancellation.mayCommit }, onCounts:onCounts
         )
         progress?(report.matches.count, report.matches.count)
         return changed
@@ -280,12 +283,12 @@ public final class SeededArchiveVerifier {
         return url
     }
 
-    public static func fingerprint(_ url: URL) throws -> SeedFileFingerprint {
+    public static func fingerprint(_ url: URL, directory: Bool = false) throws -> SeedFileFingerprint {
         var st = stat()
         guard url.path.withCString({ lstat($0, &st) }) == 0 else {
             throw SeedVerificationError.sourceMissing
         }
-        guard (st.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG) else {
+        guard (st.st_mode & mode_t(S_IFMT)) == mode_t(directory ? S_IFDIR : S_IFREG) else {
             throw SeedVerificationError.unsafeEntry
         }
         return SeedFileFingerprint(
@@ -423,6 +426,10 @@ public struct SeededArchiveSession: Sendable {
                 let key = root + "\0" + path
                 guard !ambiguous.contains(key), let job = pending[key] else { return }
                 matches.append(SeedVerifiedMatch(jobID:job.id,rootID:root,relativePath:path,source:source,target:target,verifiedBytes:source.size))
+            },onVerifiedDirectory: { root,path,source,target in
+                let key = root + "\0" + path
+                guard !ambiguous.contains(key), let job = pending[key] else { return }
+                matches.append(SeedVerifiedMatch(jobID:job.id,rootID:root,relativePath:path,source:source,target:target,verifiedBytes:0,objectKind:"directory"))
             },diagnostic:diagnostic,progress:progress)
         try checkFileIdentity()
         guard !cancellation.isCancelled else { throw SeedVerificationError.cancelled }
@@ -440,10 +447,11 @@ public struct SeededArchiveSession: Sendable {
         report: SeedVerificationReport,
         cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
         progress: ((Int, Int) -> Void)? = nil,
-        onCommit: () -> Void = {}
+        onCommit: () -> Void = {},
+        onCounts: (Int, Int) -> Void = { _,_ in }
     ) throws -> Int {
         let journal = try openJournal()
         let verifier = try SeededArchiveVerifier(journal: journal, mappings: mappings)
-        return try verifier.approve(report: report, cancellation: cancellation, progress:progress,onCommit:onCommit)
+        return try verifier.approve(report: report, cancellation: cancellation, progress:progress,onCommit:onCommit,onCounts:onCounts)
     }
 }

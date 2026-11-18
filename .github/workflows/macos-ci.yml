@@ -2,7 +2,7 @@ name: macOS CI
 
 on:
   push:
-    branches: [main, develop-v0.18.1]
+    branches: [main, develop-v0.18.1, develop-v0.18.2]
     paths:
       - 'Package.swift'
       - 'Sources/**'
