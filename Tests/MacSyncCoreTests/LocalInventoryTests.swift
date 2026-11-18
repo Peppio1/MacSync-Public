@@ -12,6 +12,29 @@ final class LocalInventoryTests: XCTestCase {
         return (base, source, database)
     }
 
+    func testDSStoreExclusionRetiresWithoutCreatingDeleteOrRemovingFiles() throws {
+        let key=FileExclusionPolicy.preferenceKey
+        let old=UserDefaults.standard.object(forKey:key)
+        defer { if let old { UserDefaults.standard.set(old,forKey:key) } else { UserDefaults.standard.removeObject(forKey:key) } }
+        let (base,root,db)=try temporaryFixture()
+        defer { try? FileManager.default.removeItem(at:base) }
+        let ds=root.appendingPathComponent(".DS_Store")
+        try Data("Finder".utf8).write(to:ds)
+        try Data("photo".utf8).write(to:root.appendingPathComponent("photo.jpg"))
+        UserDefaults.standard.set(false,forKey:key)
+        let store=try LocalInventory(path:db.path)
+        _ = try store.reconcile(rootID:"photos",root:root)
+        XCTAssertEqual(try store.pendingBreakdown().files,2)
+        UserDefaults.standard.set(true,forKey:key)
+        let result=try store.reconcile(rootID:"photos",root:root)
+        XCTAssertEqual(result.queuedDeletes,0)
+        XCTAssertEqual(try store.pendingBreakdown().files,1)
+        XCTAssertEqual(try store.pendingBreakdown().deletions,0)
+        XCTAssertEqual(try store.pendingCount(),1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath:ds.path))
+        XCTAssertFalse(try LocalScanner.scan(root:root,ignoreDSStore:true).contains { $0.relativePath==".DS_Store" })
+    }
+
     func testRetiringRootsPreservesActiveQueueAndPhysicalFiles() throws {
         let (base,root,db) = try temporaryFixture()
         defer { try? FileManager.default.removeItem(at:base) }

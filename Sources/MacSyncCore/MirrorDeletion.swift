@@ -479,6 +479,7 @@ public final class MirrorDeletionWorker {
         guard try journal.queueRebuildToken() == nil else {
             result.blocked=true; result.detail="Nuova verifica archivio necessaria dopo svuotamento coda"; return result
         }
+        _ = try journal.retireExcludedJobs()
         guard !cancellation.isCancelled else {
             result.blocked = true
             result.detail = "Operazioni annullate"
@@ -585,6 +586,7 @@ public final class MirrorDeletionWorker {
         guard try journal.queueRebuildToken() == nil else {
             result.blocked=true; result.detail="Nuova verifica archivio necessaria dopo svuotamento coda"; return result
         }
+        _ = try journal.retireExcludedJobs()
         guard !cancellation.isCancelled,operationAllowed() else { return result }
         try verifyBeforeSynchronization()
         guard !cancellation.isCancelled else { return result }

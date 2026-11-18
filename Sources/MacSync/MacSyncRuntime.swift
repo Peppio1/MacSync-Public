@@ -267,6 +267,38 @@ final class MacSyncRuntime: ObservableObject {
         let complete = shutdownCompletion; shutdownCompletion = nil; complete?()
     }
 
+    func setDSStoreExclusion(_ enabled:Bool) {
+        guard enabled != copy.ignoreDSStore,!previewOnly,!shuttingDown,!folderConfigurationBusy,!savingSchedule,
+              !copy.active,!copy.maintaining,!copy.auditBusy,!copy.seedBusy else { return }
+        let confirm=NSAlert()
+        confirm.messageText=enabled ? "Ignorare i file .DS_Store?" : "Includere i file .DS_Store?"
+        confirm.informativeText="Nessun file verrà eliminato. È necessaria una nuova verifica archivio prima di riprendere la sincronizzazione."
+        confirm.addButton(withTitle:"Conferma"); confirm.addButton(withTitle:"Annulla")
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
+        folderConfigurationBusy=true
+        stopAllOperations()
+        copy.maintaining=true
+        copy.afterWorkerStopped { [weak self] in
+            guard let self else { return }
+            self.model.afterMonitorStopped { [weak self] in
+                guard let self else { return }
+                guard !self.shuttingDown else {
+                    self.copy.maintaining=false; self.folderConfigurationBusy=false; self.finishShutdownIfReady(); return
+                }
+                self.copy.setDSStoreExclusionAfterDrain(enabled) { [weak self] success in
+                    guard let self else { return }
+                    self.folderConfigurationBusy=false
+                    if !self.shuttingDown {
+                        self.model.startMonitoring()
+                        if success { self.suspendedUntilNextLaunch=false; self.automaticStatus="Attendo una nuova verifica archivio manuale" }
+                        self.scheduleArchiveAudit()
+                    }
+                    self.finishShutdownIfReady()
+                }
+            }
+        }
+    }
+
     func resetPendingQueue() {
         guard !previewOnly,!shuttingDown,!folderConfigurationBusy,!savingSchedule,
               !copy.maintaining,!copy.auditBusy,!copy.seedBusy else { return }

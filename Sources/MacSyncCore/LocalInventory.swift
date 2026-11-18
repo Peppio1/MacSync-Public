@@ -11,6 +11,17 @@ public struct PendingQueueBreakdown: Equatable, Sendable {
     public init() {}
 }
 
+/// Finder metadata is excluded by default, without generating mirror deletes.
+public enum FileExclusionPolicy {
+    public static let preferenceKey = "MacSync.ignoreDSStore.v1"
+    public static var ignoreDSStore: Bool {
+        (UserDefaults.standard.object(forKey:preferenceKey) as? Bool) ?? true
+    }
+    public static func excludes(_ relativePath:String, enabled:Bool) -> Bool {
+        enabled && relativePath.split(separator:"/").contains(".DS_Store")
+    }
+}
+
 public struct TrackedItem: Equatable, Sendable {
     public let relativePath: String
     public let kind: String
@@ -54,6 +65,7 @@ public enum LocalScanner {
     /// A vanished or replaced root must never be interpreted as empty.
     public static func scan(root: URL, subtree: URL? = nil,
                             excludeManaged: Bool = false,
+                            ignoreDSStore: Bool = FileExclusionPolicy.ignoreDSStore,
                             shouldContinue: () -> Bool = { true },
                             onVisit: (String) -> Void = { _ in },
                             onItem: (TrackedItem) -> Void = { _ in }) throws -> [TrackedItem] {
@@ -73,6 +85,10 @@ public enum LocalScanner {
             guard try stamp(root) == original else {
                 throw JournalError.database("Source root changed during scan")
             }
+        }
+
+        if target != root && FileExclusionPolicy.excludes(String(target.path.dropFirst(root.path.count+1)),enabled:ignoreDSStore) {
+            try assertRootUnchanged(); return []
         }
 
         // Only ENOENT is a missing subtree. Access-denied or I/O failures
@@ -179,7 +195,8 @@ public enum LocalScanner {
             if enumerationError != nil { break }
             visit(file)
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
-            if excludeManaged && file.lastPathComponent.lowercased().hasPrefix(".macsync-") {
+            if (excludeManaged && file.lastPathComponent.lowercased().hasPrefix(".macsync-")) ||
+                FileExclusionPolicy.excludes(file.lastPathComponent,enabled:ignoreDSStore) {
                 if try file.resourceValues(forKeys: [.isDirectoryKey,.isSymbolicLinkKey]).isDirectory == true {
                     enumerator.skipDescendants()
                 }
@@ -444,7 +461,8 @@ public final class LocalInventory {
         let root = root.standardizedFileURL.resolvingSymlinksInPath()
         let target = (subtree ?? root).standardizedFileURL.resolvingSymlinksInPath()
         let binding = try DirectoryBinding.encoded(root)
-        let rows = try LocalScanner.scan(root: root, subtree: subtree, shouldContinue: shouldContinue, onItem: onItem)
+        let ignoreDSStore = FileExclusionPolicy.ignoreDSStore
+        let rows = try LocalScanner.scan(root: root, subtree: subtree, ignoreDSStore:ignoreDSStore, shouldContinue: shouldContinue, onItem: onItem)
         guard shouldContinue() else { throw SeedVerificationError.cancelled }
         let fullScan = target.path == root.path
         let scope = fullScan ? "" : String(target.path.dropFirst(root.path.count + 1))
@@ -487,8 +505,16 @@ public final class LocalInventory {
             for (path, _) in affected where seen[path] == nil {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 try remove(rootID: rootID, relativePath: path)
+                if FileExclusionPolicy.excludes(path,enabled:ignoreDSStore) { continue }
                 try enqueue(rootID: rootID, relativePath: path, kind: .delete)
                 deletes += 1
+            }
+
+            if ignoreDSStore {
+                let retire=try prepare("UPDATE change_queue SET completed=1 WHERE root_id=? AND completed=0 AND instr('/'||relative_path||'/','/.DS_Store/')>0;")
+                defer { sqlite3_finalize(retire) }
+                try bind(rootID,at:1,statement:retire)
+                guard sqlite3_step(retire)==SQLITE_DONE else { throw failure() }
             }
 
             // Keep existing event ID if caller is doing a scan independent of FSEvents.

@@ -93,6 +93,21 @@ public final class ChangeJournal {
         return columnText(stmt,at:0)
     }
 
+    /// Used when the exclusion policy changes, before updating preferences.
+    /// A crash between the two operations remains safely held.
+    public func requireQueueRebuild() throws {
+        let stmt=try prepare("INSERT OR REPLACE INTO queue_rebuild_hold(singleton,token) VALUES(1,?);")
+        defer { sqlite3_finalize(stmt) }
+        try bind(UUID().uuidString,at:1,in:stmt)
+        guard sqlite3_step(stmt)==SQLITE_DONE else { throw databaseFailure() }
+    }
+
+    @discardableResult public func retireExcludedJobs() throws -> Int {
+        guard FileExclusionPolicy.ignoreDSStore else { return 0 }
+        try execute("UPDATE change_queue SET completed=1 WHERE completed=0 AND instr('/'||relative_path||'/','/.DS_Store/')>0;")
+        return Int(sqlite3_changes(connection))
+    }
+
     /// Requires the caller to have drained BOTH sync and inventory workers.
     /// Keep historical IDs, deletion evidence and all publication intents.
     /// No filesystem work on the source or destination.
@@ -561,6 +576,7 @@ public final class ChangeJournal {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 let item = entry.item
                 guard item.kind == "file" || item.kind == "directory",
+                      !FileExclusionPolicy.excludes(item.relativePath,enabled:FileExclusionPolicy.ignoreDSStore),
                       !item.relativePath.isEmpty,
                       item.relativePath.split(separator:"/",omittingEmptySubsequences:false).allSatisfy({
                         !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("\\") && !$0.contains(":") &&

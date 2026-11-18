@@ -1237,6 +1237,12 @@ struct MacSyncConfigurationView: View {
             }
             }.frame(maxWidth:.infinity,alignment:.topLeading)
             }.fixedSize(horizontal:false,vertical:true)
+            MacSyncPanel("Esclusioni",icon:"line.3.horizontal.decrease.circle") {
+                MacSyncSwitchRow("Ignora file .DS_Store",isOn:Binding(get:{copy.ignoreDSStore},set:{runtime.setDSStoreExclusion($0)}))
+                    .disabled(copy.active || copy.maintaining || copy.seedBusy || copy.auditBusy || copy.interruptionRequested || runtime.folderConfigurationBusy || runtime.savingSchedule)
+                Text("Esclude i metadati del Finder. I file già presenti sul server non vengono eliminati. Dopo una modifica è necessaria una nuova verifica archivio.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             MacSyncPanel("Manutenzione e diagnostica",icon:"wrench") {
                 HStack {
                     VStack(alignment:.leading,spacing:4) {

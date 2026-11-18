@@ -11,6 +11,7 @@ final class MountedCopyController: ObservableObject {
     var onQueueChanged: (() -> Void)?
     @Published private(set) var interruptionRequested = false
     @Published private(set) var queueRebuildRequired = false
+    @Published private(set) var ignoreDSStore = FileExclusionPolicy.ignoreDSStore
 
     init(previewOnly: Bool = false, monitorGate: MonitorSafetyGate = MonitorSafetyGate()) {
         self.previewOnly = previewOnly
@@ -1395,6 +1396,37 @@ final class MountedCopyController: ObservableObject {
                     self?.maintenanceCandidates = []
                     self?.maintenanceStatus = "Pulizia temporanei interrotta: "
                         + error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func setDSStoreExclusionAfterDrain(_ enabled:Bool,completion:@escaping @MainActor (Bool)->Void) {
+        guard !previewOnly,!active,!auditBusy,!seedBusy else { completion(false); return }
+        maintaining=true
+        auditRevision += 1
+        invalidateSeedReport()
+        queue.async { [weak self] in
+            do {
+                let db=try Self.databaseURL()
+                let journal=try ChangeJournal(path:db.path)
+                try journal.requireQueueRebuild()
+                UserDefaults.standard.set(enabled,forKey:FileExclusionPolicy.preferenceKey)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { completion(false); return }
+                    self.ignoreDSStore=enabled
+                    self.queueRebuildRequired=true
+                    self.auditReport=nil
+                    self.auditStatus="Esclusioni modificate: nuova verifica necessaria"
+                    self.maintaining=false
+                    completion(true)
+                }
+            } catch {
+                let detail=SyncDiagnostic.describe(error)
+                DispatchQueue.main.async { [weak self] in
+                    self?.maintenanceStatus="Esclusioni non modificate: "+detail
+                    self?.maintaining=false
+                    completion(false)
                 }
             }
         }
