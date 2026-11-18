@@ -55,6 +55,8 @@ public final class ChangeJournal {
                 );
                 """)
             try execute("CREATE TABLE IF NOT EXISTS publication_intents(job_id INTEGER PRIMARY KEY, root_id TEXT NOT NULL, relative_path TEXT NOT NULL);")
+            try execute("CREATE TABLE IF NOT EXISTS upload_retry(scope TEXT NOT NULL, root_id TEXT NOT NULL, job_id INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at REAL NOT NULL, reason TEXT NOT NULL, PRIMARY KEY(scope,root_id,job_id));")
+            try execute("CREATE TABLE IF NOT EXISTS transfer_recovery(job_id INTEGER PRIMARY KEY, root_id TEXT NOT NULL, relative_path TEXT NOT NULL, record TEXT NOT NULL);")
             try execute("CREATE TABLE IF NOT EXISTS queue_rebuild_hold(singleton INTEGER PRIMARY KEY CHECK(singleton=1), token TEXT NOT NULL);")
             try execute("CREATE TABLE IF NOT EXISTS retired_delete_evidence(job_id INTEGER PRIMARY KEY);")
             try execute("CREATE TABLE IF NOT EXISTS verified_content_cache(root_id TEXT NOT NULL, relative_path TEXT NOT NULL, binding TEXT NOT NULL, source_stamp TEXT NOT NULL, target_stamp TEXT NOT NULL, PRIMARY KEY(root_id,relative_path));")
@@ -303,6 +305,74 @@ public final class ChangeJournal {
     /// receive larger AUTOINCREMENT IDs and wait until the next cycle.
     /// First opt-in after migration establishes the target baseline. Never
     /// replace an existing binding automatically, even on reconnection.
+    /// Job IDs change when a new monitor event supersedes an operation.
+    /// Root-level holds are reserved for incompatible publication facilities.
+    func retryBlocked(_ job:QueuedChange, now:Date) throws -> Bool {
+        let stmt=try prepare("SELECT 1 FROM upload_retry WHERE root_id=? AND (job_id=? OR scope='root') AND next_at>? LIMIT 1;")
+        defer { sqlite3_finalize(stmt) }
+        try bind(job.rootID,at:1,in:stmt)
+        guard sqlite3_bind_int64(stmt,2,job.id)==SQLITE_OK,sqlite3_bind_double(stmt,3,now.timeIntervalSince1970)==SQLITE_OK else { throw databaseFailure() }
+        let rc=sqlite3_step(stmt)
+        guard rc==SQLITE_ROW || rc==SQLITE_DONE else { throw databaseFailure() }
+        return rc==SQLITE_ROW
+    }
+
+    func recordRetry(_ job:QueuedChange, rootWide:Bool, reason:String, now:Date, initial:Double) throws {
+        let stmt=try prepare("""
+            INSERT INTO upload_retry(scope,root_id,job_id,attempts,next_at,reason)
+            VALUES(?,?,?,1,?,?)
+            ON CONFLICT(scope,root_id,job_id) DO UPDATE SET
+              attempts=MIN(upload_retry.attempts+1,8),
+              next_at=?+MIN(3600,?*(1 << MIN(upload_retry.attempts,7))),
+              reason=excluded.reason;
+            """)
+        defer { sqlite3_finalize(stmt) }
+        try bind(rootWide ? "root" : "job",at:1,in:stmt); try bind(job.rootID,at:2,in:stmt)
+        let epoch=now.timeIntervalSince1970
+        guard sqlite3_bind_int64(stmt,3,rootWide ? 0 : job.id)==SQLITE_OK,
+              sqlite3_bind_double(stmt,4,epoch+min(3600,initial))==SQLITE_OK else { throw databaseFailure() }
+        try bind(reason,at:5,in:stmt)
+        guard sqlite3_bind_double(stmt,6,epoch)==SQLITE_OK,
+              sqlite3_bind_double(stmt,7,initial)==SQLITE_OK,sqlite3_step(stmt)==SQLITE_DONE else { throw databaseFailure() }
+    }
+
+    func clearRetry(_ job:QueuedChange) throws {
+        let stmt=try prepare("DELETE FROM upload_retry WHERE root_id=? AND scope='job' AND job_id=?;")
+        defer { sqlite3_finalize(stmt) }
+        try bind(job.rootID,at:1,in:stmt)
+        guard sqlite3_bind_int64(stmt,2,job.id)==SQLITE_OK,sqlite3_step(stmt)==SQLITE_DONE else { throw databaseFailure() }
+    }
+
+    public func clearUploadRetries() throws { try execute("DELETE FROM upload_retry;") }
+
+    func saveTransferRecovery(_ job:QueuedChange, record:String) throws {
+        guard try uploadIsCurrent(job) else { throw MountedCopyError.sourceChanging }
+        let stmt=try prepare("INSERT OR REPLACE INTO transfer_recovery(job_id,root_id,relative_path,record) VALUES(?,?,?,?);")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_bind_int64(stmt,1,job.id)==SQLITE_OK else { throw databaseFailure() }
+        try bind(job.rootID,at:2,in:stmt); try bind(job.relativePath,at:3,in:stmt); try bind(record,at:4,in:stmt)
+        guard sqlite3_step(stmt)==SQLITE_DONE else { throw databaseFailure() }
+    }
+
+    func transferRecovery(_ job:QueuedChange) throws -> String? {
+        let stmt=try prepare("SELECT record FROM transfer_recovery WHERE job_id=? AND root_id=? AND relative_path=?;")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_bind_int64(stmt,1,job.id)==SQLITE_OK else { throw databaseFailure() }
+        try bind(job.rootID,at:2,in:stmt); try bind(job.relativePath,at:3,in:stmt)
+        let rc=sqlite3_step(stmt)
+        if rc==SQLITE_DONE { return nil }
+        guard rc==SQLITE_ROW else { throw databaseFailure() }
+        return columnText(stmt,at:0)
+    }
+
+    func clearTransferRecovery(_ job:QueuedChange) throws {
+        let stmt=try prepare("DELETE FROM transfer_recovery WHERE job_id=? AND root_id=? AND relative_path=?;")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_bind_int64(stmt,1,job.id)==SQLITE_OK else { throw databaseFailure() }
+        try bind(job.rootID,at:2,in:stmt); try bind(job.relativePath,at:3,in:stmt)
+        guard sqlite3_step(stmt)==SQLITE_DONE else { throw databaseFailure() }
+    }
+
     public func recordPublicationIntent(_ job: QueuedChange) throws {
         let stmt = try prepare("INSERT OR IGNORE INTO publication_intents(job_id,root_id,relative_path) VALUES(?,?,?);")
         defer { sqlite3_finalize(stmt) }

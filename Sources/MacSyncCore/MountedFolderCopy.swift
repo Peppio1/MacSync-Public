@@ -228,6 +228,7 @@ public final class MountedFolderCopyWorker {
     private let now: () -> Date
     private let availableCapacity: (URL) throws -> Int64?
     private var nextAfterID: Int64 = 0
+    private var publicationMethods: [String:ExclusivePublicationMethod] = [:]
     public var onEvent: ((SyncCycleEvent) -> Void)?
     public var onJobStarted: ((QueuedChange) -> Void)?
     public var onPlan: ((Int) -> Void)?
@@ -329,6 +330,11 @@ public final class MountedFolderCopyWorker {
                 continue
             }
             do {
+                if try journal.retryBlocked(job,now:now()) {
+                    summary.deferred += 1
+                    emit(.deferred,job:job,mapping:mapping,detail:"Riprova programmata dopo errore precedente")
+                    continue
+                }
                 guard try journal.uploadIsCurrent(job) else {
                     summary.deferred += 1
                     emit(.deferred,job:job,mapping:mapping,detail:"Evento non più corrente")
@@ -342,12 +348,15 @@ public final class MountedFolderCopyWorker {
                 // if the actual bytes differ.
                 let mayAlreadyMatch = previousPublication || ((try? metadataMayMatch(job,mapping:mapping)) == true)
                 if mayAlreadyMatch, try reconcilePublished(job,mapping:mapping) {
+                    recoverConfirmedStage(job,mapping:mapping)
+                    try? journal.clearRetry(job)
                     summary.reconciled += 1
                     let message=previousPublication ? "Pubblicazione precedente verificata SHA-256" : "File già corrispondente SHA-256"
                     emit(.noChange,job:job,mapping:mapping,detail:message)
                     try? log.record(level:.success,rootID:job.rootID,action:"reconciled",relativePath:job.relativePath,message:message+"; nessuna nuova copia")
                     continue
                 }
+                try prepareRetry(job,mapping:mapping,publicationUncertain:previousPublication)
                 let outcome = try transfer(job, mapping: mapping)
                 guard try journal.acknowledgeUpload(job) else {
                     // The published version may have been superseded while
@@ -360,6 +369,8 @@ public final class MountedFolderCopyWorker {
                     continue
                 }
                 try? journal.clearPublicationIntent(job)
+                try? journal.clearRetry(job)
+                try? journal.clearTransferRecovery(job)
                 // Cleanup is strictly post-acknowledgment, never part of the
                 // replacement transaction. Failure cannot turn a confirmed
                 // copy into another upload or authorize a second cleanup.
@@ -415,6 +426,16 @@ public final class MountedFolderCopyWorker {
                     durationSeconds: Date().timeIntervalSince(started),
                     message: SyncDiagnostic.describe(error)
                 )
+                switch error {
+                case .unsafeFile,.destinationConflict:
+                    try journal.recordRetry(job,rootWide:false,reason:SyncDiagnostic.describe(error),now:now(),initial:300)
+                case .copyFailed(let code) where code == Int(ENOTSUP):
+                    publicationMethods.removeValue(forKey:job.rootID)
+                    try journal.recordRetry(job,rootWide:true,reason:SyncDiagnostic.describe(error),now:now(),initial:300)
+                case .copyFailed(let code) where [Int(EACCES),Int(EPERM),Int(EBUSY),Int(EIO),Int(ENOSPC)].contains(code):
+                    try journal.recordRetry(job,rootWide:false,reason:SyncDiagnostic.describe(error),now:now(),initial:30)
+                default: break
+                }
                 // A lost mount or changed root is not a per-file failure.
                 // Stop the cycle rather than attempting thousands of jobs
                 // against the same unavailable destination.
@@ -541,6 +562,89 @@ public final class MountedFolderCopyWorker {
         }
     }
 
+    private struct RecoveryRecord: Codable {
+        let name:String
+        let root:DirectoryBinding
+        let stageFolder:DirectoryBinding
+        let stage:Snapshot
+        let originalTarget:Snapshot?
+        let source:Snapshot
+    }
+
+    private func recoveryRecord(_ job:QueuedChange) throws -> RecoveryRecord? {
+        guard let json=try journal.transferRecovery(job) else { return nil }
+        return try JSONDecoder().decode(RecoveryRecord.self,from:Data(json.utf8))
+    }
+
+    private func verifyRecovery(_ record:RecoveryRecord,mapping:MountedFolderMapping) throws -> URL {
+        try mapping.verify()
+        let folder=mapping.target.appendingPathComponent(".macsync-staging",isDirectory:true)
+        guard record.name.hasSuffix(".partial"),
+              UUID(uuidString:String(record.name.dropLast(8))) != nil,
+              try DirectoryBinding.read(mapping.target)==record.root,
+              try DirectoryBinding.read(folder)==record.stageFolder else { throw MountedCopyError.destinationChanging }
+        return folder.appendingPathComponent(record.name)
+    }
+
+    private func discardVerifiedStage(_ record:RecoveryRecord,mapping:MountedFolderMapping) throws {
+        let url=try verifyRecovery(record,mapping:mapping)
+        guard let actual=try optionalSnapshot(url) else { return }
+        guard actual==record.stage,actual.kind == .file else { throw MountedCopyError.destinationChanging }
+        let anchor=try AnchoredDirectory(url.deletingLastPathComponent(),expectedVolume:mapping.targetVolume)
+        let s=try anchor.leaf(record.name)
+        guard UInt64(s.st_ino)==actual.inode,Int64(s.st_size)==actual.size,
+              Int64(s.st_ctimespec.tv_sec)==actual.ctimeSeconds,
+              Int64(s.st_ctimespec.tv_nsec)==actual.ctimeNanoseconds,
+              try readSnapshot(url)==actual else { throw MountedCopyError.destinationChanging }
+        try anchor.remove(record.name,matching:s,shouldContinue:operationAllowed)
+    }
+
+    private func recoverConfirmedStage(_ job:QueuedChange,mapping:MountedFolderMapping) {
+        do {
+            guard let record=try recoveryRecord(job) else { return }
+            try discardVerifiedStage(record,mapping:mapping)
+            try journal.clearTransferRecovery(job)
+        } catch {
+            try? log.record(level:.warning,rootID:job.rootID,action:"staging_retained",relativePath:job.relativePath,message:"Temporaneo di recupero non verificabile; conservato")
+        }
+    }
+
+    private func prepareRetry(_ job:QueuedChange,mapping:MountedFolderMapping,publicationUncertain:Bool) throws {
+        guard let record=try recoveryRecord(job) else {
+            // Old builds did not record the previous target. Never overwrite
+            // a newly arrived destination in an ambiguous legacy attempt.
+            if publicationUncertain {
+                let dst=try mapping.fileURL(relativePath:job.relativePath,destination:true)
+                try ensureSafeParents(dst,under:mapping.target,create:false)
+                guard try optionalSnapshot(dst)==nil else { throw MountedCopyError.destinationChanging }
+            }
+            return
+        }
+        _ = try verifyRecovery(record,mapping:mapping)
+        let dst=try mapping.fileURL(relativePath:job.relativePath,destination:true)
+        try ensureSafeParents(dst,under:mapping.target,create:false)
+        let src=try mapping.fileURL(relativePath:job.relativePath,destination:false)
+        try ensureSafeParents(src,under:mapping.source,create:false)
+        guard try readSnapshot(src).kind == .file else { throw MountedCopyError.sourceMissing }
+        if publicationUncertain {
+            let current=try optionalSnapshot(dst)
+            // Permit retry ONLY against the same old target (or its still
+            // absent name). If the completed publication is ours, allow the
+            // ordinary byte comparison / update of that same object, never
+            // an independently created file. The source must still exist.
+            if current != record.originalTarget {
+                guard let current, current.kind == .file,
+                      current.device==record.stage.device,current.inode==record.stage.inode,
+                      current.size==record.stage.size,current.mtime==record.stage.mtime else {
+                    throw MountedCopyError.destinationChanging
+                }
+            }
+        }
+        try discardVerifiedStage(record,mapping:mapping)
+        try journal.clearTransferRecovery(job)
+        try journal.clearPublicationIntent(job)
+    }
+
     private func transfer(_ job: QueuedChange, mapping: MountedFolderMapping) throws -> TransferOutcome {
         guard operationAllowed() else { throw SeedVerificationError.cancelled }
         try mapping.verify()
@@ -603,6 +707,17 @@ public final class MountedFolderCopyWorker {
         let stageFolder = mapping.target.appendingPathComponent(".macsync-staging", isDirectory: true)
         try createSafeDirectory(stageFolder, parent: mapping.target, expectedVolume:mapping.targetVolume)
         let stageIdentity = try CopyDirectoryIdentity.read(stageFolder)
+        var method: ExclusivePublicationMethod?
+        if originalTarget == nil && mapping.targetVolume.fileSystem.lowercased()=="smbfs" {
+            if let cached=publicationMethods[job.rootID] { method=cached }
+            else {
+                let probe=try AnchoredDirectory(stageFolder,expectedVolume:mapping.targetVolume)
+                let selected=try probe.probeExclusivePublication(shouldContinue:operationAllowed)
+                publicationMethods[job.rootID]=selected
+                method=selected
+                try? log.record(level:.info,rootID:job.rootID,action:"smb_probe",message:"Metodo esclusivo verificato in staging: "+selected.rawValue)
+            }
+        }
         let staging = stageFolder.appendingPathComponent(UUID().uuidString + ".partial")
         try log.record(
             level: .info, rootID: job.rootID, action: "start",
@@ -668,6 +783,9 @@ public final class MountedFolderCopyWorker {
                 }
             }
             try verifyPublication()
+            let recovery=RecoveryRecord(name:staging.lastPathComponent,root:try DirectoryBinding.read(mapping.target),
+                stageFolder:try DirectoryBinding.read(stageFolder),stage:staged,originalTarget:originalTarget,source:snapshot)
+            try journal.saveTransferRecovery(job,record:String(decoding:try JSONEncoder().encode(recovery),as:UTF8.self))
             var backupForCleanup: (url: URL, snapshot: Snapshot, parent: CopyDirectoryIdentity)?
             if let originalTarget {
                 // Preserve the exact previous target before publishing. If
@@ -714,7 +832,7 @@ public final class MountedFolderCopyWorker {
                 try journal.recordPublicationIntent(job)
                 publicationAttempted = true
                 try stageAnchor.publish(staging.lastPathComponent,matching:stagedStat,to:destAnchor,
-                    as:dst.lastPathComponent,replacing:nil,shouldContinue:operationAllowed,onMethod: { method in
+                    as:dst.lastPathComponent,replacing:nil,shouldContinue:operationAllowed,preferredMethod:method,onMethod: { method in
                         try? self.log.record(level:.info,rootID:job.rootID,action:"publish_method",relativePath:job.relativePath,message:method)
                     })
             }
@@ -764,6 +882,7 @@ public final class MountedFolderCopyWorker {
                         guard UInt64(stat.st_ino) == failedStage.inode, Int64(stat.st_ctimespec.tv_sec) == failedStage.ctimeSeconds,
                               Int64(stat.st_ctimespec.tv_nsec) == failedStage.ctimeNanoseconds else { throw MountedCopyError.destinationChanging }
                         try anchor.remove(staging.lastPathComponent,matching:stat)
+                        try? journal.clearTransferRecovery(job)
                         try? log.record(level: .info, rootID: job.rootID, action: "staging_cleanup",
                             relativePath: job.relativePath,
                             message: "Temporaneo del tentativo fallito eliminato; nuovo tentativo da zero")
@@ -784,8 +903,8 @@ public final class MountedFolderCopyWorker {
         }
     }
 
-    private enum FileKind { case file, directory, other }
-    private struct Snapshot: Equatable {
+    private enum FileKind: String, Codable { case file, directory, other }
+    private struct Snapshot: Codable, Equatable {
         let kind: FileKind
         let size: Int64
         let mtime: TimeInterval

@@ -12,6 +12,17 @@ final class OperationalSafetyTests: XCTestCase {
         try FileManager.default.createDirectory(at:target,withIntermediateDirectories:true)
         return (base,source,target,base.appendingPathComponent("state.sqlite"))
     }
+    func testExclusivePublicationProbeLeavesUnrelatedFilesUntouched() throws {
+        let (base,_,target,_) = try fixture()
+        defer { try? FileManager.default.removeItem(at:base) }
+        let unrelated=target.appendingPathComponent("keep.txt")
+        try Data("keep".utf8).write(to:unrelated)
+        let anchor=try AnchoredDirectory(target,expectedVolume:VolumeFingerprint.read(at:target))
+        _ = try anchor.probeExclusivePublication(shouldContinue:{true})
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath:target.path),["keep.txt"])
+        XCTAssertEqual(try String(contentsOf:unrelated,encoding:.utf8),"keep")
+    }
+
     func testExclusiveLinkPublicationPreservesExistingTargetAndPublishesCompleteFile() throws {
         let (base,source,target,_) = try fixture()
         defer { try? FileManager.default.removeItem(at:base) }

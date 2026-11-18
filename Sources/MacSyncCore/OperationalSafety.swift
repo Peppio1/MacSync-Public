@@ -163,6 +163,10 @@ public enum WindowsPathSafety {
 /// Anchor a leaf operation to an open directory rather than let a path
 /// lookup silently fall back to an unmounted /Volumes path. A hostile writer
 /// may still race the final leaf check; exclusive server write ACL is required.
+enum ExclusivePublicationMethod: String, Equatable {
+    case renameExclusive, hardLink
+}
+
 public final class AnchoredDirectory {
     private let fd: Int32
     private let url: URL
@@ -215,8 +219,70 @@ public final class AnchoredDirectory {
         let s = try leaf(name)
         guard s.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else { throw MountedCopyError.destinationConflict }
     }
+    /// Probe ONLY private, exclusively created scratch files inside the
+    /// anchored staging folder. Verify both the collision and successful
+    /// publication cases; never infer support solely from the filesystem name.
+    /// Cross-directory publication is still verified at the actual call.
+    func probeExclusivePublication(shouldContinue: () -> Bool) throws -> ExclusivePublicationMethod {
+        try verify()
+        let token=UUID().uuidString
+        let a="probe-"+token+"-a", b="probe-"+token+"-b", c="probe-"+token+"-c"
+        var owned: [(UInt64,UInt64)] = []
+        defer {
+            for name in [a,b,c] {
+                if let value=try? leaf(name),
+                   owned.contains(where:{ $0.0 == UInt64(bitPattern:Int64(value.st_dev)) && $0.1 == UInt64(value.st_ino) }),
+                   value.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) {
+                    try? remove(name,matching:value)
+                }
+            }
+        }
+        func make(_ name:String, size:off_t) throws -> stat {
+            try verify()
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            let handle=name.withCString { openat(fd,$0,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,mode_t(0o600)) }
+            guard handle>=0 else { throw MountedCopyError.copyFailed(Int(errno)) }
+            defer { Darwin.close(handle) }
+            var value=stat()
+            guard fstat(handle,&value)==0 else { throw MountedCopyError.copyFailed(Int(errno)) }
+            owned.append((UInt64(bitPattern:Int64(value.st_dev)),UInt64(value.st_ino)))
+            guard ftruncate(handle,size)==0 else { throw MountedCopyError.copyFailed(Int(errno)) }
+            return try leaf(name)
+        }
+        let first=try make(a,size:1), second=try make(b,size:2)
+        func run(_ method:ExclusivePublicationMethod,_ name:String) throws -> (Int32,Int32) {
+            try verify()
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            let result=a.withCString { old in name.withCString { new in
+                switch method {
+                case .renameExclusive: return renameatx_np(fd,old,fd,new,UInt32(RENAME_EXCL))
+                case .hardLink: return linkat(fd,old,fd,new,0)
+                }
+            }}
+            return (result,errno)
+        }
+        for method in [ExclusivePublicationMethod.renameExclusive,.hardLink] {
+            let (collision,code)=try run(method,b)
+            guard collision != 0 else { throw MountedCopyError.destinationChanging }
+            guard Self.sameFile(try leaf(a),first),Self.sameFile(try leaf(b),second) else { throw MountedCopyError.destinationChanging }
+            if code == ENOTSUP || code == ENOSYS || code == EINVAL { continue }
+            guard code == EEXIST else { throw MountedCopyError.copyFailed(Int(code)) }
+            let (published,error)=try run(method,c)
+            if published != 0 {
+                if error == ENOTSUP || error == ENOSYS || error == EINVAL { continue }
+                throw MountedCopyError.copyFailed(Int(error))
+            }
+            let final=try leaf(c)
+            guard final.st_ino==first.st_ino,final.st_dev==first.st_dev,final.st_size==1,
+                  Self.sameFile(try leaf(b),second) else { throw MountedCopyError.destinationChanging }
+            return method
+        }
+        throw MountedCopyError.copyFailed(Int(ENOTSUP))
+    }
+
     func publish(_ name:String, matching original:stat, to target:AnchoredDirectory,
                  as targetName:String, replacing expected:stat?, shouldContinue: () -> Bool,
+                 preferredMethod: ExclusivePublicationMethod? = nil,
                  onMethod: (String) -> Void = { _ in }) throws {
         try verify(); try target.verify()
         guard Self.sameFile(try leaf(name),original),
@@ -231,6 +297,11 @@ public final class AnchoredDirectory {
             guard result != 0, errno == ENOENT else { throw MountedCopyError.destinationChanging }
         }
         guard shouldContinue() else { throw SeedVerificationError.cancelled }
+        if expected == nil && preferredMethod == .hardLink {
+            onMethod("linkat (probe verificato)")
+            try publishByLink(name,matching:original,to:target,as:targetName,shouldContinue:shouldContinue)
+            return
+        }
         onMethod(expected == nil ? "renameatx_np(RENAME_EXCL)" : "renameat")
         let rc = name.withCString { old in targetName.withCString { new in
             if expected == nil { return renameatx_np(fd,old,target.fd,new,UInt32(RENAME_EXCL)) }
