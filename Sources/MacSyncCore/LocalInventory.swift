@@ -2,6 +2,15 @@ import Foundation
 import SQLite3
 import Darwin
 
+public struct PendingQueueBreakdown: Equatable, Sendable {
+    public var files = 0
+    public var directories = 0
+    public var deletions = 0
+    public var other = 0
+    public var total:Int { files+directories+deletions+other }
+    public init() {}
+}
+
 public struct TrackedItem: Equatable, Sendable {
     public let relativePath: String
     public let kind: String
@@ -383,6 +392,26 @@ public final class LocalInventory {
             try? execute("ROLLBACK;")
             throw error
         }
+    }
+
+    public func pendingBreakdown() throws -> PendingQueueBreakdown {
+        let stmt = try prepare("""
+            SELECT
+              COALESCE(SUM(CASE WHEN q.kind='upsert' AND f.kind='file' THEN 1 ELSE 0 END),0),
+              COALESCE(SUM(CASE WHEN q.kind='upsert' AND f.kind='directory' THEN 1 ELSE 0 END),0),
+              COALESCE(SUM(CASE WHEN q.kind='delete' THEN 1 ELSE 0 END),0),
+              COALESCE(SUM(CASE WHEN q.kind='upsert' AND (f.kind IS NULL OR f.kind NOT IN ('file','directory')) THEN 1 ELSE 0 END),0)
+            FROM change_queue q LEFT JOIN file_inventory f ON f.root_id=q.root_id AND f.relative_path=q.relative_path
+            WHERE q.completed=0;
+            """)
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { throw failure() }
+        var result=PendingQueueBreakdown()
+        result.files=Int(sqlite3_column_int64(stmt,0))
+        result.directories=Int(sqlite3_column_int64(stmt,1))
+        result.deletions=Int(sqlite3_column_int64(stmt,2))
+        result.other=Int(sqlite3_column_int64(stmt,3))
+        return result
     }
 
     public func pendingCount() throws -> Int {

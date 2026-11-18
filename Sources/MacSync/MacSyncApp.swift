@@ -17,6 +17,7 @@ final class MacSyncViewModel: ObservableObject {
     @Published var message = "Monitoraggio non configurato"
     @Published var monitoring = false
     @Published var pendingCount = 0
+    @Published var pendingBreakdown: PendingQueueBreakdown?
     @Published var scanProgress: ArchiveAuditProgress?
 
     let safetyGate = MonitorSafetyGate()
@@ -25,6 +26,7 @@ final class MacSyncViewModel: ObservableObject {
             self?.message = update.message
             self?.monitoring = update.monitoring
             self?.pendingCount = update.pendingChanges
+            self?.pendingBreakdown = update.pendingBreakdown
             self?.scanProgress = update.scanProgress
         }
     }
@@ -632,6 +634,13 @@ struct MacSyncConfigurationView: View {
                     Label("\(model.pendingCount.formatted()) operazioni in coda", systemImage: "list.bullet.rectangle").font(.subheadline.weight(.medium))
                     Spacer()
                     if let next = copy.nextScheduledRun ?? runtime.nextAutomaticAttempt { Text("Prossimo: " + macSyncDateTime(next)).font(.caption).foregroundStyle(Color.accentColor) }
+                }
+                if let counts=model.pendingBreakdown {
+                    Text("\(counts.files.formatted()) file · \(counts.directories.formatted()) cartelle · \(counts.deletions.formatted()) eliminazioni · \(counts.other.formatted()) non classificati")
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.75)
+                }
+                if copy.queueRebuildRequired {
+                    Text("Sincronizzazione sospesa: avvia una nuova verifica archivio.").font(.caption).foregroundStyle(.orange)
                 }
                 finalShutdownNotice
                 if copy.interruptionRequested { Text("Interruzione richiesta: attendo il punto sicuro. La coda viene conservata.").font(.caption) }

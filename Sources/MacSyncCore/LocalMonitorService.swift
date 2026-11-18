@@ -15,6 +15,7 @@ public struct MonitorUpdate: Sendable {
     public let monitoring: Bool
     public let pendingChanges: Int
     public var scanProgress: ArchiveAuditProgress? = nil
+    public var pendingBreakdown: PendingQueueBreakdown? = nil
 }
 
 /// Local-only prototype. The watcher never connects to SMB and never performs
@@ -278,7 +279,7 @@ public final class LocalMonitorService {
 
     private func report(_ message: String, active: Bool) {
         // The queue is durable; count from the database rather than a UI cache.
-        let count = (try? inventory?.pendingCount()) ?? 0
-        update(MonitorUpdate(message: message, monitoring: active, pendingChanges: count))
+        let breakdown = try? inventory?.pendingBreakdown()
+        update(MonitorUpdate(message:message,monitoring:active,pendingChanges:breakdown?.total ?? 0,pendingBreakdown:breakdown))
     }
 }

@@ -65,6 +65,9 @@ final class LocalInventoryTests: XCTestCase {
         XCTAssertEqual(try inventory.itemCount(rootID: "photos"), 2)
         XCTAssertEqual(try inventory.lastEventID(rootID: "photos"), 100)
         XCTAssertEqual(try inventory.pendingCount(), 2)
+        XCTAssertEqual(try inventory.pendingBreakdown().files,1)
+        XCTAssertEqual(try inventory.pendingBreakdown().directories,1)
+        XCTAssertEqual(try inventory.pendingBreakdown().deletions,0)
 
         let unchanged = try inventory.reconcile(rootID: "photos", root: root, eventID: 101)
         XCTAssertEqual(unchanged.queuedUpserts, 0)
