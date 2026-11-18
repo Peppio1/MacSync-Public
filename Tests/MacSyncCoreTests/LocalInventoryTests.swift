@@ -12,6 +12,24 @@ final class LocalInventoryTests: XCTestCase {
         return (base, source, database)
     }
 
+    func testRemotePOSIXMetadataScanPreservesFileIdentityAndExclusions() throws {
+        let (base,root,_) = try temporaryFixture()
+        defer { try? FileManager.default.removeItem(at:base) }
+        let folder=root.appendingPathComponent("photos")
+        try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true)
+        let photo=folder.appendingPathComponent("a.jpg")
+        try Data("image".utf8).write(to:photo)
+        try FileManager.default.setAttributes([.modificationDate:Date(timeIntervalSince1970:1_700_000_000)],ofItemAtPath:photo.path)
+        try Data("finder".utf8).write(to:folder.appendingPathComponent(".DS_Store"))
+        try FileManager.default.createSymbolicLink(at:root.appendingPathComponent("alias"),withDestinationURL:folder)
+        let ordinary=try LocalScanner.scan(root:root,ignoreDSStore:true)
+        let remote=try LocalScanner.scan(root:root,ignoreDSStore:true,preferPOSIXMetadata:true)
+        XCTAssertEqual(Set(ordinary.map(\.relativePath)),Set(remote.map(\.relativePath)))
+        XCTAssertEqual(remote.first(where:{$0.relativePath=="alias"})?.kind,"symlink")
+        XCTAssertTrue(remote.allSatisfy { !$0.relativePath.hasPrefix("alias/") })
+        XCTAssertEqual(ordinary.filter{$0.kind=="file"},remote.filter{$0.kind=="file"})
+    }
+
     func testDSStoreExclusionRetiresWithoutCreatingDeleteOrRemovingFiles() throws {
         let key=FileExclusionPolicy.preferenceKey
         let old=UserDefaults.standard.object(forKey:key)

@@ -116,6 +116,26 @@ final class SeededArchiveVerifierTests: XCTestCase {
         XCTAssertNil(try reopened.queueRebuildToken())
     }
 
+    func testAuditCachesSpecialNamesButApprovalRechecksLiveAliases() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        for name in ["roll /a.jpg","roll /b.jpg","roll /c.jpg"] {
+            try write("same",to:f.source.appendingPathComponent(name))
+            try write("same",to:f.target.appendingPathComponent(name))
+        }
+        try initializeInventory(f)
+        let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let result=try session.auditAndRecognize(mode:.deep)
+        XCTAssertEqual(result.audit.count(.uncertain),0)
+        XCTAssertGreaterThan(result.audit.directoryListingCacheHits ?? 0,0)
+        XCTAssertEqual(result.recognition.verifiedCount,4)
+        // A Windows-alias conflict appears AFTER the audit. Approval must
+        // use uncached live directory checks, not its old comparison cache.
+        try FileManager.default.createDirectory(at:f.target.appendingPathComponent("roll"),withIntermediateDirectories:false)
+        XCTAssertEqual(try session.approve(report:result.recognition),0)
+        XCTAssertEqual(try f.journal.plannedUploadCount(),4)
+    }
+
     func testSpecialExistingNamesReadOnlyRecognitionDoesNotRename() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at:f.base) }

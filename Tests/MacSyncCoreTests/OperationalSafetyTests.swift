@@ -12,6 +12,46 @@ final class OperationalSafetyTests: XCTestCase {
         try FileManager.default.createDirectory(at:target,withIntermediateDirectories:true)
         return (base,source,target,base.appendingPathComponent("state.sqlite"))
     }
+    func testAuditListingCacheReusesStableDirectoryAndClearsOnError() throws {
+        let (base,_,target,_) = try fixture()
+        defer { try? FileManager.default.removeItem(at:base) }
+        try Data("a".utf8).write(to:target.appendingPathComponent("one.jpg"))
+        try Data("b".utf8).write(to:target.appendingPathComponent("two.jpg"))
+        let cache=AuditDirectoryListingCache()
+        XCTAssertEqual(try cache.aliases(for:"one.jpg",in:target),["one.jpg"])
+        XCTAssertEqual(try cache.aliases(for:"two.jpg",in:target),["two.jpg"])
+        XCTAssertEqual(cache.enumerations,1)
+        XCTAssertEqual(cache.hits,1)
+        // Mutations change the stamp; a new alias must not be hidden.
+        try Data("c".utf8).write(to:target.appendingPathComponent("one.jpg "))
+        XCTAssertEqual(Set(try cache.aliases(for:"one.jpg",in:target)),Set(["one.jpg","one.jpg "]))
+        XCTAssertEqual(cache.enumerations,2)
+        XCTAssertThrowsError(try WindowsPathSafety.checkNames(relativePath:"one.jpg",under:target))
+        let invalid=target.appendingPathComponent("absent")
+        XCTAssertThrowsError(try cache.aliases(for:"one.jpg",in:invalid))
+        _ = try cache.aliases(for:"two.jpg",in:target)
+        XCTAssertEqual(cache.enumerations,3)
+        cache.invalidate()
+        _ = try cache.aliases(for:"two.jpg",in:target)
+        XCTAssertEqual(cache.enumerations,4)
+    }
+
+    func testAuditListingCacheRejectsReplacedOrSymlinkDirectory() throws {
+        let (base,source,target,_) = try fixture()
+        defer { try? FileManager.default.removeItem(at:base) }
+        let cache=AuditDirectoryListingCache()
+        try Data("first".utf8).write(to:target.appendingPathComponent("old.jpg"))
+        XCTAssertEqual(try cache.aliases(for:"old.jpg",in:target),["old.jpg"])
+        try FileManager.default.moveItem(at:target,to:base.appendingPathComponent("retired"))
+        try FileManager.default.createDirectory(at:target,withIntermediateDirectories:false)
+        try Data("new".utf8).write(to:target.appendingPathComponent("new.jpg"))
+        XCTAssertEqual(try cache.aliases(for:"old.jpg",in:target),[])
+        XCTAssertEqual(try cache.aliases(for:"new.jpg",in:target),["new.jpg"])
+        try FileManager.default.removeItem(at:target)
+        try FileManager.default.createSymbolicLink(at:target,withDestinationURL:source)
+        XCTAssertThrowsError(try cache.aliases(for:"new.jpg",in:target))
+    }
+
     func testExclusivePublicationProbeLeavesUnrelatedFilesUntouched() throws {
         let (base,_,target,_) = try fixture()
         defer { try? FileManager.default.removeItem(at:base) }

@@ -66,6 +66,7 @@ public enum LocalScanner {
     public static func scan(root: URL, subtree: URL? = nil,
                             excludeManaged: Bool = false,
                             ignoreDSStore: Bool = FileExclusionPolicy.ignoreDSStore,
+                            preferPOSIXMetadata: Bool = false,
                             shouldContinue: () -> Bool = { true },
                             onVisit: (String) -> Void = { _ in },
                             onItem: (TrackedItem) -> Void = { _ in }) throws -> [TrackedItem] {
@@ -110,16 +111,50 @@ public enum LocalScanner {
         var found: [TrackedItem] = []
 
         func record(_ file: URL) throws -> String {
-            let metadata = try file.resourceValues(forKeys: keys)
             let kind: String
-            if metadata.isSymbolicLink == true {
-                kind = "symlink"
-            } else if metadata.isDirectory == true {
-                kind = "directory"
-            } else if metadata.isRegularFile == true {
-                kind = "file"
+            let size: Int64
+            let modified: Double
+            var changeStamp: String?
+            if preferPOSIXMetadata {
+                // Remote read-only inventory: gather type, size, timestamps
+                // and identity in ONE no-follow syscall instead of retrieving
+                // URL resource metadata and then stat'ing the same file again.
+                var actual = stat()
+                guard file.path.withCString({ lstat($0,&actual) }) == 0 else {
+                    throw JournalError.database("Source scan path inaccessible (filesystem code \(errno))")
+                }
+                switch actual.st_mode & mode_t(S_IFMT) {
+                case mode_t(S_IFLNK): kind = "symlink"
+                case mode_t(S_IFDIR): kind = "directory"
+                case mode_t(S_IFREG): kind = "file"
+                default: throw JournalError.database("Unsupported filesystem object: " + file.path)
+                }
+                size = Int64(actual.st_size)
+                modified = Double(actual.st_mtimespec.tv_sec) + Double(actual.st_mtimespec.tv_nsec)/1_000_000_000
+                if kind == "file" {
+                    changeStamp = "\(actual.st_ino):\(actual.st_ctimespec.tv_sec):\(actual.st_ctimespec.tv_nsec)"
+                }
             } else {
-                throw JournalError.database("Unsupported filesystem object: " + file.path)
+                // Local monitoring retains the original dual metadata check.
+                let metadata = try file.resourceValues(forKeys: keys)
+                if metadata.isSymbolicLink == true { kind = "symlink" }
+                else if metadata.isDirectory == true { kind = "directory" }
+                else if metadata.isRegularFile == true { kind = "file" }
+                else { throw JournalError.database("Unsupported filesystem object: " + file.path) }
+                if kind == "file" && (metadata.fileSize == nil || metadata.contentModificationDate == nil) {
+                    throw JournalError.database("Metadati non disponibili durante la verifica completa")
+                }
+                size = Int64(metadata.fileSize ?? 0)
+                modified = metadata.contentModificationDate?.timeIntervalSince1970 ?? 0
+                if kind == "file" {
+                    var actual = stat()
+                    guard file.path.withCString({ lstat($0,&actual) }) == 0,
+                          actual.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+                          Int64(actual.st_size) == size else {
+                        throw JournalError.database("File changed during inventory scan")
+                    }
+                    changeStamp = "\(actual.st_ino):\(actual.st_ctimespec.tv_sec):\(actual.st_ctimespec.tv_nsec)"
+                }
             }
             let prefix = root.path + "/"
             // macOS can surface the same path via /var and /private/var.
@@ -136,25 +171,9 @@ public enum LocalScanner {
                 throw JournalError.database("Unexpected path outside root")
             }
             let relative = String(effectivePath.dropFirst(prefix.count))
-            if kind == "file" &&
-                (metadata.fileSize == nil || metadata.contentModificationDate == nil) {
-                throw JournalError.database("Metadati non disponibili durante la verifica completa")
-            }
-            var changeStamp: String?
-            if kind == "file" {
-                var actual = stat()
-                guard file.path.withCString({ lstat($0,&actual) }) == 0,
-                      actual.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
-                      Int64(actual.st_size) == Int64(metadata.fileSize ?? -1) else {
-                    throw JournalError.database("File changed during inventory scan")
-                }
-                changeStamp = "\(actual.st_ino):\(actual.st_ctimespec.tv_sec):\(actual.st_ctimespec.tv_nsec)"
-            }
             let item = TrackedItem(
-                relativePath: relative,
-                kind: kind,
-                size: Int64(metadata.fileSize ?? 0),
-                modifiedAt: metadata.contentModificationDate?.timeIntervalSince1970 ?? 0, changeStamp: changeStamp
+                relativePath: relative, kind: kind, size: size,
+                modifiedAt: modified, changeStamp: changeStamp
             )
             found.append(item)
             onItem(item)
@@ -177,7 +196,7 @@ public enum LocalScanner {
         var enumerationError: Error?
         var enumerationErrorURL: URL?
         let enumerator = FileManager.default.enumerator(
-            at: target, includingPropertiesForKeys: Array(keys), options: [],
+            at: target, includingPropertiesForKeys: preferPOSIXMetadata ? [] : Array(keys), options: [],
             errorHandler: { url, error in
                 // Keep the escaping Foundation handler independent of the
                 // synchronous onVisit callback. Publish its path before throwing.

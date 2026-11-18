@@ -224,6 +224,8 @@ public struct ArchiveAuditReport: Codable, Equatable, Sendable {
     public var metadataMatches: Int? = nil
     public var hashMatches: Int? = nil
     public var cachedHashMatches: Int? = nil
+    public var directoryListingCacheHits: Int? = nil
+    public var directoryListingReads: Int? = nil
     public var displayCounts: AuditFindingCounts? = nil
     public func count(_ kind: AuditFindingKind) -> Int {
         findings.lazy.filter { $0.kind == kind }.count
@@ -322,6 +324,7 @@ public final class ArchiveAudit {
             scanStart = ProcessInfo.processInfo.systemUptime
             state.phase = "Analisi destinazione"; state.currentPath = mapping.rootID; report(force:true)
             let target = try LocalScanner.scan(root:mapping.target,excludeManaged:true,
+                preferPOSIXMetadata:true,
                 shouldContinue:{ !cancellation.isCancelled },onVisit:{ relative in
                     state.currentPath = mapping.rootID + " / " + relative; diagnosticSnapshot()
                 },onItem:{ item in
@@ -347,8 +350,10 @@ public final class ArchiveAudit {
         state.comparisonStarted = Date()
         state.phase = mode == .deep ? "Verifica SHA-256" : (mode == .intelligent ? "Verifica intelligente" : "Confronto metadati")
         report(force:true)
+        var listingHits = 0, listingReads = 0
         for pair in pairs {
             let mapping = pair.mapping
+            let listingCache = AuditDirectoryListingCache()
             for path in Set(pair.source.keys).union(pair.target.keys).sorted() {
                 try check()
                 state.currentPath = mapping.rootID + " / " + path
@@ -380,8 +385,8 @@ public final class ArchiveAudit {
                     else if item.kind == "directory" {
                         kind = .matching
                         if collectMetadataMatches && shouldCollectMetadataMatch(mapping.rootID,path) {
-                            let a = try Self.safeURL(path,mapping:mapping,destination:false)
-                            let b = try Self.safeURL(path,mapping:mapping,destination:true)
+                            let a = try Self.safeURL(path,mapping:mapping,destination:false,listingCache:listingCache)
+                            let b = try Self.safeURL(path,mapping:mapping,destination:true,listingCache:listingCache)
                             let beforeA = try SeededArchiveVerifier.fingerprint(a,directory:true)
                             let beforeB = try SeededArchiveVerifier.fingerprint(b,directory:true)
                             guard try SeededArchiveVerifier.fingerprint(a,directory:true) == beforeA,
@@ -393,8 +398,8 @@ public final class ArchiveAudit {
                     }
                     else if src!.size != dst!.size {
                         // Independently re-read both sides before declaring a size mismatch.
-                        let a = try Self.safeURL(path,mapping:mapping,destination:false)
-                        let b = try Self.safeURL(path,mapping:mapping,destination:true)
+                        let a = try Self.safeURL(path,mapping:mapping,destination:false,listingCache:listingCache)
+                        let b = try Self.safeURL(path,mapping:mapping,destination:true,listingCache:listingCache)
                         let beforeA = try SeededArchiveVerifier.fingerprint(a)
                         let beforeB = try SeededArchiveVerifier.fingerprint(b)
                         guard beforeA.size == src!.size, beforeB.size == dst!.size,
@@ -412,8 +417,8 @@ public final class ArchiveAudit {
                         kind = abs(src!.modifiedAt-dst!.modifiedAt) <= 2 ? .matching : .different
                         if kind == .different { detail = "Data di modifica diversa" }
                         else if collectMetadataMatches && shouldCollectMetadataMatch(mapping.rootID,path) {
-                            let a = try Self.safeURL(path,mapping:mapping,destination:false)
-                            let b = try Self.safeURL(path,mapping:mapping,destination:true)
+                            let a = try Self.safeURL(path,mapping:mapping,destination:false,listingCache:listingCache)
+                            let b = try Self.safeURL(path,mapping:mapping,destination:true,listingCache:listingCache)
                             let beforeA = try SeededArchiveVerifier.fingerprint(a)
                             let beforeB = try SeededArchiveVerifier.fingerprint(b)
                             guard beforeA.size == src!.size, beforeB.size == dst!.size,
@@ -427,8 +432,8 @@ public final class ArchiveAudit {
                             onVerifiedFile(mapping.rootID,path,beforeA,beforeB)
                         }
                     } else {
-                        let a = try Self.safeURL(path,mapping:mapping,destination:false)
-                        let b = try Self.safeURL(path,mapping:mapping,destination:true)
+                        let a = try Self.safeURL(path,mapping:mapping,destination:false,listingCache:listingCache)
+                        let b = try Self.safeURL(path,mapping:mapping,destination:true,listingCache:listingCache)
                         let beforeA = try SeededArchiveVerifier.fingerprint(a)
                         let beforeB = try SeededArchiveVerifier.fingerprint(b)
                         guard beforeA.size == src!.size, beforeB.size == dst!.size,
@@ -475,7 +480,7 @@ public final class ArchiveAudit {
                     if repair && (kind == .missing || kind == .different), let src {
                         // Reading a name does not grant permission to create or replace it.
                         _ = try mapping.fileURL(relativePath:path,destination:true)
-                        let url = try Self.safeURL(path,mapping:mapping,destination:false)
+                        let url = try Self.safeURL(path,mapping:mapping,destination:false,listingCache:listingCache)
                         if src.kind == "file" {
                             let fresh = try SeededArchiveVerifier.fingerprint(url)
                             guard fresh.size == src.size, abs(fresh.modifiedAt-src.modifiedAt)<0.002,
@@ -485,7 +490,7 @@ public final class ArchiveAudit {
                         candidates.append((mapping,src,pair.sourceStamp,fingerprint))
                     }
                 } catch SeedVerificationError.cancelled { throw SeedVerificationError.cancelled }
-                catch { kind = .uncertain; detail = SyncDiagnostic.describe(error) }
+                catch { listingCache.invalidate(); kind = .uncertain; detail = SyncDiagnostic.describe(error) }
                 if kind == .matching && item.kind == "file" {
                     if detail == "Contenuto SHA-256 corrispondente" { hashMatches += 1 }
                     else if detail == "Contenuto SHA-256 corrispondente (cache verificata)" { cachedHashMatches += 1 }
@@ -501,6 +506,8 @@ public final class ArchiveAudit {
                 if item.kind == "file" && kind != .matching { state.differences.append(finding) }
                 state.compared += 1; report()
             }
+            listingHits += listingCache.hits; listingReads += listingCache.enumerations
+            listingCache.invalidate()
             try mapping.verify()
             guard try Self.rootStamp(mapping.source) == pair.sourceStamp,
                   try Self.rootStamp(mapping.target) == pair.targetStamp else { throw MountedCopyError.volumeChanged }
@@ -535,7 +542,7 @@ public final class ArchiveAudit {
             seconds:ProcessInfo.processInfo.systemUptime-startTick,findings:findings,
             bytesRead:state.bytesRead,queuedRepairs:queued,repairRequested:repair,
             sourceMetrics:state.source,destinationMetrics:state.destination,
-            deletionCandidates:deletionCandidates,metadataMatches:metadataMatches,hashMatches:hashMatches,cachedHashMatches:cachedHashMatches,displayCounts:state.counts)
+            deletionCandidates:deletionCandidates,metadataMatches:metadataMatches,hashMatches:hashMatches,cachedHashMatches:cachedHashMatches,directoryListingCacheHits:listingHits,directoryListingReads:listingReads,displayCounts:state.counts)
     }
 
     private static func fold(_ path: String) -> String {
@@ -548,8 +555,8 @@ public final class ArchiveAudit {
               url.resolvingSymlinksInPath().path == url.path else { throw MountedCopyError.rootUnavailable }
         return "\(st.st_dev):\(st.st_ino)"
     }
-    private static func safeURL(_ path:String,mapping:MountedFolderMapping,destination:Bool) throws -> URL {
-        let url = try mapping.verificationURL(relativePath:path,destination:destination)
+    private static func safeURL(_ path:String,mapping:MountedFolderMapping,destination:Bool,listingCache:AuditDirectoryListingCache? = nil) throws -> URL {
+        let url = try mapping.verificationURL(relativePath:path,destination:destination,listingCache:listingCache)
         guard url.resolvingSymlinksInPath().path == url.path else { throw SeedVerificationError.unsafeEntry }
         return url
     }

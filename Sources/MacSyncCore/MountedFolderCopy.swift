@@ -164,6 +164,11 @@ public struct MountedFolderMapping: Sendable {
     /// Win32 aliases, traversal, alternate separators or symlinks.
     /// Write and deletion paths continue to use the strict fileURL.
     public func verificationURL(relativePath: String, destination: Bool) throws -> URL {
+        try verificationURL(relativePath:relativePath,destination:destination,listingCache:nil)
+    }
+
+    // Internal overload used only by the read-only comparison phase.
+    func verificationURL(relativePath: String, destination: Bool, listingCache: AuditDirectoryListingCache?) throws -> URL {
         if WindowsPathSafety.validRelativePath(relativePath) {
             return try fileURL(relativePath:relativePath,destination:destination)
         }
@@ -174,8 +179,14 @@ public struct MountedFolderMapping: Sendable {
         }) else { throw MountedCopyError.unsafeFile }
         var current = destination ? target : source
         for (index,part) in comps.enumerated() {
-            let names = try FileManager.default.contentsOfDirectory(atPath:current.path)
-            let aliases = names.filter { WindowsPathSafety.comparisonFold($0) == WindowsPathSafety.comparisonFold(part) }
+            let aliases: [String]
+            if let listingCache {
+                aliases = try listingCache.aliases(for:part,in:current)
+            } else {
+                let names = try FileManager.default.contentsOfDirectory(atPath:current.path)
+                let key = WindowsPathSafety.comparisonFold(part)
+                aliases = names.filter { WindowsPathSafety.comparisonFold($0) == key }
+            }
             guard aliases.count == 1, let actual = aliases.first,
                   Array(actual.utf8) == Array(part.utf8) else { throw MountedCopyError.destinationConflict }
             current.appendPathComponent(actual)

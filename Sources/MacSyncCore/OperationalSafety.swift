@@ -136,7 +136,8 @@ public enum WindowsPathSafety {
             }
             guard info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else { throw MountedCopyError.unsafeFile }
             let names = try FileManager.default.contentsOfDirectory(atPath:parent.path)
-            let aliases = names.filter { comparisonFold($0) == comparisonFold(part) }
+            let key = comparisonFold(part)
+            let aliases = names.filter { comparisonFold($0) == key }
             guard aliases.count <= 1 else { throw MountedCopyError.destinationConflict }
             if let actual = aliases.first, Array(actual.utf8) != Array(part.utf8) {
                 // Finder/APFS can report decomposed Unicode names even
@@ -156,6 +157,92 @@ public enum WindowsPathSafety {
                 else { throw MountedCopyError.destinationConflict }
             }
             parent.appendPathComponent(part)
+        }
+    }
+}
+
+/// Bounded, read-only directory listing cache for ONE comparison pass.
+/// A cache hit is not permission to write, delete, or acknowledge a job.
+/// Final repair/recognition and all mutating operations use fresh lookups.
+final class AuditDirectoryListingCache {
+    private struct Stamp: Equatable {
+        let device: UInt64
+        let inode: UInt64
+        let birth: Int64
+        let birthNanos: Int64
+        let modified: Int64
+        let modifiedNanos: Int64
+        let changed: Int64
+        let changedNanos: Int64
+
+        static func read(_ url: URL) throws -> Stamp {
+            var s = stat()
+            guard url.path.withCString({ lstat($0,&s) }) == 0 else {
+                throw MountedCopyError.rootUnavailable
+            }
+            guard s.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
+                throw MountedCopyError.unsafeFile
+            }
+            return Stamp(device:UInt64(bitPattern:Int64(s.st_dev)),inode:UInt64(s.st_ino),
+                         birth:Int64(s.st_birthtimespec.tv_sec),birthNanos:Int64(s.st_birthtimespec.tv_nsec),
+                         modified:Int64(s.st_mtimespec.tv_sec),modifiedNanos:Int64(s.st_mtimespec.tv_nsec),
+                         changed:Int64(s.st_ctimespec.tv_sec),changedNanos:Int64(s.st_ctimespec.tv_nsec))
+        }
+    }
+    private struct Entry {
+        let stamp: Stamp
+        let aliases: [String:[String]]
+        let names: Int
+    }
+    // Exact UTF-8 keys, not Swift's canonically-equivalent String equality.
+    private var entries: [Data:Entry] = [:]
+    private var order: [Data] = []
+    private var count = 0
+    private let limit = 64
+    private let nameLimit = 100_000
+    private(set) var hits = 0
+    private(set) var enumerations = 0
+
+    func invalidate() {
+        entries.removeAll(keepingCapacity:true)
+        order.removeAll(keepingCapacity:true)
+        count = 0
+    }
+    private func remove(_ key: Data) {
+        if let old = entries.removeValue(forKey:key) { count -= old.names }
+        order.removeAll { $0 == key }
+    }
+    func aliases(for name:String,in parent:URL) throws -> [String] {
+        do {
+            let key = Data(parent.path.utf8)
+            let folded = WindowsPathSafety.comparisonFold(name)
+            let before = try Stamp.read(parent)
+            if let entry = entries[key], entry.stamp == before {
+                hits += 1
+                // Revalidate current directory identity on each lookup.
+                return entry.aliases[folded] ?? []
+            }
+            remove(key)
+            let names = try FileManager.default.contentsOfDirectory(atPath:parent.path)
+            enumerations += 1
+            guard try Stamp.read(parent) == before else {
+                throw MountedCopyError.destinationChanging
+            }
+            let aliases = Dictionary(grouping:names,by:WindowsPathSafety.comparisonFold)
+            if names.count <= nameLimit {
+                while entries.count >= limit || count + names.count > nameLimit {
+                    guard let oldest = order.first else { break }
+                    remove(oldest)
+                }
+                entries[key] = Entry(stamp:before,aliases:aliases,names:names.count)
+                order.append(key)
+                count += names.count
+            }
+            return aliases[folded] ?? []
+        } catch {
+            // Never preserve listings after an uncertain filesystem result.
+            invalidate()
+            throw error
         }
     }
 }
