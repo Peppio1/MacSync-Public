@@ -58,6 +58,12 @@ public struct AuditFinding: Codable, Equatable, Sendable, Identifiable {
     public let bytes: Int64
     public let kind: AuditFindingKind
     public let detail: String
+    // Optional for compatibility with saved reports and UI test fixtures.
+    public var sourceBytes: Int64? = nil
+    public var targetBytes: Int64? = nil
+    public var sourceModifiedAt: Double? = nil
+    public var targetModifiedAt: Double? = nil
+    public var repairEligible: Bool? = nil
 }
 public struct AuditSideMetrics: Codable, Equatable, Sendable {
     public var files = 0
@@ -364,7 +370,10 @@ public final class ArchiveAudit {
                     if collision || item.kind == "symlink" {
                         detail = "Percorso ambiguo, tipo incompatibile o collegamento simbolico"
                     } else if src == nil { kind = .extra }
-                    else if dst == nil { kind = .missing }
+                    else if dst == nil {
+                        if WindowsPathSafety.validRelativePath(path) { kind = .missing }
+                        else { detail = "Nome non creabile in sicurezza nella destinazione" }
+                    }
                     else if item.kind == "directory" {
                         kind = .matching
                         if collectMetadataMatches && shouldCollectMetadataMatch(mapping.rootID,path) {
@@ -447,6 +456,8 @@ public final class ArchiveAudit {
                         else { detail = "Contenuto SHA-256 corrispondente"; onVerifiedFile(mapping.rootID,path,beforeA,beforeB) }
                     }
                     if repair && (kind == .missing || kind == .different), let src {
+                        // Reading a name does not grant permission to create or replace it.
+                        _ = try mapping.fileURL(relativePath:path,destination:true)
                         let url = try Self.safeURL(path,mapping:mapping,destination:false)
                         if src.kind == "file" {
                             let fresh = try SeededArchiveVerifier.fingerprint(url)
@@ -464,7 +475,9 @@ public final class ArchiveAudit {
                 }
                 let finding = AuditFinding(rootID:mapping.rootID,relativePath:path,
                     sourceRoot:mapping.source.path,targetRoot:mapping.target.path,objectKind:item.kind,
-                    bytes:item.size,kind:kind,detail:detail)
+                    bytes:item.size,kind:kind,detail:detail,sourceBytes:src?.size,targetBytes:dst?.size,
+                     sourceModifiedAt:src?.modifiedAt,targetModifiedAt:dst?.modifiedAt,
+                     repairEligible: (kind == .missing || kind == .different) && WindowsPathSafety.validRelativePath(path))
                 findings.append(finding)
                 state.counts.record(finding,deletionCandidates:deletionCandidates)
                 if item.kind == "file" && kind != .matching { state.differences.append(finding) }
@@ -508,7 +521,7 @@ public final class ArchiveAudit {
     }
 
     private static func fold(_ path: String) -> String {
-        path.precomposedStringWithCanonicalMapping.folding(options:[.caseInsensitive],locale:Locale(identifier:"en_US_POSIX"))
+        path.split(separator:"/",omittingEmptySubsequences:false).map { WindowsPathSafety.comparisonFold(String($0)) }.joined(separator:"/")
     }
     private static func rootStamp(_ url: URL) throws -> String {
         var st = stat()
@@ -518,7 +531,7 @@ public final class ArchiveAudit {
         return "\(st.st_dev):\(st.st_ino)"
     }
     private static func safeURL(_ path:String,mapping:MountedFolderMapping,destination:Bool) throws -> URL {
-        let url = try mapping.fileURL(relativePath:path,destination:destination)
+        let url = try mapping.verificationURL(relativePath:path,destination:destination)
         guard url.resolvingSymlinksInPath().path == url.path else { throw SeedVerificationError.unsafeEntry }
         return url
     }

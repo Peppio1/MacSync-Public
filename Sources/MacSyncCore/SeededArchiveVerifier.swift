@@ -265,7 +265,7 @@ public final class SeededArchiveVerifier {
         _ relativePath: String, mapping: MountedFolderMapping, destination: Bool
     ) throws -> URL {
         let root = destination ? mapping.target : mapping.source
-        let url = try mapping.fileURL(relativePath: relativePath, destination: destination)
+        let url = try mapping.verificationURL(relativePath: relativePath, destination: destination)
         let parent = url.deletingLastPathComponent().standardizedFileURL
         guard parent.path == root.path || parent.path.hasPrefix(root.path + "/") else {
             throw SeedVerificationError.unsafeEntry

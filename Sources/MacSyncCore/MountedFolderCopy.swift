@@ -159,6 +159,36 @@ public struct MountedFolderMapping: Sendable {
         guard current == targetVolume else { throw MountedCopyError.volumeChanged }
     }
 
+    /// Only for read-only verification of an already enumerated object.
+    /// Special names must exist exactly as listed, without ambiguous
+    /// Win32 aliases, traversal, alternate separators or symlinks.
+    /// Write and deletion paths continue to use the strict fileURL.
+    public func verificationURL(relativePath: String, destination: Bool) throws -> URL {
+        if WindowsPathSafety.validRelativePath(relativePath) {
+            return try fileURL(relativePath:relativePath,destination:destination)
+        }
+        let comps = relativePath.split(separator:"/",omittingEmptySubsequences:false).map(String.init)
+        guard !comps.isEmpty, comps.allSatisfy({
+            !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("\\") &&
+            !$0.contains("\0") && !$0.lowercased().hasPrefix(".macsync-")
+        }) else { throw MountedCopyError.unsafeFile }
+        var current = destination ? target : source
+        for (index,part) in comps.enumerated() {
+            let names = try FileManager.default.contentsOfDirectory(atPath:current.path)
+            let aliases = names.filter { WindowsPathSafety.comparisonFold($0) == WindowsPathSafety.comparisonFold(part) }
+            guard aliases.count == 1, let actual = aliases.first,
+                  Array(actual.utf8) == Array(part.utf8) else { throw MountedCopyError.destinationConflict }
+            current.appendPathComponent(actual)
+            var st = stat()
+            guard current.path.withCString({ lstat($0,&st) }) == 0 else { throw MountedCopyError.rootUnavailable }
+            let kind = st.st_mode & mode_t(S_IFMT)
+            guard kind == mode_t(S_IFDIR) || (index == comps.count-1 && kind == mode_t(S_IFREG)) else {
+                throw MountedCopyError.unsafeFile
+            }
+        }
+        return current
+    }
+
     public func fileURL(relativePath: String, destination: Bool) throws -> URL {
         let root = destination ? target : source
         let comps = relativePath.split(separator: "/", omittingEmptySubsequences: false)

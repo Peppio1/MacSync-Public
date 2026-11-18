@@ -90,6 +90,35 @@ final class SeededArchiveVerifierTests: XCTestCase {
         print("400,000 tiny local files; compare \(scan) s; recognition \(Date().timeIntervalSince(commitTick)) s; total \(Date().timeIntervalSince(start)) s; content bytes read 0")
     }
 
+    func testSpecialExistingNamesReadOnlyRecognitionDoesNotRename() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let name = "roll /photo.jpg"
+        try write("matching",to:f.source.appendingPathComponent(name))
+        try write("matching",to:f.target.appendingPathComponent(name))
+        try initializeInventory(f)
+        let session = try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let result = try session.auditAndRecognize(mode:.deep)
+        XCTAssertEqual(result.audit.count(.uncertain),0)
+        XCTAssertEqual(try session.approve(report:result.recognition),2)
+        XCTAssertTrue(try f.journal.pending().isEmpty)
+        XCTAssertThrowsError(try f.mapping.fileURL(relativePath:name,destination:true))
+        XCTAssertTrue(FileManager.default.fileExists(atPath:f.target.appendingPathComponent(name).path))
+    }
+
+    func testTrailingSpaceNameAliasIsNotAutomaticallyAssociated() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        try write("matching",to:f.source.appendingPathComponent("roll /photo.jpg"))
+        try write("matching",to:f.target.appendingPathComponent("roll/photo.jpg"))
+        try initializeInventory(f)
+        let session = try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let result = try session.auditAndRecognize(mode:.deep,repair:true)
+        XCTAssertEqual(result.audit.count(.uncertain),4)
+        XCTAssertEqual(result.recognition.verifiedCount,0)
+        XCTAssertEqual(result.audit.queuedRepairs,0)
+    }
+
     func testMatchingDirectoryAcknowledgedIndependentlyOfMissingChild() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at:f.base) }

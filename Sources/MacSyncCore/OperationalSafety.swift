@@ -116,6 +116,13 @@ public enum WindowsPathSafety {
     public static func folded(_ name: String) -> String {
         name.precomposedStringWithCanonicalMapping.folding(options:[.caseInsensitive],locale:Locale(identifier:"en_US_POSIX"))
     }
+    /// Conservative Win32 alias detection, NOT a name conversion. Never
+    /// use this key as a filesystem path or associate two distinct names.
+    public static func comparisonFold(_ name: String) -> String {
+        var value = name
+        while value.hasSuffix(" ") || value.hasSuffix(".") { value.removeLast() }
+        return folded(value)
+    }
     /// Refuse ambiguous local siblings and aliases already on the target.
     /// Existing exact-spelling target is allowed. Never walk through symlinks.
     public static func checkNames(relativePath: String, under root: URL) throws {
