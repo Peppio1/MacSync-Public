@@ -57,6 +57,7 @@ public final class ChangeJournal {
             try execute("CREATE TABLE IF NOT EXISTS publication_intents(job_id INTEGER PRIMARY KEY, root_id TEXT NOT NULL, relative_path TEXT NOT NULL);")
             try execute("CREATE TABLE IF NOT EXISTS queue_rebuild_hold(singleton INTEGER PRIMARY KEY CHECK(singleton=1), token TEXT NOT NULL);")
             try execute("CREATE TABLE IF NOT EXISTS retired_delete_evidence(job_id INTEGER PRIMARY KEY);")
+            try execute("CREATE TABLE IF NOT EXISTS verified_content_cache(root_id TEXT NOT NULL, relative_path TEXT NOT NULL, binding TEXT NOT NULL, source_stamp TEXT NOT NULL, target_stamp TEXT NOT NULL, PRIMARY KEY(root_id,relative_path));")
             try execute("CREATE TABLE IF NOT EXISTS directory_bindings(root_id TEXT NOT NULL, role TEXT NOT NULL, stamp TEXT NOT NULL, PRIMARY KEY(root_id,role));")
             try execute("CREATE INDEX IF NOT EXISTS idx_queue_pending ON change_queue(completed, id);")
             try execute("CREATE INDEX IF NOT EXISTS idx_queue_uploads ON change_queue(completed, kind, id);")
@@ -82,6 +83,35 @@ public final class ChangeJournal {
         if let connection { sqlite3_close(connection) }
     }
 
+    /// A cached equality is only reused for the same pair of root bindings
+    /// and both complete POSIX fingerprints. Never used by deep audits.
+    private func cacheStamp(_ value:SeedFileFingerprint) throws -> String {
+        let encoder=JSONEncoder(); encoder.outputFormatting=[.sortedKeys]
+        return String(decoding:try encoder.encode(value),as:UTF8.self)
+    }
+
+    public func cachedContentMatches(rootID:String,path:String,binding:String,source:SeedFileFingerprint,target:SeedFileFingerprint) throws -> Bool {
+        let stmt=try prepare("SELECT 1 FROM verified_content_cache WHERE root_id=? AND relative_path=? AND binding=? AND source_stamp=? AND target_stamp=?;")
+        defer { sqlite3_finalize(stmt) }
+        try bind(rootID,at:1,in:stmt); try bind(path,at:2,in:stmt); try bind(binding,at:3,in:stmt)
+        try bind(cacheStamp(source),at:4,in:stmt); try bind(cacheStamp(target),at:5,in:stmt)
+        let rc=sqlite3_step(stmt)
+        guard rc==SQLITE_ROW || rc==SQLITE_DONE else { throw databaseFailure() }
+        return rc==SQLITE_ROW
+    }
+
+    public func storeContentMatch(rootID:String,path:String,binding:String,source:SeedFileFingerprint,target:SeedFileFingerprint) throws {
+        let stmt=try prepare("INSERT OR REPLACE INTO verified_content_cache(root_id,relative_path,binding,source_stamp,target_stamp) VALUES(?,?,?,?,?);")
+        defer { sqlite3_finalize(stmt) }
+        try bind(rootID,at:1,in:stmt); try bind(path,at:2,in:stmt); try bind(binding,at:3,in:stmt)
+        try bind(cacheStamp(source),at:4,in:stmt); try bind(cacheStamp(target),at:5,in:stmt)
+        guard sqlite3_step(stmt)==SQLITE_DONE else { throw databaseFailure() }
+    }
+
+    public func clearVerifiedContentCache() throws {
+        try execute("DELETE FROM verified_content_cache;")
+    }
+
     /// Persisted across application restart. No transfer or delete is
     /// permitted until an explicit complete archive audit rebuilds the queue.
     public func queueRebuildToken() throws -> String? {
@@ -96,6 +126,7 @@ public final class ChangeJournal {
     /// Used when the exclusion policy changes, before updating preferences.
     /// A crash between the two operations remains safely held.
     public func requireQueueRebuild() throws {
+        try clearVerifiedContentCache()
         let stmt=try prepare("INSERT OR REPLACE INTO queue_rebuild_hold(singleton,token) VALUES(1,?);")
         defer { sqlite3_finalize(stmt) }
         try bind(UUID().uuidString,at:1,in:stmt)
@@ -117,6 +148,7 @@ public final class ChangeJournal {
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
             try execute("INSERT OR IGNORE INTO retired_delete_evidence(job_id) SELECT id FROM change_queue WHERE completed=0 AND kind='delete';")
+            try clearVerifiedContentCache()
             try execute("UPDATE change_queue SET completed=1 WHERE completed=0;")
             let count = Int(sqlite3_changes(connection))
             let stmt = try prepare("INSERT OR REPLACE INTO queue_rebuild_hold(singleton,token) VALUES(1,?);")

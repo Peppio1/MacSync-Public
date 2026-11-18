@@ -336,10 +336,16 @@ public final class MountedFolderCopyWorker {
                 }
                 // Only an interrupted publication pays the cost of a full
                 // content comparison. Never infer completion from size alone.
-                if try journal.hasPublicationIntent(job), try reconcilePublished(job,mapping:mapping) {
+                let previousPublication = try journal.hasPublicationIntent(job)
+                // Only hash an ordinary existing queued file if its size and
+                // mtime look equal. A same-size/same-date edit still copies
+                // if the actual bytes differ.
+                let mayAlreadyMatch = previousPublication || ((try? metadataMayMatch(job,mapping:mapping)) == true)
+                if mayAlreadyMatch, try reconcilePublished(job,mapping:mapping) {
                     summary.reconciled += 1
-                    emit(.noChange,job:job,mapping:mapping,detail:"Pubblicazione precedente verificata SHA-256")
-                    try? log.record(level:.success,rootID:job.rootID,action:"reconciled",relativePath:job.relativePath,message:"Pubblicazione precedente verificata; nessuna nuova copia")
+                    let message=previousPublication ? "Pubblicazione precedente verificata SHA-256" : "File già corrispondente SHA-256"
+                    emit(.noChange,job:job,mapping:mapping,detail:message)
+                    try? log.record(level:.success,rootID:job.rootID,action:"reconciled",relativePath:job.relativePath,message:message+"; nessuna nuova copia")
                     continue
                 }
                 let outcome = try transfer(job, mapping: mapping)
@@ -445,6 +451,17 @@ public final class MountedFolderCopyWorker {
             }
         }
         return true
+    }
+
+    private func metadataMayMatch(_ job:QueuedChange,mapping:MountedFolderMapping) throws -> Bool {
+        try mapping.verify()
+        let src=try mapping.fileURL(relativePath:job.relativePath,destination:false)
+        let dst=try mapping.fileURL(relativePath:job.relativePath,destination:true)
+        try ensureSafeParents(src,under:mapping.source,create:false)
+        try ensureSafeParents(dst,under:mapping.target,create:false)
+        guard let a=try optionalSnapshot(src), let b=try optionalSnapshot(dst),
+              a.kind == .file, b.kind == .file, a.size == b.size else { return false }
+        return abs(a.mtime-b.mtime)<=2
     }
 
     private func reconcilePublished(_ job: QueuedChange,mapping:MountedFolderMapping) throws -> Bool {

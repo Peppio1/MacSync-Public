@@ -338,6 +338,28 @@ final class SeededArchiveVerifierTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf:dst,encoding:.utf8),"BBBB")
     }
 
+    func testIntelligentHashCacheReusesOnlyStableFingerprintsAndDeepAlwaysReads() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let date=Date(timeIntervalSinceNow:-600)
+        let src=f.source.appendingPathComponent("a.jpg"), dst=f.target.appendingPathComponent("a.jpg")
+        try write("same",to:src,date:date)
+        try write("same",to:dst,date:date.addingTimeInterval(10))
+        try initializeInventory(f)
+        let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let first=try session.auditAndRecognize(mode:.intelligent)
+        XCTAssertEqual(first.audit.bytesRead,8)
+        let second=try session.auditAndRecognize(mode:.intelligent)
+        XCTAssertEqual(second.audit.bytesRead,0)
+        XCTAssertEqual(second.audit.cachedHashMatches,1)
+        let deep=try session.auditAndRecognize(mode:.deep)
+        XCTAssertEqual(deep.audit.bytesRead,8)
+        try write("DIFF",to:dst,date:date.addingTimeInterval(20))
+        let changed=try session.auditAndRecognize(mode:.intelligent)
+        XCTAssertEqual(changed.audit.count(.different),1)
+        XCTAssertEqual(changed.audit.bytesRead,8)
+    }
+
     func testIntelligentRecognitionHashesOnlyTimestampMismatch() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }

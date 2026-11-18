@@ -50,7 +50,7 @@ public final class SeedVerificationCancellation: @unchecked Sendable {
 /// A conservative lstat fingerprint; a successful hash is valid only while
 /// both files retain these attributes. mtime + ctime protect against edits
 /// that preserve size and modification time.
-public struct SeedFileFingerprint: Equatable, Sendable {
+public struct SeedFileFingerprint: Codable, Equatable, Sendable {
     public let device: UInt64
     public let inode: UInt64
     public let size: Int64

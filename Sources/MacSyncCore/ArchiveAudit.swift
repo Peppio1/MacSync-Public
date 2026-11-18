@@ -223,6 +223,7 @@ public struct ArchiveAuditReport: Codable, Equatable, Sendable {
     public var recognizedDirectories: Int? = nil
     public var metadataMatches: Int? = nil
     public var hashMatches: Int? = nil
+    public var cachedHashMatches: Int? = nil
     public var displayCounts: AuditFindingCounts? = nil
     public func count(_ kind: AuditFindingKind) -> Int {
         findings.lazy.filter { $0.kind == kind }.count
@@ -280,6 +281,7 @@ public final class ArchiveAudit {
             let ambiguous: Set<String>
             let sourceStamp: String
             let targetStamp: String
+            let cacheBinding: String?
         }
         var pairs: [Pair] = []
         for mapping in mappings {
@@ -335,11 +337,12 @@ public final class ArchiveAudit {
             let ambiguous = Set(grouped.filter { $0.value.count > 1 }.keys)
             pairs.append(Pair(mapping:mapping,source:Dictionary(uniqueKeysWithValues:source.map{($0.relativePath,$0)}),
                 target:Dictionary(uniqueKeysWithValues:target.map{($0.relativePath,$0)}),ambiguous:ambiguous,
-                sourceStamp:sourceStamp,targetStamp:targetStamp))
+                sourceStamp:sourceStamp,targetStamp:targetStamp,
+                cacheBinding: mode == .intelligent ? (try? DirectoryBinding.encoded(mapping.source) + "\0" + DirectoryBinding.encoded(mapping.target)) : nil))
             state.total += paths.count
         }
         var findings: [AuditFinding] = []
-        var metadataMatches = 0, hashMatches = 0
+        var metadataMatches = 0, hashMatches = 0, cachedHashMatches = 0
         var candidates: [(MountedFolderMapping, TrackedItem, String, SeedFileFingerprint?)] = []
         state.comparisonStarted = Date()
         state.phase = mode == .deep ? "Verifica SHA-256" : (mode == .intelligent ? "Verifica intelligente" : "Confronto metadati")
@@ -443,17 +446,31 @@ public final class ArchiveAudit {
                             readTick = now
                             report()
                         }
-                        let h1 = try Self.hash(a,expected:beforeA,cancel:cancellation,read:{ read($0,destination:false) })
-                        readTick = ProcessInfo.processInfo.systemUptime
-                        let h2 = try Self.hash(b,expected:beforeB,cancel:cancellation,read:{ read($0,destination:true) })
+                        let cacheHit = mode == .intelligent && pair.cacheBinding.map { binding in
+                            (try? journal.cachedContentMatches(rootID:mapping.rootID,path:path,binding:binding,source:beforeA,target:beforeB)) == true
+                        } == true
+                        let identical:Bool
+                        if cacheHit { identical=true }
+                        else {
+                            let h1 = try Self.hash(a,expected:beforeA,cancel:cancellation,read:{ read($0,destination:false) })
+                            readTick = ProcessInfo.processInfo.systemUptime
+                            let h2 = try Self.hash(b,expected:beforeB,cancel:cancellation,read:{ read($0,destination:true) })
+                            identical=h1==h2
+                        }
                         guard try SeededArchiveVerifier.fingerprint(a) == beforeA,
                               try SeededArchiveVerifier.fingerprint(b) == beforeB else {
                             throw SeedVerificationError.changedDuringRead
                         }
                         fingerprint = beforeA
-                        kind = h1 == h2 ? .matching : .different
+                        kind = identical ? .matching : .different
                         if kind == .different { detail = "Contenuto SHA-256 diverso" }
-                        else { detail = "Contenuto SHA-256 corrispondente"; onVerifiedFile(mapping.rootID,path,beforeA,beforeB) }
+                        else {
+                            detail = cacheHit ? "Contenuto SHA-256 corrispondente (cache verificata)" : "Contenuto SHA-256 corrispondente"
+                            if !cacheHit, let binding=pair.cacheBinding {
+                                try? journal.storeContentMatch(rootID:mapping.rootID,path:path,binding:binding,source:beforeA,target:beforeB)
+                            }
+                            onVerifiedFile(mapping.rootID,path,beforeA,beforeB)
+                        }
                     }
                     if repair && (kind == .missing || kind == .different), let src {
                         // Reading a name does not grant permission to create or replace it.
@@ -471,6 +488,7 @@ public final class ArchiveAudit {
                 catch { kind = .uncertain; detail = SyncDiagnostic.describe(error) }
                 if kind == .matching && item.kind == "file" {
                     if detail == "Contenuto SHA-256 corrispondente" { hashMatches += 1 }
+                    else if detail == "Contenuto SHA-256 corrispondente (cache verificata)" { cachedHashMatches += 1 }
                     else { metadataMatches += 1; detail = "Corrispondenza metadati (contenuto non confrontato)" }
                 }
                 let finding = AuditFinding(rootID:mapping.rootID,relativePath:path,
@@ -517,7 +535,7 @@ public final class ArchiveAudit {
             seconds:ProcessInfo.processInfo.systemUptime-startTick,findings:findings,
             bytesRead:state.bytesRead,queuedRepairs:queued,repairRequested:repair,
             sourceMetrics:state.source,destinationMetrics:state.destination,
-            deletionCandidates:deletionCandidates,metadataMatches:metadataMatches,hashMatches:hashMatches,displayCounts:state.counts)
+            deletionCandidates:deletionCandidates,metadataMatches:metadataMatches,hashMatches:hashMatches,cachedHashMatches:cachedHashMatches,displayCounts:state.counts)
     }
 
     private static func fold(_ path: String) -> String {

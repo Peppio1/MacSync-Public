@@ -786,6 +786,7 @@ final class MountedCopyController: ObservableObject {
                     self?.onConnectionCheck?(states, checkedAt)
                 }
                 guard states.values.allSatisfy({ $0.isReady }) else {
+                    try? journal.clearVerifiedContentCache()
                     try? log.record(
                         level: .warning, rootID: "app", action: "connection_wait",
                         message: "Controllo destinazioni — " + String(states.filter { !$0.value.isReady }.map { $0.key + ": " + $0.value.description }.sorted().joined(separator:"; ").prefix(3000))

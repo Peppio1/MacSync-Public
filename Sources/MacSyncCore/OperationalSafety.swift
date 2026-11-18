@@ -136,7 +136,7 @@ public enum WindowsPathSafety {
             }
             guard info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else { throw MountedCopyError.unsafeFile }
             let names = try FileManager.default.contentsOfDirectory(atPath:parent.path)
-            let aliases = names.filter { folded($0) == folded(part) }
+            let aliases = names.filter { comparisonFold($0) == comparisonFold(part) }
             guard aliases.count <= 1 else { throw MountedCopyError.destinationConflict }
             if let actual = aliases.first, Array(actual.utf8) != Array(part.utf8) {
                 // Finder/APFS can report decomposed Unicode names even
