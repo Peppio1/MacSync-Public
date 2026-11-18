@@ -54,15 +54,16 @@ final class SeededArchiveVerifierTests: XCTestCase {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at:f.base) }
         let count = 200_000
+        let groups = 48_000
         let start = Date()
         let empty = Data()
         let fixed = Date(timeIntervalSince1970:1_700_000_000)
-        for group in 0..<200 {
+        for group in 0..<groups {
             let name = "group-\(group)"
             let a = f.source.appendingPathComponent(name), b = f.target.appendingPathComponent(name)
             try FileManager.default.createDirectory(at:a,withIntermediateDirectories:true)
             try FileManager.default.createDirectory(at:b,withIntermediateDirectories:true)
-            for index in 0..<1000 {
+            for index in 0..<(count/groups+(group<count%groups ? 1:0)) {
                 let leaf = "file-\(index).dat"
                 let src = a.appendingPathComponent(leaf), dst = b.appendingPathComponent(leaf)
                 try empty.write(to:src); try empty.write(to:dst)
@@ -80,14 +81,14 @@ final class SeededArchiveVerifierTests: XCTestCase {
         XCTAssertEqual(result.audit.sourceMetrics?.files,count)
         XCTAssertEqual(result.audit.destinationMetrics?.files,count)
         XCTAssertEqual(result.audit.bytesRead,0)
-        XCTAssertEqual(result.recognition.matches.count,count+200)
+        XCTAssertEqual(result.recognition.matches.count,count+groups)
         let scan = Date().timeIntervalSince(tick)
         let commitTick = Date()
-        XCTAssertEqual(try session.approve(report:result.recognition),count+200)
+        XCTAssertEqual(try session.approve(report:result.recognition),count+groups)
         XCTAssertEqual(try f.journal.plannedUploadCount(),0)
         try ArchiveDatabaseSafety.verify(backup,readOnly:true)
-        XCTAssertEqual(try ChangeJournal(path:backup.path).plannedUploadCount(),count+200)
-        print("400,000 tiny local files; compare \(scan) s; recognition \(Date().timeIntervalSince(commitTick)) s; total \(Date().timeIntervalSince(start)) s; content bytes read 0")
+        XCTAssertEqual(try ChangeJournal(path:backup.path).plannedUploadCount(),count+groups)
+        print("400,000 tiny local files and 96,000 directories; compare \(scan) s; recognition \(Date().timeIntervalSince(commitTick)) s; total \(Date().timeIntervalSince(start)) s; content bytes read 0")
     }
 
     func testQueueResetPersistsHoldAndAuditRebuildsOnlyRealMissingFile() throws {

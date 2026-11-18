@@ -570,7 +570,7 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     private func tickFinalShutdown() {
-        guard !previewOnly, !shuttingDown, !preparingSignedUpdate, settings.finalShutdown.enabled else { return }
+        guard !previewOnly, !shuttingDown, !preparingSignedUpdate, !copy.queueRebuildRequired, settings.finalShutdown.enabled else { return }
         let now = Date()
         if finalShutdownSlot == nil {
             guard let next = nextFinalShutdownAt, next <= now else { return }

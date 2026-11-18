@@ -1,5 +1,9 @@
 # AGENTS.md — MacSync
 
+## Sviluppo v0.18.2 (non pubblicato)
+
+Ramo `develop-v0.18.2`; rollback `rollback-before-v0.18.2` sulla v0.18.1. Le indicazioni storiche sotto non rappresentano lo stato attuale. Consultare `docs/DEVELOPMENT_v0.18.2.md`. Non pubblicare senza esiti effettivi CI, collaudo SMB reale e approvazione esplicita.
+
 ## Stato corrente — v0.17.0 (branding e DMG)
 
 Repository pubblico: Peppio1/MacSync-Public. Pre-release attuale v0.17.0 pubblicata il 17 novembre 2026: https://github.com/Peppio1/MacSync-Public/releases/tag/v0.17.0. Commit del pacchetto 2fe7037cf135f2cbd0051343885875a50aa6c015, CI 44072456998 (177 test ordinari, 2 opt-in separati, 48 PNG, originale verificato, DMG, installazione e recupero Sparkle, firma Ed25519), pubblicazione 44074982577 completata. v0.16.0 validata ma non pubblicata separatamente. Prossima fase: collaudo fisico con dati sintetici, poi 1.0.0-rc.1. Non sostituire il PNG approvato. Non dichiarare stabilità prima della validazione reale.

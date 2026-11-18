@@ -56,7 +56,7 @@
 - (BOOL)updater:(SPUUpdater *)updater shouldProceedWithUpdate:(SUAppcastItem *)item updateCheck:(SPUUpdateCheck)check error:(NSError **)error {
     // Fail closed: only the exact lab version and locally served archive.
     NSURL *url = item.fileURL;
-    if ([item.displayVersionString isEqualToString:@"0.18.1"] &&
+    if ([item.displayVersionString isEqualToString:@"0.18.2"] &&
         [url.scheme isEqualToString:@"http"] && [url.host isEqualToString:@"127.0.0.1"] &&
         [url.path isEqualToString:@"/update.zip"]) return YES;
     if (error != NULL) *error = [NSError errorWithDomain:@"MacSync.CI" code:1 userInfo:@{NSLocalizedDescriptionKey:@"Unexpected laboratory asset"}];
