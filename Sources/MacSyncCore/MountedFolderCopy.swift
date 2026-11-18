@@ -382,7 +382,13 @@ public final class MountedFolderCopyWorker {
                 case .volumeChanged, .rootUnavailable, .sourceRootChanged:
                     summary.interrupted = true
                     return false
-                case .copyFailed:
+                case .copyFailed(let code):
+                    // An unsupported operation cannot be fixed by repeated
+                    // transfers. Preserve remaining jobs and stop the cycle.
+                    if code == Int(ENOTSUP) {
+                        summary.interrupted = true
+                        return false
+                    }
                     // A network failure may be reported as a generic
                     // Foundation copy error. Revalidate only on failure,
                     // not on a separate timer or a recursive remote scan.
@@ -647,7 +653,9 @@ public final class MountedFolderCopyWorker {
                 try journal.recordPublicationIntent(job)
                 publicationAttempted = true
                 try stageAnchor.publish(staging.lastPathComponent,matching:stagedStat,to:destAnchor,
-                    as:dst.lastPathComponent,replacing:originalStat,shouldContinue:operationAllowed)
+                    as:dst.lastPathComponent,replacing:originalStat,shouldContinue:operationAllowed,onMethod: { method in
+                        try? self.log.record(level:.info,rootID:job.rootID,action:"publish_method",relativePath:job.relativePath,message:method)
+                    })
                 backupForCleanup = (backupURL, backup, parent)
             } else {
                 // moveItem refuses an existing target; never overwrite a
@@ -655,7 +663,9 @@ public final class MountedFolderCopyWorker {
                 try journal.recordPublicationIntent(job)
                 publicationAttempted = true
                 try stageAnchor.publish(staging.lastPathComponent,matching:stagedStat,to:destAnchor,
-                    as:dst.lastPathComponent,replacing:nil,shouldContinue:operationAllowed)
+                    as:dst.lastPathComponent,replacing:nil,shouldContinue:operationAllowed,onMethod: { method in
+                        try? self.log.record(level:.info,rootID:job.rootID,action:"publish_method",relativePath:job.relativePath,message:method)
+                    })
             }
             try checkpoint?(.afterPublish, dst)
             try verifyRoots()

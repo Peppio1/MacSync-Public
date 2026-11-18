@@ -209,7 +209,8 @@ public final class AnchoredDirectory {
         guard s.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else { throw MountedCopyError.destinationConflict }
     }
     func publish(_ name:String, matching original:stat, to target:AnchoredDirectory,
-                 as targetName:String, replacing expected:stat?, shouldContinue: () -> Bool) throws {
+                 as targetName:String, replacing expected:stat?, shouldContinue: () -> Bool,
+                 onMethod: (String) -> Void = { _ in }) throws {
         try verify(); try target.verify()
         guard Self.sameFile(try leaf(name),original),
               original.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
@@ -223,13 +224,48 @@ public final class AnchoredDirectory {
             guard result != 0, errno == ENOENT else { throw MountedCopyError.destinationChanging }
         }
         guard shouldContinue() else { throw SeedVerificationError.cancelled }
+        onMethod(expected == nil ? "renameatx_np(RENAME_EXCL)" : "renameat")
         let rc = name.withCString { old in targetName.withCString { new in
-            // macOS supports exclusive rename; if SMB cannot perform this
-            // request, fail closed rather than fall back to an overwrite.
             if expected == nil { return renameatx_np(fd,old,target.fd,new,UInt32(RENAME_EXCL)) }
             return renameat(fd,old,target.fd,new)
         }}
-        guard rc == 0 else { throw MountedCopyError.copyFailed(Int(errno)) }
+        let code = errno
+        if rc == 0 { return }
+        // Atomic no-clobber alternative; never fall back to overwriting rename.
+        if expected == nil && code == ENOTSUP && binding.volume.fileSystem.lowercased() == "smbfs" {
+            onMethod("renameatx_np(RENAME_EXCL) errno \(code); linkat")
+            try publishByLink(name,matching:original,to:target,as:targetName,shouldContinue:shouldContinue)
+            return
+        }
+        throw MountedCopyError.copyFailed(Int(code))
+    }
+
+    // An uncertain result leaves the publication intent for reconciliation.
+    // Never unlink the final path.
+    func publishByLink(_ name:String, matching original:stat, to target:AnchoredDirectory,
+                       as targetName:String, shouldContinue: () -> Bool) throws {
+        try verify(); try target.verify()
+        guard binding.volume == target.binding.volume,
+              WindowsPathSafety.validComponent(targetName),
+              original.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+              Self.sameFile(try leaf(name),original) else { throw MountedCopyError.destinationChanging }
+        guard shouldContinue() else { throw SeedVerificationError.cancelled }
+        let rc = name.withCString { old in targetName.withCString { new in
+            linkat(fd,old,target.fd,new,0)
+        }}
+        let code = errno
+        guard rc == 0 else { throw MountedCopyError.copyFailed(Int(code)) }
+        try verify(); try target.verify()
+        let current = try leaf(name), final = try target.leaf(targetName)
+        // Creating a link can change ctime and link count.
+        guard current.st_dev == original.st_dev, current.st_ino == original.st_ino,
+              current.st_size == original.st_size,
+              current.st_mtimespec.tv_sec == original.st_mtimespec.tv_sec,
+              current.st_mtimespec.tv_nsec == original.st_mtimespec.tv_nsec,
+              Self.sameFile(current,final), current.st_nlink >= 2 else {
+            throw MountedCopyError.destinationChanging
+        }
+        try remove(name,matching:current,shouldContinue:shouldContinue)
     }
     public func remove(_ name:String, matching original: stat, directory: Bool = false,
                        shouldContinue: () -> Bool = { true }) throws {

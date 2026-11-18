@@ -12,6 +12,25 @@ final class OperationalSafetyTests: XCTestCase {
         try FileManager.default.createDirectory(at:target,withIntermediateDirectories:true)
         return (base,source,target,base.appendingPathComponent("state.sqlite"))
     }
+    func testExclusiveLinkPublicationPreservesExistingTargetAndPublishesCompleteFile() throws {
+        let (base,source,target,_) = try fixture()
+        defer { try? FileManager.default.removeItem(at:base) }
+        let stage = source.appendingPathComponent("staged"), final = target.appendingPathComponent("photo.jpg")
+        try Data("complete".utf8).write(to:stage)
+        try Data("previous".utf8).write(to:final)
+        let volume = try VolumeFingerprint.read(at:source)
+        let a = try AnchoredDirectory(source,expectedVolume:volume)
+        let b = try AnchoredDirectory(target,expectedVolume:volume)
+        let original = try a.leaf("staged")
+        XCTAssertThrowsError(try a.publishByLink("staged",matching:original,to:b,as:"photo.jpg",shouldContinue:{true}))
+        XCTAssertEqual(try String(contentsOf:final,encoding:.utf8),"previous")
+        XCTAssertEqual(try String(contentsOf:stage,encoding:.utf8),"complete")
+        try FileManager.default.removeItem(at:final)
+        try a.publishByLink("staged",matching:try a.leaf("staged"),to:b,as:"photo.jpg",shouldContinue:{true})
+        XCTAssertFalse(FileManager.default.fileExists(atPath:stage.path))
+        XCTAssertEqual(try String(contentsOf:final,encoding:.utf8),"complete")
+    }
+
     func testPersistentSourceBindingBlocksReplacementAfterReopen() throws {
         let (base,source,_,db) = try fixture()
         defer { try? FileManager.default.removeItem(at:base) }
