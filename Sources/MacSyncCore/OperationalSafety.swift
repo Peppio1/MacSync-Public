@@ -311,7 +311,8 @@ public final class AnchoredDirectory {
     /// publication cases; never infer support solely from the filesystem name.
     /// Cross-directory publication is still verified at the actual call.
     func probeExclusivePublication(shouldContinue: () -> Bool,
-                                   onDiagnostic:(String)->Void = {_ in}) throws -> ExclusivePublicationMethod {
+                                   onDiagnostic:(String)->Void = {_ in},
+                                   invoke:((ExclusivePublicationMethod,Int32,String,String)->(Int32,Int32))? = nil) throws -> ExclusivePublicationMethod {
         try verify()
         let token=UUID().uuidString
         let a="probe-"+token+"-a", b="probe-"+token+"-b", c="probe-"+token+"-c"
@@ -325,7 +326,7 @@ public final class AnchoredDirectory {
                 }
             }
         }
-        func make(_ name:String, size:off_t) throws -> stat {
+        func make(_ name:String, payload:[UInt8]) throws -> stat {
             try verify()
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             let handle=name.withCString { openat(fd,$0,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,mode_t(0o600)) }
@@ -338,19 +339,45 @@ public final class AnchoredDirectory {
             guard fstat(handle,&value)==0 else { throw MountedCopyError.copyFailed(Int(errno)) }
             owned.append((UInt64(bitPattern:Int64(value.st_dev)),UInt64(value.st_ino)))
             // Test publication, not remote ftruncate support.
-            let bytes=[UInt8](repeating:0x4d,count:Int(size))
-            let written=bytes.withUnsafeBytes { Darwin.write(handle,$0.baseAddress,$0.count) }
-            guard written==Int(size) else {
+            let written=payload.withUnsafeBytes { Darwin.write(handle,$0.baseAddress,$0.count) }
+            guard written==payload.count else {
                 let code=written<0 ? errno : EIO
                 onDiagnostic("write(probe) errno \(code)")
                 throw MountedCopyError.copyFailed(Int(code))
             }
             return try leaf(name)
         }
-        let first=try make(a,size:1), second=try make(b,size:2)
+        // These private scratch objects have known, distinct content. Check
+        // their identity and bytes instead of requiring unchanged ctime/mtime:
+        // an unsuccessful SMB link attempt may refresh server metadata.
+        // No relaxation of sameFile() for ordinary user-file transfers.
+        let payloadA:[UInt8]=[0x4d], payloadB:[UInt8]=[0x53,0x42]
+        let first=try make(a,payload:payloadA), second=try make(b,payload:payloadB)
+        func validateProbe(_ name:String, original:stat,payload:[UInt8]) throws {
+            let handle=name.withCString { openat(fd,$0,O_RDONLY|O_NOFOLLOW|O_CLOEXEC) }
+            guard handle>=0 else { throw MountedCopyError.copyFailed(Int(errno)) }
+            defer { Darwin.close(handle) }
+            func check() throws {
+                var value=stat()
+                guard fstat(handle,&value)==0,
+                      value.st_dev==original.st_dev,value.st_ino==original.st_ino,
+                      value.st_mode & mode_t(S_IFMT)==mode_t(S_IFREG),
+                      value.st_size==off_t(payload.count) else { throw MountedCopyError.destinationChanging }
+                let named=try leaf(name)
+                guard named.st_dev==value.st_dev,named.st_ino==value.st_ino,
+                      named.st_mode & mode_t(S_IFMT)==mode_t(S_IFREG),
+                      named.st_size==value.st_size else { throw MountedCopyError.destinationChanging }
+            }
+            try check()
+            var data=[UInt8](repeating:0,count:payload.count+1)
+            let count=data.withUnsafeMutableBytes { Darwin.read(handle,$0.baseAddress,$0.count) }
+            guard count==payload.count,Array(data.prefix(count))==payload else { throw MountedCopyError.destinationChanging }
+            try check()
+        }
         func run(_ method:ExclusivePublicationMethod,_ name:String) throws -> (Int32,Int32) {
             try verify()
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            if let invoke { return invoke(method,fd,a,name) }
             let result=a.withCString { old in name.withCString { new in
                 switch method {
                 case .renameExclusive: return renameatx_np(fd,old,fd,new,UInt32(RENAME_EXCL))
@@ -363,18 +390,35 @@ public final class AnchoredDirectory {
             let (collision,code)=try run(method,b)
             onDiagnostic("\(method.rawValue) collision result \(collision), errno \(collision == 0 ? 0 : code)")
             guard collision != 0 else { throw MountedCopyError.destinationChanging }
-            guard Self.sameFile(try leaf(a),first),Self.sameFile(try leaf(b),second) else { throw MountedCopyError.destinationChanging }
+            try validateProbe(a,original:first,payload:payloadA)
+            try validateProbe(b,original:second,payload:payloadB)
             if code == ENOTSUP || code == ENOSYS || code == EINVAL { continue }
             guard code == EEXIST else { throw MountedCopyError.copyFailed(Int(code)) }
             let (published,error)=try run(method,c)
             onDiagnostic("\(method.rawValue) new name result \(published), errno \(published == 0 ? 0 : error)")
             if published != 0 {
-                if error == ENOTSUP || error == ENOSYS || error == EINVAL { continue }
+                if error == ENOTSUP || error == ENOSYS || error == EINVAL {
+                    // Do not try the alternative if a failed publication
+                    // actually changed the private scratch namespace.
+                    try validateProbe(a,original:first,payload:payloadA)
+                    try validateProbe(b,original:second,payload:payloadB)
+                    var missing=stat()
+                    guard c.withCString({fstatat(fd,$0,&missing,AT_SYMLINK_NOFOLLOW)}) != 0,errno==ENOENT else {
+                        throw MountedCopyError.destinationChanging
+                    }
+                    continue
+                }
                 throw MountedCopyError.copyFailed(Int(error))
             }
-            let final=try leaf(c)
-            guard final.st_ino==first.st_ino,final.st_dev==first.st_dev,final.st_size==1,
-                  Self.sameFile(try leaf(b),second) else { throw MountedCopyError.destinationChanging }
+            try validateProbe(c,original:first,payload:payloadA)
+            try validateProbe(b,original:second,payload:payloadB)
+            if method == .hardLink {
+                try validateProbe(a,original:first,payload:payloadA)
+                guard try leaf(c).st_nlink>=2 else { throw MountedCopyError.destinationChanging }
+            } else {
+                var missing=stat()
+                guard a.withCString({fstatat(fd,$0,&missing,AT_SYMLINK_NOFOLLOW)}) != 0,errno==ENOENT else { throw MountedCopyError.destinationChanging }
+            }
             return method
         }
         throw MountedCopyError.copyFailed(Int(ENOTSUP))

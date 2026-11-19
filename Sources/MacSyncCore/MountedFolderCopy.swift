@@ -701,10 +701,9 @@ public final class MountedFolderCopyWorker {
         try mapping.verify()
         let targetIdentity = try CopyDirectoryIdentity.read(mapping.target)
         func verifyRoots() throws {
+            // mapping.verify already compares the immutable target identity,
+            // source identity and mounted volume. Avoid a duplicate SMB stat.
             try mapping.verify()
-            guard try CopyDirectoryIdentity.read(mapping.target) == targetIdentity else {
-                throw MountedCopyError.volumeChanged
-            }
         }
         let src = try mapping.fileURL(relativePath: job.relativePath, destination: false)
         let dst = try mapping.fileURL(relativePath: job.relativePath, destination: true)
@@ -749,6 +748,9 @@ public final class MountedFolderCopyWorker {
         if let originalTarget, originalTarget.kind != .file {
             throw MountedCopyError.destinationConflict
         }
+        if originalTarget == nil && unsupportedNewPublicationRoots.contains(job.rootID) {
+            throw NewPublicationUnsupported.unavailable
+        }
         let existingBytes = originalTarget?.size ?? 0
         try TransferPreflight.requireCapacity(
             available: try availableCapacity(mapping.target),
@@ -775,6 +777,11 @@ public final class MountedFolderCopyWorker {
                     try verifyRoots()
                     unsupportedNewPublicationRoots.insert(job.rootID)
                     try? log.record(level:.warning,rootID:job.rootID,action:"smb_probe_blocked",message:"Pubblicazione esclusiva non disponibile (POSIX \(code)); nessuna copia diretta, nuovi file in coda")
+                    throw NewPublicationUnsupported.unavailable
+                } catch MountedCopyError.destinationChanging {
+                    try verifyRoots()
+                    unsupportedNewPublicationRoots.insert(job.rootID)
+                    try? log.record(level:.warning,rootID:job.rootID,action:"smb_probe_blocked",message:"Identità o contenuto dei file di prova incerti; nessun nuovo tentativo nel ciclo")
                     throw NewPublicationUnsupported.unavailable
                 }
             }
