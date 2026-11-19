@@ -1,5 +1,9 @@
 # AGENTS.md — MacSync
 
+## v0.18.4 — candidato
+
+Sviluppo sul ramo develop-v0.18.4; rollback rollback-before-v0.18.4. Pubblicazione solo dopo CI verde, firma e verifica del pacchetto; il collaudo SMB reale resta necessario. Vedere docs/DEVELOPMENT_v0.18.4.md. Nessun dato dei log reali deve essere committato.
+
 ## v0.18.3 — sviluppo candidato
 
 Ramo develop-v0.18.3; rollback rollback-before-v0.18.3. Non pubblicare prima di CI verde e verifica della strategia SMB. Nessun log o dato aziendale reale nel repository. Vedere docs/DEVELOPMENT_v0.18.3.md.
