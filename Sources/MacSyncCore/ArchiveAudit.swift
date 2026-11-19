@@ -347,7 +347,7 @@ public final class ArchiveAudit {
                 let items = side == .source ? source : target
                 let root = side == .source ? mapping.source : mapping.target
                 let conflicts = Set(items.lazy.map(\.relativePath).filter {
-                    ambiguous.contains(Self.fold($0)) && !ancestorsHaveAlias($0, ambiguous)
+                    ambiguous.contains(Self.fold($0)) && !self.ancestorsHaveAlias($0, ambiguous)
                 })
                 nameScans.append(NameScanSnapshot(
                     rootID: mapping.rootID, side: side, rootPath: root.path,
