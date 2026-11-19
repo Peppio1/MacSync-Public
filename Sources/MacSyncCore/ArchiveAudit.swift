@@ -64,6 +64,8 @@ public struct AuditFinding: Codable, Equatable, Sendable, Identifiable {
     public var sourceModifiedAt: Double? = nil
     public var targetModifiedAt: Double? = nil
     public var repairEligible: Bool? = nil
+    public var targetObjectKind: String? = nil
+    public var directNameConflict: Bool? = nil
 }
 public struct AuditSideMetrics: Codable, Equatable, Sendable {
     public var files = 0
@@ -500,7 +502,9 @@ public final class ArchiveAudit {
                     sourceRoot:mapping.source.path,targetRoot:mapping.target.path,objectKind:item.kind,
                     bytes:item.size,kind:kind,detail:detail,sourceBytes:src?.size,targetBytes:dst?.size,
                      sourceModifiedAt:src?.modifiedAt,targetModifiedAt:dst?.modifiedAt,
-                     repairEligible: (kind == .missing || kind == .different) && WindowsPathSafety.validRelativePath(path))
+                     repairEligible: (kind == .missing || kind == .different) && WindowsPathSafety.validRelativePath(path),
+                     targetObjectKind:dst?.kind,
+                     directNameConflict:pair.ambiguous.contains(Self.fold(path)) && !ancestorsHaveAlias(path,pair.ambiguous))
                 findings.append(finding)
                 state.counts.record(finding,deletionCandidates:deletionCandidates)
                 if item.kind == "file" && kind != .matching { state.differences.append(finding) }
@@ -543,6 +547,12 @@ public final class ArchiveAudit {
             bytesRead:state.bytesRead,queuedRepairs:queued,repairRequested:repair,
             sourceMetrics:state.source,destinationMetrics:state.destination,
             deletionCandidates:deletionCandidates,metadataMatches:metadataMatches,hashMatches:hashMatches,cachedHashMatches:cachedHashMatches,directoryListingCacheHits:listingHits,directoryListingReads:listingReads,displayCounts:state.counts)
+    }
+
+    private func ancestorsHaveAlias(_ path:String,_ ambiguous:Set<String>) -> Bool {
+        let parts=path.split(separator:"/")
+        guard parts.count>1 else { return false }
+        return (1..<parts.count).contains{ambiguous.contains(Self.fold(parts.prefix($0).joined(separator:"/")))}
     }
 
     private static func fold(_ path: String) -> String {

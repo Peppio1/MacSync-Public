@@ -1,0 +1,59 @@
+import Foundation
+import XCTest
+@testable import MacSyncCore
+
+final class IncompatibleNamesTests:XCTestCase {
+    func testDirectNamesAndDescendantsSeparated() {
+        let items=[("bad ","directory"),("bad /okay.jpg","file"),("bad /nested.","directory"),("bad /nested./okay.jpg","file"),("bad /CON.png","file"),("regular.jpg","file")].map{
+            TrackedItem(relativePath:$0.0,kind:$0.1,size:0,modifiedAt:0)
+        }
+        let rows=IncompatibleName.collect(rootID:"demo",rootPath:"/example",side:.source,items:items)
+        XCTAssertEqual(rows.filter{$0.isDirectory}.count,2)
+        XCTAssertEqual(rows.filter{!$0.isDirectory}.count,1)
+        XCTAssertEqual(rows.first{$0.relativePath=="bad "}?.affectedDescendants,4)
+        XCTAssertEqual(rows.first{$0.relativePath=="bad /nested."}?.affectedDescendants,1)
+        XCTAssertFalse(rows.contains{$0.relativePath.hasSuffix("okay.jpg")})
+        XCTAssertEqual(rows.first{$0.relativePath=="bad "}?.displayName,"bad␠")
+    }
+    func testSiblingConflictsDoNotFlagOrdinaryChildren() {
+        let items=[("Group","directory"),("group","directory"),("Group/file.jpg","file"),("group/file.jpg","file")].map{
+            TrackedItem(relativePath:$0.0,kind:$0.1,size:0,modifiedAt:0)
+        }
+        let rows=IncompatibleName.collect(rootID:"demo",rootPath:"/example",side:.source,items:items)
+        XCTAssertEqual(rows.count,2)
+        XCTAssertTrue(rows.allSatisfy{$0.isDirectory && $0.affectedDescendants==1})
+    }
+    func testRevealSelectsExactNameAndRejectsMissingOrSymlink() throws {
+        let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
+        defer {try? FileManager.default.removeItem(at:root)}
+        let leaf=root.appendingPathComponent("example ")
+        try Data("sample".utf8).write(to:leaf)
+        let issue=IncompatibleName(rootID:"demo",rootPath:root.path,relativePath:"example ",objectKind:"file",side:.source,reason:"Spazio finale")
+        XCTAssertEqual(try issue.revealURL(expectedRoot:root.path),leaf)
+        XCTAssertThrowsError(try issue.revealURL(expectedRoot:"/"))
+        try FileManager.default.removeItem(at:leaf)
+        try FileManager.default.createSymbolicLink(at:leaf,withDestinationURL:root.appendingPathComponent("other"))
+        XCTAssertThrowsError(try issue.revealURL(expectedRoot:root.path))
+    }
+    func testBlockedJobIsLoggedOnceAcrossRestartAndRemainsPending() throws {
+        let base=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let src=base.appendingPathComponent("src"), dst=base.appendingPathComponent("dst")
+        try FileManager.default.createDirectory(at:src,withIntermediateDirectories:true)
+        try FileManager.default.createDirectory(at:dst,withIntermediateDirectories:true)
+        defer {try? FileManager.default.removeItem(at:base)}
+        let db=base.appendingPathComponent("test.sqlite").path
+        let journal=try ChangeJournal(path:db)
+        try journal.enqueue(rootID:"demo",relativePath:"bad /file.jpg",kind:.upsert)
+        let map=try MountedFolderMapping(rootID:"demo",source:src,target:dst)
+        for _ in 0..<2 {
+            let worker=try MountedFolderCopyWorker(journal:ChangeJournal(path:db),log:SyncActivityLog(path:db),mappings:[map])
+            let report=try worker.runCycle(enabled:true)
+            XCTAssertEqual(report.deferred,1)
+            XCTAssertEqual(report.failed,0)
+        }
+        XCTAssertEqual(try journal.plannedUploadCount(),1)
+        XCTAssertEqual(try SyncActivityLog(path:db).recent().filter{$0.action=="name_blocked"}.count,1)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath:dst.path).isEmpty)
+    }
+}

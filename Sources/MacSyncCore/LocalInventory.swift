@@ -552,6 +552,13 @@ public final class LocalInventory {
         }
     }
 
+    /// Snapshot of the locally maintained inventory only; never enumerate SMB.
+    public func incompatibleNames(rootID:String,sourcePath:String,conflicts:Set<String> = []) throws -> [IncompatibleName] {
+        guard try rootPath(rootID:rootID)==sourcePath else { throw MountedCopyError.invalidMapping }
+        return IncompatibleName.collect(rootID:rootID,rootPath:sourcePath,side:.source,
+                                       items:Array(try readEntries(rootID:rootID,scope:nil).values),conflicts:conflicts)
+    }
+
     private func readEntries(rootID: String, scope: String?) throws -> [String: TrackedItem] {
         // The composite primary key (root_id, relative_path) makes this a
         // targeted index lookup for file events, even with huge local archives.
