@@ -210,7 +210,7 @@ struct TechnicalLogSheet: View {
         guard fixtureRows==nil else { return }
         guard let path=try? copy.historyPath() else { return }
         let panel=NSSavePanel(); panel.nameFieldStringValue="MacSync-log-tecnico.tsv"
-        guard panel.runModal()==.OK, let url=panel.url else { return }
+        guard panel.runModal() == .OK, let url=panel.url else { return }
         let selected=SyncLogLevel(rawValue:level), query=appliedFilter
         DispatchQueue.global(qos:.utility).async {
             do {
