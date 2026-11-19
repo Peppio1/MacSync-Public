@@ -32,7 +32,8 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
+    # Intel runner pool alternative; retain the same macOS major release and both build slices.
+    runs-on: macos-15-intel
     timeout-minutes: 60
     outputs:
       approved_brand: ${{ steps.brand.outputs.approved }}
