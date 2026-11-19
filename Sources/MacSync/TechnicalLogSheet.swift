@@ -139,7 +139,7 @@ struct TechnicalLogSheet: View {
             }
         }.padding(.vertical,3)
     }
-    private enum LoadMode { case first, older, newer }
+    private enum LoadMode: Equatable { case first, older, newer }
     private func reset() {
         appliedFilter=filter
         rows=[]; more=false; expanded=[]
@@ -170,7 +170,7 @@ struct TechnicalLogSheet: View {
                             if page.count>count { rows=batch; more=true }
                             else { rows=Array((batch+rows).prefix(displayLimit)) }
                         }
-                        if expanded.isEmpty, let first=rows.first { expanded.insert(first.cycleID ?? "legacy") }
+                        if mode == .first, let first=rows.first { expanded.insert(first.cycleID ?? "legacy") }
                         status="Registro aggiornato"; loading=false
                     }
                 } catch {

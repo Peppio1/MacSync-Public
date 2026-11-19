@@ -36,7 +36,7 @@ public final class SyncActivityLog {
         }
         db = dbHandle
         do {
-            try execute("PRAGMA busy_timeout=5000;")
+            try execute(readOnly ? "PRAGMA busy_timeout=1000;" : "PRAGMA busy_timeout=5000;")
             if readOnly { return }
             try execute("PRAGMA journal_mode=WAL;")
             try execute("""
@@ -99,6 +99,7 @@ public final class SyncActivityLog {
         try bind(message, 8, statement)
         guard sqlite3_step(statement) == SQLITE_DONE else { throw failure() }
         if let cycleID {
+            do {
             let rowID=sqlite3_last_insert_rowid(db)
             let context=try prepare("INSERT INTO sync_activity_context_v2(activity_id,cycle_id,job_id) VALUES(?,?,?);")
             defer { sqlite3_finalize(context) }
@@ -108,6 +109,10 @@ public final class SyncActivityLog {
                 guard sqlite3_bind_int64(context,3,job.id)==SQLITE_OK else { throw failure() }
             } else { guard sqlite3_bind_null(context,3)==SQLITE_OK else { throw failure() } }
             guard sqlite3_step(context)==SQLITE_DONE else { throw failure() }
+            } catch {
+                // Optional correlation must never turn a logged operation into a transfer failure.
+                TechnicalFallbackLog.record(databasePath:databasePath,cycleID:cycleID,action:"activity_context_failed",message:SyncDiagnostic.describe(error))
+            }
         }
         } catch {
             // Diagnostics cannot rely on a database which just failed.
