@@ -489,6 +489,36 @@ public final class AnchoredDirectory {
         }
         try remove(name,matching:current,shouldContinue:shouldContinue)
     }
+    /// Local-only rename, atomically refusing an occupied target. The
+    /// caller has already obtained a user's explicit batch confirmation.
+    func rectifyLocalName(_ old:String,as new:String,matching original:stat,shouldContinue:()->Bool) throws {
+        guard !binding.volume.isNetworkVolume,WindowsPathSafety.validComponent(new),
+              old != ".",old != "..",!old.contains("/"),!old.contains("\0"),!old.isEmpty,
+              !WindowsPathSafety.validComponent(old) else { throw MountedCopyError.unsafeFile }
+        try verify()
+        let names=try FileManager.default.contentsOfDirectory(atPath:url.path)
+        guard names.contains(where:{Array($0.utf8)==Array(old.utf8)}),
+              !names.contains(where:{Array($0.utf8) != Array(old.utf8) && WindowsPathSafety.comparisonFold($0)==WindowsPathSafety.comparisonFold(new)}) else {
+            throw MountedCopyError.destinationConflict
+        }
+        guard Self.sameFile(try leaf(old),original),
+              [mode_t(S_IFREG),mode_t(S_IFDIR)].contains(original.st_mode & mode_t(S_IFMT)) else {
+            throw MountedCopyError.sourceChanging
+        }
+        try verify()
+        guard shouldContinue() else { throw SeedVerificationError.cancelled }
+        let rc=old.withCString { a in new.withCString { b in renameatx_np(fd,a,fd,b,UInt32(RENAME_EXCL)) } }
+        let code=errno
+        guard rc==0 else {
+            if code==EEXIST { throw MountedCopyError.destinationConflict }
+            throw MountedCopyError.copyFailed(Int(code))
+        }
+        try verify()
+        let final=try leaf(new)
+        guard final.st_dev==original.st_dev,final.st_ino==original.st_ino,
+              final.st_mode & mode_t(S_IFMT)==original.st_mode & mode_t(S_IFMT) else { throw MountedCopyError.destinationChanging }
+    }
+
     public func remove(_ name:String, matching original: stat, directory: Bool = false,
                        shouldContinue: () -> Bool = { true }) throws {
         try verify()

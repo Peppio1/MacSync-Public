@@ -466,6 +466,21 @@ public final class ChangeJournal {
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseFailure() }
     }
 
+    /// Read-only verification for local name maintenance. No destination
+    /// probing, no enrollment of a replaced source.
+    public func verifyLocalSourceBinding(rootID:String,root:URL) throws -> DirectoryBinding {
+        guard try watchedRootPath(rootID:rootID)==root.path else { throw MountedCopyError.invalidMapping }
+        let stamp=try DirectoryBinding.read(root)
+        guard !stamp.volume.isNetworkVolume else { throw MountedCopyError.unsafeFile }
+        let stmt=try prepare("SELECT stamp FROM directory_bindings WHERE root_id=? AND role='source';")
+        defer { sqlite3_finalize(stmt) }
+        try bind(rootID,at:1,in:stmt)
+        guard sqlite3_step(stmt)==SQLITE_ROW,
+              let data=columnText(stmt,at:0).data(using:.utf8),
+              try JSONDecoder().decode(DirectoryBinding.self,from:data)==stamp else { throw MountedCopyError.sourceRootChanged }
+        return stamp
+    }
+
     public func verifyDirectoryBindings(_ maps: [MountedFolderMapping], allowNewTarget: Bool = false) throws {
         let bindings = try maps.flatMap { map -> [(String,String,String)] in
             try map.verify()
