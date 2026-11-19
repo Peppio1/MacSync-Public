@@ -10,6 +10,9 @@ public enum MountedCopyError: Error, LocalizedError, Equatable {
     case destinationConflict
     case sourceMissing
     case copyFailed(Int)
+    case rcloneUnavailable
+    case rcloneLaunchFailed
+    case rcloneFailed(Int32)
     case insufficientSpace(required: Int64, available: Int64)
     case stagingIncomplete
     case destinationChanging
@@ -25,6 +28,9 @@ public enum MountedCopyError: Error, LocalizedError, Equatable {
         case .destinationConflict: return "Destinazione incompatibile: elemento già esistente"
         case .sourceMissing: return "File sorgente mancante: copia rimandata"
         case .copyFailed(let code): return "Copia non riuscita (codice filesystem: \(code)); operazione mantenuta in coda"
+        case .rcloneUnavailable: return "Helper di trasferimento non disponibile; operazione mantenuta in coda"
+        case .rcloneLaunchFailed: return "Avvio del motore di trasferimento non riuscito; operazione mantenuta in coda"
+        case .rcloneFailed(let code): return "Motore Rclone: codice uscita \(code); operazione mantenuta in coda"
         case .insufficientSpace(let required, let available): return "Spazio insufficiente: richiesti \(required) byte, disponibili \(available) byte"
         case .stagingIncomplete: return "File temporaneo incompleto; operazione mantenuta in coda"
         case .destinationChanging: return "Destinazione modificata durante la copia; operazione rimandata"
@@ -235,6 +241,7 @@ public final class MountedFolderCopyWorker {
     private let log: SyncActivityLog
     private let mappings: [String: MountedFolderMapping]
     private let fm = FileManager.default
+    private let stageEngine: StageTransferEngine
     private let minimumStableAge: TimeInterval
     private let now: () -> Date
     private let availableCapacity: (URL) throws -> Int64?
@@ -246,6 +253,7 @@ public final class MountedFolderCopyWorker {
     public var onJobStarted: ((QueuedChange) -> Void)?
     public var onPlan: ((Int) -> Void)?
     public var onPhase: ((String) -> Void)?
+    public var onTransferProgress: ((Int64, Double) -> Void)?
     public var operationAllowed: () -> Bool = { true }
     private func emit(_ kind: SyncEventKind, job: QueuedChange, mapping: MountedFolderMapping?,
                       bytes: Int64? = nil, seconds: Double = 0, detail: String = "") {
@@ -262,7 +270,8 @@ public final class MountedFolderCopyWorker {
         mappings: [MountedFolderMapping],
         minimumStableAge: TimeInterval = 20,
         now: @escaping () -> Date = Date.init,
-        availableCapacity: @escaping (URL) throws -> Int64? = TransferPreflight.availableBytes
+        availableCapacity: @escaping (URL) throws -> Int64? = TransferPreflight.availableBytes,
+        stageEngine: StageTransferEngine = .native
     ) throws {
         guard !mappings.isEmpty,
               Dictionary(grouping: mappings, by: \.rootID).allSatisfy({ $0.value.count == 1 })
@@ -273,6 +282,7 @@ public final class MountedFolderCopyWorker {
         self.minimumStableAge = max(0, minimumStableAge)
         self.now = now
         self.availableCapacity = availableCapacity
+        self.stageEngine = stageEngine
     }
 
     public func runOnce(enabled: Bool = false, maxJobs: Int = 50,
@@ -452,6 +462,8 @@ public final class MountedFolderCopyWorker {
                     message: SyncDiagnostic.describe(error)
                 )
                 switch error {
+                case .rcloneFailed:
+                    try journal.recordRetry(job,rootWide:false,reason:SyncDiagnostic.describe(error),now:now(),initial:30)
                 case .unsafeFile,.destinationConflict:
                     try journal.recordRetry(job,rootWide:false,reason:SyncDiagnostic.describe(error),now:now(),initial:300)
                 case .copyFailed(let code) where code == Int(ENOTSUP):
@@ -465,9 +477,12 @@ public final class MountedFolderCopyWorker {
                 // Stop the cycle rather than attempting thousands of jobs
                 // against the same unavailable destination.
                 switch error {
-                case .volumeChanged, .rootUnavailable, .sourceRootChanged:
+                case .rcloneUnavailable, .rcloneLaunchFailed, .volumeChanged, .rootUnavailable, .sourceRootChanged:
                     summary.interrupted = true
                     return false
+                case .rcloneFailed:
+                    do { try mapping.verify() }
+                    catch { summary.interrupted = true; return false }
                 case .copyFailed(let code):
                     // An unsupported operation cannot be fixed by repeated
                     // transfers. Preserve remaining jobs and stop the cycle.
@@ -808,7 +823,10 @@ public final class MountedFolderCopyWorker {
             try checkpoint?(.beforeStageCopy, staging)
             onPhase?("Trasferimento")
             let transferStart = ProcessInfo.processInfo.systemUptime
-            do { try fm.copyItem(at: src, to: staging) }
+            do {
+                try stageEngine.copy(source:src, staging:staging, shouldContinue:operationAllowed,
+                                     progress:{ [weak self] bytes, seconds in self?.onTransferProgress?(bytes, seconds) })
+            }
             catch {
                 try? log.record(level:.warning,rootID:job.rootID,action:"stage_copy_failed",relativePath:job.relativePath,message:SyncDiagnostic.describe(error))
                 throw error

@@ -95,7 +95,12 @@ public struct SyncLiveProgress: Equatable, Sendable {
     public var lastCopyRate: Double?
     public var copiedBytes: Int64 = 0
     public var copySeconds: Double = 0
-    public var meanCopyRate: Double? { copySeconds > 0 ? Double(copiedBytes) / copySeconds : nil }
+    public var inFlightCopyBytes: Int64 = 0
+    public var inFlightCopySeconds: Double = 0
+    public var meanCopyRate: Double? {
+        let seconds = copySeconds + inFlightCopySeconds
+        return seconds > 0 ? (Double(copiedBytes) + Double(inFlightCopyBytes)) / seconds : nil
+    }
     public var fraction: Double { planned > 0 ? min(0.99, Double(processed) / Double(planned)) : 0 }
     public init(started: Date, planned: Int = 0) { self.started = started; self.planned = max(0, planned) }
     public func remaining(at now: Date) -> Double? {
@@ -103,7 +108,11 @@ public struct SyncLiveProgress: Equatable, Sendable {
         return OperationEstimate.remaining(processed:processed,total:planned,elapsed:now.timeIntervalSince(workStarted))
     }
     public mutating func observe(_ event: SyncCycleEvent) {
-        if event.kind.isJob { processed += 1 }
+        if event.kind.isJob {
+            processed += 1
+            inFlightCopyBytes = 0
+            inFlightCopySeconds = 0
+        }
         switch event.kind {
         case .newFile,.updatedFile: confirmedFiles += 1
         case .directoryCreated: confirmedDirectories += 1

@@ -48,6 +48,8 @@ if ! codesign --verify --deep --strict --all-architectures "$mount/MacSync.app";
 fi
 cmp "$app/Contents/MacOS/MacSync" "$mount/MacSync.app/Contents/MacOS/MacSync"
 cmp "$app/Contents/MacOS/MacSyncRecovery" "$mount/MacSync.app/Contents/MacOS/MacSyncRecovery"
+lipo "$mount/MacSync.app/Contents/Helpers/rclone" -verify_arch arm64 x86_64
+cmp "$app/Contents/Helpers/rclone" "$mount/MacSync.app/Contents/Helpers/rclone"
 cmp "$app/Contents/Resources/branding-provenance.json" "$mount/MacSync.app/Contents/Resources/branding-provenance.json"
 cmp "Packaging/Guida installazione.html" "$mount/Guida installazione.html"
 hdiutil detach "$mount"

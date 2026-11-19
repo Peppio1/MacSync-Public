@@ -1,5 +1,10 @@
 # AGENTS.md — MacSync
 
+## v0.18.5 — candidato Rclone
+
+Ramo develop-v0.18.5, rollback rollback-before-v0.18.5-rclone (release v0.18.4).
+Rclone 1.76.0 incorporato come helper universale, copia esclusivamente nello staging MacSync. Il motore nativo resta disponibile internamente, nessuna impostazione o cambio automatico dopo errore. Protezioni, pubblicazione esclusiva, backup, SQLite, mirror e audit restano invariati. CI e collaudo SMB necessari; non promuovere a stabile. Consultare docs/DEVELOPMENT_v0.18.5.md.
+
 ## v0.18.4 — candidato
 
 Sviluppo sul ramo develop-v0.18.4; rollback rollback-before-v0.18.4. Pubblicazione solo dopo CI verde, firma e verifica del pacchetto; il collaudo SMB reale resta necessario. Vedere docs/DEVELOPMENT_v0.18.4.md. Nessun dato dei log reali deve essere committato.

@@ -808,6 +808,8 @@ final class MountedCopyController: ObservableObject {
                     publish()
                 }
                 func jobStarted(_ job: QueuedChange) {
+                    progress.inFlightCopyBytes = 0
+                    progress.inFlightCopySeconds = 0
                     progress.currentFile = job.rootID + " / " + job.relativePath
                     progress.phase = job.kind == .delete ? "Verifica cancellazione" : "Preparazione operazione"
                     publish()
@@ -817,6 +819,7 @@ final class MountedCopyController: ObservableObject {
                     worker?.onEvent = nil
                     worker?.onJobStarted = nil
                     worker?.onPhase = nil
+                    worker?.onTransferProgress = nil
                     mirrorWorker?.onEvent = nil
                     mirrorWorker?.onJobStarted = nil
                     if cancellation.endCycle() { outcomeState = "interrupted"
@@ -918,7 +921,8 @@ final class MountedCopyController: ObservableObject {
                         }
                         try journal.verifyDirectoryBindings(maps,allowNewTarget:true)
                         worker = try MountedFolderCopyWorker(
-                            journal: journal, log: log, mappings: maps
+                            journal: journal, log: log, mappings: maps,
+                            stageEngine: .applicationDefault()
                         )
                         worker?.operationAllowed = { gate.isReady && !cancellation.isCancelled }
                     }
@@ -952,7 +956,16 @@ final class MountedCopyController: ObservableObject {
                     progress.workStarted = Date()
                     worker.onEvent = observe
                     worker.onJobStarted = jobStarted
+                    worker.onTransferProgress = { bytes, seconds in
+                        progress.inFlightCopyBytes = bytes
+                        progress.inFlightCopySeconds = seconds
+                        publish()
+                    }
                     worker.onPhase = { phase in
+                        if phase != "Trasferimento" {
+                            progress.inFlightCopyBytes = 0
+                            progress.inFlightCopySeconds = 0
+                        }
                         progress.phase = phase
                         publish(force:phase == "Trasferimento" || phase == "Backup di sicurezza")
                     }
