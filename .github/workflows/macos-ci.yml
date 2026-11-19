@@ -310,3 +310,4 @@ jobs:
           retention-days: 7
 
 # Renew queued v0.18.7 CI; no build or source changes.
+# Fresh CI run after two runner assignment failures; source and build configuration unchanged.
