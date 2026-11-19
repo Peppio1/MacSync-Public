@@ -138,6 +138,13 @@ final class MountedCopyController: ObservableObject {
     private(set) var historySessionID = UUID().uuidString
 
     func historyPath() throws -> String { try Self.databaseURL().path }
+    func recordBlockedStart(reason:String) {
+        guard !previewOnly else { return }
+        DispatchQueue.global(qos:.utility).async {
+            guard let path=try? Self.databaseURL().path else { return }
+            TechnicalFallbackLog.record(databasePath:path,action:"session_blocked",message:reason)
+        }
+    }
     func loadLastCycle() {
         guard !active, liveProgress == nil, lastRecordedCycle == nil else { return }
         guard let path = try? historyPath(), FileManager.default.fileExists(atPath:path) else { return }

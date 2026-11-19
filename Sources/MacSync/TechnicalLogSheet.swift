@@ -5,6 +5,8 @@ import MacSyncCore
 
 struct TechnicalLogSheet: View {
     @ObservedObject var copy: MountedCopyController
+    var fixtureRows:[TechnicalLogRow]? = nil
+    @AppStorage(TechnicalLogVerbosity.preferenceKey) private var verbosity="normal"
     @Environment(\.dismiss) private var dismiss
     @State private var rows:[TechnicalLogRow]=[]
     @State private var filter=""
@@ -34,6 +36,9 @@ struct TechnicalLogSheet: View {
         }
         return result
     }
+    private static let calendar:DateFormatter = {
+        let f=DateFormatter(); f.dateFormat="dd/MM/yyyy HH:mm"; return f
+    }()
     private static let clock:DateFormatter = {
         let f=DateFormatter(); f.dateFormat="HH:mm:ss.SSS"; return f
     }()
@@ -63,6 +68,15 @@ struct TechnicalLogSheet: View {
                 Button("Aggiorna") { refresh() }.disabled(loading)
             }
             HStack {
+                Picker("Dettaglio",selection:$verbosity) {
+                    Text("Normale").tag("normal")
+                    Text("Dettagliato").tag("detailed")
+                    Text("Debug").tag("debug")
+                }.frame(width:260)
+                Spacer()
+                Text("Si applica alle prossime operazioni Rclone").font(.caption).foregroundStyle(.secondary)
+            }
+            HStack {
                 Text("\(rows.count) eventi caricati").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 if loading { ProgressView().controlSize(.small) }
@@ -80,8 +94,11 @@ struct TechnicalLogSheet: View {
                             }.padding(.top,8)
                         } label: {
                             VStack(alignment:.leading,spacing:3) {
-                                Text(group.id=="legacy" ? "Eventi senza ciclo (storico / manutenzione)" : "Ciclo "+String(group.id.prefix(8))).font(.headline)
-                                Text("\(group.rows.count) eventi caricati" + (group.rows.contains(where:{$0.entry.level=="error"}) ? " • contiene errori" : "")).font(.caption).foregroundStyle(.secondary)
+                                Text(group.id=="legacy" ? "Eventi senza ciclo (storico / manutenzione)" : "Ciclo "+(group.rows.last.map { Self.calendar.string(from:$0.entry.timestamp) } ?? String(group.id.prefix(8)))).font(.headline)
+                                if let conclusion=group.rows.first(where:{$0.entry.action=="cycle"}) {
+                                    Text(conclusion.entry.message).font(.caption).lineLimit(2)
+                                }
+                                Text("\(group.rows.count) eventi caricati • \(group.rows.filter{$0.entry.level=="error"}.count) errori • \(group.rows.filter{$0.entry.level=="warning"}.count) avvisi").font(.caption).foregroundStyle(.secondary)
                             }
                         }.padding(10).background(Color.secondary.opacity(0.06),in:RoundedRectangle(cornerRadius:8))
                     }
@@ -110,9 +127,14 @@ struct TechnicalLogSheet: View {
                 Button("Esporta fino a 5.000 eventi…") { export() }.disabled(loading)
             }
         }.padding(20).frame(minWidth:850,minHeight:580)
-        .onAppear { reset() }
-        .onChange(of:level) { _ in reset() }
-        .onReceive(ticker) { _ in if !loading { refresh() } }
+        .onAppear {
+            if let fixtureRows {
+                rows=fixtureRows; status="Dati dimostrativi"
+                if let first=rows.first { expanded.insert(first.cycleID ?? "legacy") }
+            } else { reset() }
+        }
+        .onChange(of:level) { _ in if fixtureRows==nil { reset() } }
+        .onReceive(ticker) { _ in if fixtureRows==nil && !loading { refresh() } }
     }
     private func eventRow(_ row:TechnicalLogRow) -> some View {
         let e=row.entry
@@ -147,6 +169,7 @@ struct TechnicalLogSheet: View {
     }
     private func refresh() { load(rows.isEmpty ? .first : .newer) }
     private func load(_ mode:LoadMode) {
+        guard fixtureRows==nil else { return }
         do {
             let path=try copy.historyPath(), selected=SyncLogLevel(rawValue:level), query=appliedFilter
             let token=UUID()
@@ -184,6 +207,7 @@ struct TechnicalLogSheet: View {
         } catch { status=SyncDiagnostic.describe(error); loading=false }
     }
     private func export() {
+        guard fixtureRows==nil else { return }
         guard let path=try? copy.historyPath() else { return }
         let panel=NSSavePanel(); panel.nameFieldStringValue="MacSync-log-tecnico.tsv"
         guard panel.runModal()==.OK, let url=panel.url else { return }

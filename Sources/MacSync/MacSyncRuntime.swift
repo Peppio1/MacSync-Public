@@ -382,7 +382,9 @@ final class MacSyncRuntime: ObservableObject {
         guard !previewOnly, !shuttingDown, !savingSchedule, !folderConfigurationBusy, !finalShutdownHolding, !copy.queueRebuildRequired,
               model.monitoring, model.safetyGate.isReady, !copy.active, !copy.maintaining,
               !copy.seedBusy, !copy.seedReady, !copy.interruptionRequested else {
+            guard !previewOnly else { return }
             copy.status = copy.queueRebuildRequired ? "Sincronizzazione non avviata: verifica archivio richiesta o coda non leggibile" : !model.monitoring || !model.safetyGate.isReady ? "Sincronizzazione non avviata: monitoraggio o inventario non pronto" : "Sincronizzazione non avviata: operazione già in corso o blocco di sicurezza"
+            copy.recordBlockedStart(reason:copy.status)
             return
         }
         configurationRevision += 1

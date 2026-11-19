@@ -67,25 +67,30 @@ public enum StageTransferEngine {
     }
 
     func copyDirect(source: URL, destination: URL, newFile: Bool, shouldContinue: () -> Bool,
+                    diagnostic: (SyncLogLevel,String) -> Void = { _,_ in },
                     progress: (Int64, Double) -> Void) throws {
         guard case .rcloneDirect(let executable) = self else { throw MountedCopyError.invalidMapping }
-        try Self.run(executable:executable,arguments:Self.directArguments(source:source,destination:destination,newFile:newFile),shouldContinue:shouldContinue,progress:progress)
+        try Self.run(executable:executable,arguments:Self.directArguments(source:source,destination:destination,newFile:newFile),shouldContinue:shouldContinue,diagnostic:diagnostic,progress:progress)
     }
 
     // Exact paths only; no recursive or source deletion commands.
-    func pathOperation(_ verb: String, url: URL, shouldContinue: () -> Bool) throws {
+    func pathOperation(_ verb: String, url: URL, shouldContinue: () -> Bool, diagnostic: (SyncLogLevel,String) -> Void = { _,_ in }) throws {
         guard case .rcloneDirect(let executable) = self,
               ["mkdir","deletefile","rmdir"].contains(verb) else { throw MountedCopyError.invalidMapping }
-        try Self.run(executable:executable,arguments:[verb,"--config","/dev/null","--retries","1","--low-level-retries","1","--use-json-log","--log-level","INFO","--",url.path],shouldContinue:shouldContinue,progress:{ _,_ in })
+        try Self.run(executable:executable,arguments:[verb,"--config","/dev/null","--retries","1","--low-level-retries","1","--use-json-log","--log-level","INFO","--",url.path],shouldContinue:shouldContinue,diagnostic:diagnostic,progress:{ _,_ in })
     }
 
     private static func run(executable: URL, arguments: [String], shouldContinue: () -> Bool,
+                            diagnostic: (SyncLogLevel,String) -> Void = { _,_ in },
                             progress: (Int64, Double) -> Void) throws {
         guard shouldContinue() else { throw SeedVerificationError.cancelled }
         guard FileManager.default.isExecutableFile(atPath:executable.path) else { throw MountedCopyError.rcloneUnavailable }
         let process = Process()
         process.executableURL = executable
-        process.arguments = arguments
+        let verbosity = TechnicalLogVerbosity.current
+        var args=arguments
+        if verbosity == .debug, let i=args.firstIndex(of:"--log-level"), args.indices.contains(i+1) { args[i+1]="DEBUG" }
+        process.arguments = args
         // No inherited RCLONE_* settings, remotes, credentials or shell.
         process.environment = ["PATH": "/usr/bin:/bin", "LC_ALL": "en_US.UTF-8"]
         process.currentDirectoryURL = URL(fileURLWithPath: "/")
@@ -96,6 +101,8 @@ public enum StageTransferEngine {
         do { try process.run() } catch { throw MountedCopyError.rcloneLaunchFailed }
         var pending = Data()
         var cancelled = false
+        var seen:[String:Int]=[:]
+        var lastStats:(Int64,Double)?
         let reader = output.fileHandleForReading
         defer { try? reader.close() }
         // Drain stderr on the serial worker so callbacks cannot race SQLite
@@ -112,15 +119,65 @@ public enum StageTransferEngine {
             while let index = pending.firstIndex(of: 10) {
                 let line = Data(pending.prefix(upTo: index))
                 pending.removeSubrange(pending.startIndex...index)
-                if let sample = Self.parseStats(line) { progress(sample.0, sample.1) }
+                if let sample = Self.parseStats(line) { lastStats=sample; progress(sample.0, sample.1) }
+                if let event = Self.classifyDiagnostic(line,verbosity:verbosity) {
+                    let key=event.0.rawValue+"|"+event.1
+                    seen[key,default:0]+=1
+                    if seen[key]==1 { diagnostic(event.0,event.1) }
+                }
             }
             if pending.count > 262144 { pending.removeAll(keepingCapacity: false) }
         }
         process.waitUntilExit()
+        for (key,count) in seen.sorted(by:{$0.key<$1.key}) where count>1 {
+            let parts=key.split(separator:"|",maxSplits:1)
+            if parts.count==2, let level=SyncLogLevel(rawValue:String(parts[0])) {
+                diagnostic(level,String(parts[1])+" — ripetizioni aggiuntive: "+String(count-1))
+            }
+        }
+        if verbosity != .normal, let sample=lastStats {
+            diagnostic(.info,String(format:"Rclone: %lld byte in %.3f s",sample.0,sample.1))
+        }
+        if process.terminationStatus != 0 { diagnostic(.error,"Rclone: exit code "+String(process.terminationStatus)) }
+        else if verbosity != .normal { diagnostic(.success,"Rclone: exit code 0") }
         if cancelled || !shouldContinue() { throw SeedVerificationError.cancelled }
         guard process.terminationStatus == 0 else {
             throw MountedCopyError.rcloneFailed(process.terminationStatus)
         }
+    }
+
+    // Only fixed classifications derived from Rclone's JSON; never persist
+    // msg/object/URLs or arbitrary strings from subprocess output.
+    static func classifyDiagnostic(_ data:Data,verbosity:TechnicalLogVerbosity) -> (SyncLogLevel,String)? {
+        guard let item=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],
+              let msg=item["msg"] as? String,let raw=item["level"] as? String else { return nil }
+        let s=msg.lowercased()
+        if ["error","fatal","critical","warning","warn"].contains(raw.lowercased()) {
+            let level:SyncLogLevel = ["warning","warn"].contains(raw.lowercased()) ? .warning : .error
+            let rules:[(String,String)]=[
+                ("operation not supported","operazione non supportata"),("permission denied","permessi insufficienti"),
+                ("access denied","accesso negato"),("input/output error","errore I/O"),
+                ("no space left","spazio esaurito"),("connection reset","connessione interrotta"),
+                ("broken pipe","connessione interrotta"),("timed out","timeout"),("i/o timeout","timeout"),
+                ("partial file rename failed","rinomina del temporaneo fallita"),
+                ("corrupted on transfer","verifica integrità fallita"),("immutable","destinazione già esistente / immutabile"),
+                ("file not found","file non trovato"),("no such file","percorso non trovato"),
+                ("directory not empty","cartella non vuota")
+            ]
+            let reason=rules.first(where:{s.contains($0.0)})?.1 ?? "causa non classificata"
+            return (level,"Rclone: "+reason)
+        }
+        if verbosity != .normal {
+            if s.contains("copied (") { return (.success,"Rclone: copia completata") }
+            if s.contains("renamed to:") { return (.success,"Rclone: rinomina completata") }
+            if s.contains("deleted") { return (.success,"Rclone: cancellazione eseguita") }
+        }
+        if verbosity == .debug {
+            if s.contains("sizes differ") { return (.info,"Rclone: dimensioni diverse") }
+            if s.contains("hash") { return (.info,"Rclone: controllo hash") }
+            if s.contains("need to transfer") { return (.info,"Rclone: trasferimento necessario") }
+        }
+        return nil
     }
 
     static func parseStats(_ data: Data) -> (Int64, Double)? {

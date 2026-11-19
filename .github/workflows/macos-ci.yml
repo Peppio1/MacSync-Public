@@ -2,7 +2,7 @@ name: macOS CI
 
 on:
   push:
-    branches: [main, develop-v0.18.1, develop-v0.18.2, develop-v0.18.3, develop-v0.18.4, develop-v0.18.5, develop-v0.18.6]
+    branches: [main, develop-v0.18.1, develop-v0.18.2, develop-v0.18.3, develop-v0.18.4, develop-v0.18.5, develop-v0.18.6, develop-v0.18.7]
     paths:
       - 'Package.swift'
       - 'Sources/**'
@@ -141,7 +141,7 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print LSMinimumSystemVersion' "$info")" = 13.0
           test "$(/usr/libexec/PlistBuddy -c 'Print LSUIElement' "$info")" = true
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIconFile' "$info")" = MacSync.icns
-          test "$version" = 0.18.6
+          test "$version" = 0.18.7
           test -s dist/MacSync.app/Contents/Resources/MacSync.icns
           test -x "$exe"
           lipo "$exe" -info
@@ -186,7 +186,7 @@ jobs:
           MACSYNC_UI_PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
           MACSYNC_BRAND_PREVIEW_DIR: ${{ runner.temp }}/macsync-branding
         run: swift test --skip-build --filter MacSyncUIPreviewTests
-      - name: Check 56 PNG artifacts
+      - name: Check 57 PNG artifacts
         env:
           PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
         run: |
@@ -225,11 +225,30 @@ jobs:
               test "$(sips -g pixelHeight "$file" | awk '/pixelHeight:/{print $2}')" = "$height"
             done
           done
-          test "$(find "$PREVIEW_DIR" -maxdepth 1 -name '*.png' | wc -l | tr -d ' ')" = 56
+          test "$(find "$PREVIEW_DIR" -maxdepth 1 -name '*.png' | wc -l | tr -d ' ')" = 57
+          test -s "$PREVIEW_DIR/page-technical-light.png"
       - uses: actions/upload-artifact@v6
         with:
           name: MacSync-UI-Previews
           path: ${{ runner.temp }}/macsync-ui-previews/*.png
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Select one full-size screenshot per page
+        env:
+          PREVIEW_DIR: ${{ runner.temp }}/macsync-ui-previews
+          REVIEW_DIR: ${{ runner.temp }}/macsync-review-pages
+        run: |
+          set -euo pipefail
+          mkdir -p "$REVIEW_DIR"
+          for page in overview folders schedule audit names history settings technical; do
+            cp "$PREVIEW_DIR/page-$page-light.png" "$REVIEW_DIR/$page.png"
+          done
+          test "$(find "$REVIEW_DIR" -name '*.png' | wc -l | tr -d ' ')" = 8
+      - uses: actions/upload-artifact@v6
+        with:
+          name: MacSync-v0187-review-pages
+          path: ${{ runner.temp }}/macsync-review-pages/*.png
           if-no-files-found: error
           retention-days: 7
 
@@ -268,12 +287,12 @@ jobs:
       - name: Verify exact protected candidate and prepare signing tools
         run: |
           set -euo pipefail
-          (cd signing-input && shasum -a 256 -c MacSync-v0.18.6-macOS-universal.zip.sha256)
-          (cd signing-input && shasum -a 256 -c MacSync-v0.18.6-macOS-universal.dmg.sha256)
+          (cd signing-input && shasum -a 256 -c MacSync-v0.18.7-macOS-universal.zip.sha256)
+          (cd signing-input && shasum -a 256 -c MacSync-v0.18.7-macOS-universal.dmg.sha256)
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           printf '%s  %s\n' '0dd750be1d060b75f6b4075122e7ef2bf7f59d74090a3872217dc9a417bd5620' 'Packaging/Branding/MacSync-Approved-Original.png' | shasum -a 256 -c -
           mkdir "$RUNNER_TEMP/verify-branded-package"
-          ditto -x -k signing-input/MacSync-v0.18.6-macOS-universal.zip "$RUNNER_TEMP/verify-branded-package"
+          ditto -x -k signing-input/MacSync-v0.18.7-macOS-universal.zip "$RUNNER_TEMP/verify-branded-package"
           python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["approved_original"] is True and d["source_sha256"]=="0dd750be1d060b75f6b4075122e7ef2bf7f59d74090a3872217dc9a417bd5620"' "$RUNNER_TEMP/verify-branded-package/MacSync.app/Contents/Resources/branding-provenance.json"
           codesign --verify --deep --strict "$RUNNER_TEMP/verify-branded-package/MacSync.app"
           bash Packaging/prepare-release-signing.sh
@@ -282,7 +301,7 @@ jobs:
           MACSYNC_SPARKLE_PRIVATE_KEY: ${{ secrets.MACSYNC_SPARKLE_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          bash Packaging/sign-release-candidate.sh signing-input/MacSync-v0.18.6-macOS-universal.zip
+          bash Packaging/sign-release-candidate.sh signing-input/MacSync-v0.18.7-macOS-universal.zip
       - uses: actions/upload-artifact@v6
         with:
           name: MacSync-signed-release-candidate
@@ -290,4 +309,4 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-# Renew queued v0.18.6 CI; no build or source changes.
+# Renew queued v0.18.7 CI; no build or source changes.

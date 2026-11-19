@@ -32,6 +32,17 @@ final class TechnicalLogTests:XCTestCase {
         XCTAssertEqual(try reader.recent(limit:5).count,5)
     }
 
+    func testRcloneDiagnosticDoesNotExposeRawOutput() {
+        let data=Data(#"{"level":"error","msg":"failed to open /private/secret/photo.jpg: permission denied","object":"smb://user:password@server"}"#.utf8)
+        let result=StageTransferEngine.classifyDiagnostic(data,verbosity:.normal)
+        XCTAssertEqual(result?.0,.error)
+        XCTAssertEqual(result?.1,"Rclone: permessi insufficienti")
+        XCTAssertFalse(result?.1.contains("secret") ?? true)
+        let debug=Data(#"{"level":"debug","msg":"sizes differ at /private/file"}"#.utf8)
+        XCTAssertNil(StageTransferEngine.classifyDiagnostic(debug,verbosity:.normal))
+        XCTAssertEqual(StageTransferEngine.classifyDiagnostic(debug,verbosity:.debug)?.1,"Rclone: dimensioni diverse")
+    }
+
     func testFallbackWithoutDatabase() throws {
         let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)

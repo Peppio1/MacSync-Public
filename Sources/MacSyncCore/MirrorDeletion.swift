@@ -840,7 +840,9 @@ public final class MirrorDeletionWorker {
               latest.st_ctimespec.tv_sec==original.st_ctimespec.tv_sec,latest.st_ctimespec.tv_nsec==original.st_ctimespec.tv_nsec
         else { throw MirrorDeletionFailure.destinationChanged }
         try? log.record(level:.info,rootID:job.rootID,action:"rclone_delete_start",relativePath:job.relativePath,message:directory ? "Rclone rmdir" : "Rclone deletefile")
-        try transferEngine.pathOperation(directory ? "rmdir" : "deletefile",url:destination,shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() })
+        try transferEngine.pathOperation(directory ? "rmdir" : "deletefile",url:destination,shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() },diagnostic:{ level,message in
+            try? self.log.record(level:level,rootID:job.rootID,action:"rclone_diagnostic",relativePath:job.relativePath,message:message)
+        })
         try verifyRoots(mapping,baseline)
         guard try Self.statIfPresent(destination)==nil else { throw MirrorDeletionFailure.destinationChanged }
     }

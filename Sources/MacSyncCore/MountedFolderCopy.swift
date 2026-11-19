@@ -734,6 +734,10 @@ public final class MountedFolderCopyWorker {
         try journal.clearPublicationIntent(job)
     }
 
+    private func recordRcloneDiagnostic(_ level:SyncLogLevel,_ message:String,job:QueuedChange) {
+        try? log.record(level:level,rootID:job.rootID,action:"rclone_diagnostic",relativePath:job.relativePath,message:message)
+    }
+
     private func transferDirect(_ job: QueuedChange, mapping: MountedFolderMapping) throws -> TransferOutcome {
         guard operationAllowed() else { throw SeedVerificationError.cancelled }
         try mapping.verify()
@@ -758,7 +762,7 @@ public final class MountedFolderCopyWorker {
         if source.kind == .directory {
             if original == nil {
                 try? log.record(level:.info,rootID:job.rootID,action:"rclone_mkdir",relativePath:job.relativePath,message:"Rclone: creazione cartella")
-                try stageEngine.pathOperation("mkdir",url:dst,shouldContinue:operationAllowed)
+                try stageEngine.pathOperation("mkdir",url:dst,shouldContinue:operationAllowed,diagnostic:{ self.recordRcloneDiagnostic($0,$1,job:job) })
             }
             try mapping.verify()
             try ensureSafeParents(dst,under:mapping.target,create:false)
@@ -775,7 +779,7 @@ public final class MountedFolderCopyWorker {
         onPhase?("Trasferimento")
         let started = ProcessInfo.processInfo.systemUptime
         try stageEngine.copyDirect(source:src,destination:dst,newFile:original == nil,shouldContinue:operationAllowed,
-            progress:{ [weak self] bytes, seconds in self?.onTransferProgress?(bytes,seconds) })
+            diagnostic:{ self.recordRcloneDiagnostic($0,$1,job:job) },progress:{ [weak self] bytes, seconds in self?.onTransferProgress?(bytes,seconds) })
         onPhase?("Verifica del trasferimento")
         try mapping.verify()
         try ensureSafeParents(dst,under:mapping.target,create:false)

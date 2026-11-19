@@ -29,3 +29,9 @@ public struct TechnicalLogRow: Identifiable, Equatable, Sendable {
         return lines.joined(separator:"\n")+"\n"
     }
 }
+
+public enum TechnicalLogVerbosity:String,CaseIterable,Sendable {
+    case normal, detailed, debug
+    public static let preferenceKey="MacSync.technicalLogVerbosity"
+    public static var current:Self { Self(rawValue:UserDefaults.standard.string(forKey:preferenceKey) ?? "") ?? .normal }
+}

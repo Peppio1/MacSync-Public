@@ -76,6 +76,26 @@ final class MacSyncUIPreviewTests: XCTestCase {
         let directory = URL(fileURLWithPath: path, isDirectory: true)
         try await MainActor.run {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            // Actual production technical sheet, seeded through the real paginated reader.
+            let fixtureDir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at:fixtureDir,withIntermediateDirectories:true)
+            defer { try? FileManager.default.removeItem(at:fixtureDir) }
+            let fixtureDB=fixtureDir.appendingPathComponent("demo.sqlite").path
+            let log=try SyncActivityLog(path:fixtureDB)
+            log.cycleID="demo-previous-cycle"
+            try log.record(level:.success,rootID:"app",action:"cycle",message:"Ciclo concluso: 18 copie, 0 errori")
+            log.cycleID="demo-current-cycle"
+            try log.record(level:.info,rootID:"app",action:"cycle_start",message:"Inizio ciclo; controllo destinazioni e coda")
+            try log.record(level:.success,rootID:"app",action:"connection_check",message:"Destinazione disponibile")
+            try log.record(level:.info,rootID:"app",action:"queue_plan",message:"12 operazioni pianificate — motore rclone-direct")
+            log.currentJob=QueuedChange(id:42,rootID:"photos",relativePath:"Samsung_A57/Display.psd",kind:.upsert,recordedAt:Date())
+            try log.record(level:.info,rootID:"photos",action:"rclone_start",relativePath:"Samsung_A57/Display.psd",bytes:52000000,message:"Rclone copyto: pubblicazione diretta")
+            try log.record(level:.error,rootID:"photos",action:"rclone_diagnostic",relativePath:"Samsung_A57/Display.psd",message:"Rclone: errore I/O (dati dimostrativi)")
+            try log.record(level:.warning,rootID:"photos",action:"retry",relativePath:"Samsung_A57/Display.psd",message:"Operazione mantenuta in coda")
+            try log.record(level:.info,rootID:"app",action:"cycle",message:"Ciclo parziale: 10 copie, 1 errore, 1 rimandata")
+            let rows=try SyncActivityLog(path:fixtureDB,readOnly:true).technicalPage()
+            let fixtureRuntime=MacSyncRuntime(previewOnly:true)
+            try Self.render(TechnicalLogSheet(copy:fixtureRuntime.copy,fixtureRows:rows).allowsHitTesting(false),name:"page-technical-light",scheme:.light,directory:directory,width:1180,height:820)
             for scheme in [ColorScheme.light, .dark] {
                 let suffix = scheme == .dark ? "dark" : "light"
                 try Self.render(folderExample, name: "folders-\(suffix)", scheme: scheme, directory: directory)
