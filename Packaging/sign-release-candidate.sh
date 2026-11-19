@@ -36,7 +36,7 @@ cat > signing-output/appcast.xml <<XML
 <sparkle:version>185</sparkle:version>
 <sparkle:shortVersionString>0.18.5</sparkle:shortVersionString>
 <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-<description>Riconoscimento archivio, gestione prudente SMB, esclusione .DS_Store e ricostruzione controllata della coda.</description>
+<description>Versione di collaudo: motore Rclone 1.76.0 integrato, copia nello staging MacSync e statistiche live. Protezioni di pubblicazione e coda invariate. Collaudo SMB reale ancora necessario.</description>
 <enclosure url="https://github.com/Peppio1/MacSync-Public/releases/download/v0.18.5/$name" sparkle:edSignature="$sig" length="$length" type="application/octet-stream"/>
 </item></channel></rss>
 XML
