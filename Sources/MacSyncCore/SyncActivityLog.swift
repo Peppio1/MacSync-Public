@@ -21,8 +21,13 @@ public struct SyncLogEntry: Equatable, Sendable {
 /// local/network paths are accepted by the API; only a relative file path.
 public final class SyncActivityLog {
     private var db: OpaquePointer?
+    private let databasePath: String
+    // Owned by the serial synchronization worker; never shared across queues.
+    public var cycleID: String?
+    public var currentJob: QueuedChange?
 
     public init(path: String, readOnly: Bool = false) throws {
+        self.databasePath = path
         var dbHandle: OpaquePointer?
         let flags = readOnly ? SQLITE_OPEN_READONLY : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)
         guard sqlite3_open_v2(path, &dbHandle, flags, nil) == SQLITE_OK else {
@@ -48,6 +53,17 @@ public final class SyncActivityLog {
                 );
                 """)
             try execute("CREATE INDEX IF NOT EXISTS idx_sync_activity_recent ON sync_activity(id DESC);")
+            // Additive metadata side table: older log rows and rollback readers
+            // retain their original schema. No changes to the queue or inventory.
+            try execute("""
+                CREATE TABLE IF NOT EXISTS sync_activity_context_v2(
+                    activity_id INTEGER PRIMARY KEY, cycle_id TEXT NOT NULL, job_id INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_activity_context_cycle ON sync_activity_context_v2(cycle_id,activity_id DESC);
+                CREATE INDEX IF NOT EXISTS idx_sync_activity_level ON sync_activity(level,id DESC);
+                CREATE TRIGGER IF NOT EXISTS prune_activity_context_v2 AFTER DELETE ON sync_activity
+                BEGIN DELETE FROM sync_activity_context_v2 WHERE activity_id=OLD.id; END;
+                """)
         } catch {
             sqlite3_close(db)
             db = nil
@@ -67,6 +83,7 @@ public final class SyncActivityLog {
               bytes >= 0, durationSeconds >= 0, durationSeconds.isFinite else {
             throw JournalError.database("Invalid log entry")
         }
+        do {
         let statement = try prepare("""
             INSERT INTO sync_activity(event_time,level,root_id,action,relative_path,bytes,duration_seconds,message)
             VALUES(?,?,?,?,?,?,?,?);
@@ -81,6 +98,64 @@ public final class SyncActivityLog {
               sqlite3_bind_double(statement, 7, durationSeconds) == SQLITE_OK else { throw failure() }
         try bind(message, 8, statement)
         guard sqlite3_step(statement) == SQLITE_DONE else { throw failure() }
+        if let cycleID {
+            let rowID=sqlite3_last_insert_rowid(db)
+            let context=try prepare("INSERT INTO sync_activity_context_v2(activity_id,cycle_id,job_id) VALUES(?,?,?);")
+            defer { sqlite3_finalize(context) }
+            guard sqlite3_bind_int64(context,1,rowID)==SQLITE_OK else { throw failure() }
+            try bind(cycleID,2,context)
+            if let job=currentJob, job.rootID==rootID, job.relativePath==relativePath {
+                guard sqlite3_bind_int64(context,3,job.id)==SQLITE_OK else { throw failure() }
+            } else { guard sqlite3_bind_null(context,3)==SQLITE_OK else { throw failure() } }
+            guard sqlite3_step(context)==SQLITE_DONE else { throw failure() }
+        }
+        } catch {
+            // Diagnostics cannot rely on a database which just failed.
+            TechnicalFallbackLog.record(databasePath:databasePath,cycleID:cycleID,action:"activity_write_failed",
+                message:SyncDiagnostic.describe(error))
+            throw error
+        }
+    }
+
+    public func technicalPage(limit:Int = 100, level:SyncLogLevel? = nil, search:String = "",
+                              beforeID:Int64? = nil, afterID:Int64? = nil) throws -> [TechnicalLogRow] {
+        let check=try prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_activity_context_v2';")
+        let rc=sqlite3_step(check)
+        sqlite3_finalize(check)
+        guard rc==SQLITE_ROW || rc==SQLITE_DONE else { throw failure() }
+        let hasContext = rc==SQLITE_ROW
+        var sql = "SELECT a.id,a.event_time,a.level,a.root_id,a.action,a.relative_path,a.bytes,a.duration_seconds,a.message,"
+        sql += hasContext ? "c.cycle_id,c.job_id FROM sync_activity a LEFT JOIN sync_activity_context_v2 c ON c.activity_id=a.id" : "NULL,NULL FROM sync_activity a"
+        sql += " WHERE a.id<? AND a.id>?"
+        if level != nil { sql += " AND a.level=?" }
+        if !search.isEmpty {
+            sql += " AND (instr(lower(a.relative_path),lower(?))>0 OR instr(lower(a.message),lower(?))>0 OR instr(lower(a.action),lower(?))>0 OR instr(lower(a.root_id),lower(?))>0"
+            if hasContext { sql += " OR instr(lower(c.cycle_id),lower(?))>0 OR CAST(c.job_id AS TEXT)=?" }
+            sql += ")"
+        }
+        sql += " ORDER BY a.id DESC LIMIT ?;"
+        let query=try prepare(sql)
+        defer { sqlite3_finalize(query) }
+        guard sqlite3_bind_int64(query,1,beforeID ?? Int64.max)==SQLITE_OK,
+              sqlite3_bind_int64(query,2,afterID ?? 0)==SQLITE_OK else { throw failure() }
+        var index:Int32=3
+        if let level { try bind(level.rawValue,index,query); index += 1 }
+        if !search.isEmpty {
+            for _ in 0..<(hasContext ? 6 : 4) { try bind(search,index,query); index += 1 }
+        }
+        guard sqlite3_bind_int(query,index,Int32(max(1,min(limit,5000))))==SQLITE_OK else { throw failure() }
+        var result:[TechnicalLogRow]=[]
+        while true {
+            let step=sqlite3_step(query)
+            if step==SQLITE_DONE { return result }
+            guard step==SQLITE_ROW else { throw failure() }
+            let entry=SyncLogEntry(id:sqlite3_column_int64(query,0),timestamp:Date(timeIntervalSince1970:sqlite3_column_double(query,1)),
+                level:textColumn(query,2),rootID:textColumn(query,3),action:textColumn(query,4),relativePath:textColumn(query,5),
+                bytes:sqlite3_column_int64(query,6),durationSeconds:sqlite3_column_double(query,7),message:textColumn(query,8))
+            result.append(TechnicalLogRow(entry:entry,
+                cycleID:sqlite3_column_type(query,9)==SQLITE_NULL ? nil : textColumn(query,9),
+                jobID:sqlite3_column_type(query,10)==SQLITE_NULL ? nil : sqlite3_column_int64(query,10)))
+        }
     }
 
     public func recent(limit: Int = 200, level: SyncLogLevel? = nil, search: String = "") throws -> [SyncLogEntry] {

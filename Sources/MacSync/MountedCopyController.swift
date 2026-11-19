@@ -775,6 +775,9 @@ final class MountedCopyController: ObservableObject {
             timer.setEventHandler { [weak self] in
                 guard cancellation.beginCycle() else { return }
                 let cycleID = UUID().uuidString
+                log.cycleID=cycleID
+                log.currentJob=nil
+                TechnicalFallbackLog.record(databasePath:database.path,cycleID:cycleID,action:"cycle_start",message:"Avvio ciclo — "+StageTransferEngine.applicationDefault().diagnosticName)
                 let startedAt = Date()
                 let startUptime = ProcessInfo.processInfo.systemUptime
                 var progress = SyncLiveProgress(started: startedAt)
@@ -808,6 +811,7 @@ final class MountedCopyController: ObservableObject {
                     publish()
                 }
                 func jobStarted(_ job: QueuedChange) {
+                    log.currentJob=job
                     progress.inFlightCopyBytes = 0
                     progress.inFlightCopySeconds = 0
                     progress.currentFile = job.rootID + " / " + job.relativePath
@@ -835,6 +839,9 @@ final class MountedCopyController: ObservableObject {
                     let finalStats = totals.stats
                     let warning = historyError
                     let finalOutcome = outcomeState
+                    TechnicalFallbackLog.record(databasePath:database.path,cycleID:cycleID,action:"cycle_end",message:finalOutcome)
+                    log.currentJob=nil
+                    log.cycleID=nil
                     if !automatic { timer.cancel() }
                     DispatchQueue.main.async { [weak self] in
                         guard let self, self.historySessionID == sessionID else { return }
@@ -1046,6 +1053,7 @@ final class MountedCopyController: ObservableObject {
                 } catch {
                     if cancellation.isCancelled { outcomeState = "interrupted"; return }
                     outcomeState = "suspended"
+                    TechnicalFallbackLog.record(databasePath:database.path,cycleID:cycleID,action:"cycle_suspended",message:SyncDiagnostic.describe(error))
                     totals.stats.deletionsBlocked = policy.enabled
                     try? log.record(
                         level: .error, rootID: "app", action: "cycle",
@@ -1075,6 +1083,9 @@ final class MountedCopyController: ObservableObject {
             timer.resume()
         } catch {
             active = false
+            if let path=try? Self.databaseURL().path {
+                TechnicalFallbackLog.record(databasePath:path,action:"session_start_failed",message:SyncDiagnostic.describe(error))
+            }
             status = "Impossibile avviare: " + error.localizedDescription
         }
     }
