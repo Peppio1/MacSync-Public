@@ -22,16 +22,18 @@ public struct SyncLogEntry: Equatable, Sendable {
 public final class SyncActivityLog {
     private var db: OpaquePointer?
 
-    public init(path: String) throws {
+    public init(path: String, readOnly: Bool = false) throws {
         var dbHandle: OpaquePointer?
-        guard sqlite3_open(path, &dbHandle) == SQLITE_OK else {
+        let flags = readOnly ? SQLITE_OPEN_READONLY : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)
+        guard sqlite3_open_v2(path, &dbHandle, flags, nil) == SQLITE_OK else {
             if dbHandle != nil { sqlite3_close(dbHandle) }
             throw JournalError.database("Cannot open activity database")
         }
         db = dbHandle
         do {
-            try execute("PRAGMA journal_mode=WAL;")
             try execute("PRAGMA busy_timeout=5000;")
+            if readOnly { return }
+            try execute("PRAGMA journal_mode=WAL;")
             try execute("""
                 CREATE TABLE IF NOT EXISTS sync_activity (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -230,7 +230,7 @@ final class MountedCopyController: ObservableObject {
     private var namesConfiguration:[String]=[]
 
     func refreshIncompatibleNames(pairs:[(id:String,path:String,destination:String,expected:VolumeFingerprint?)]) {
-        guard !previewOnly,!namesBusy else { return }
+        guard !previewOnly,!namesBusy,!rectifyingNames else { return }
         let configured=pairs.filter{!$0.path.isEmpty}
         let signature=configured.map{$0.id+"\0"+$0.path+"\0"+$0.destination}
         let report=auditReport
@@ -809,6 +809,7 @@ final class MountedCopyController: ObservableObject {
                 }
                 func jobStarted(_ job: QueuedChange) {
                     progress.currentFile = job.rootID + " / " + job.relativePath
+                    progress.phase = job.kind == .delete ? "Verifica cancellazione" : "Preparazione operazione"
                     publish()
                 }
                 publish(force:true)
@@ -1597,25 +1598,32 @@ final class MountedCopyController: ObservableObject {
         status = "Copie fermate. Un trasferimento già avviato può terminare."
     }
 
-    private var refreshRevision = 0
+    // An independent read-only WAL connection must not wait behind the
+    // serial transfer worker. Coalesce refresh requests and keep copy state
+    // separate from a transient history read error.
+    private let logReadQueue=DispatchQueue(label:"macsync.activity.reader",qos:.utility)
+    private var logReadBusy=false
+    @Published private(set) var logReadWarning=""
     func refresh() {
-        guard !previewOnly else { return }
-        refreshRevision += 1
-        let revision = refreshRevision, level = SyncLogLevel(rawValue:logLevel), search = logSearch
-        queue.async { [weak self] in
+        guard !previewOnly,!logReadBusy else { return }
+        logReadBusy=true
+        let level=SyncLogLevel(rawValue:logLevel), search=logSearch, levelKey=logLevel
+        logReadQueue.async { [weak self] in
+            var entries:[SyncLogEntry]=[]
+            var warning=""
             do {
-                let db = try Self.databaseURL()
-                let entries = FileManager.default.fileExists(atPath:db.path)
-                    ? try SyncActivityLog(path:db.path).recent(limit:300,level:level,search:search) : []
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, self.refreshRevision == revision else { return }
-                    self.recentEntries = entries
+                let db=try Self.databaseURL()
+                if FileManager.default.fileExists(atPath:db.path) {
+                    entries=try SyncActivityLog(path:db.path,readOnly:true).recent(limit:300,level:level,search:search)
                 }
-            } catch {
-                DispatchQueue.main.async { [weak self] in
-                    guard let self,self.refreshRevision == revision else { return }
-                    self.status = "Impossibile leggere il registro: " + error.localizedDescription
-                }
+            } catch { warning="Registro temporaneamente non disponibile; dati precedenti conservati" }
+            let snapshot=entries, errorText=warning
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.logReadBusy=false
+                guard self.logLevel==levelKey,self.logSearch==search else { self.refresh();return }
+                self.logReadWarning=errorText
+                if errorText.isEmpty && self.recentEntries != snapshot { self.recentEntries=snapshot }
             }
         }
     }

@@ -47,7 +47,9 @@ struct LiveSyncPanel: View {
                     }.font(.headline)
                     if p.planned > 0 {
                         MacSyncLinearProgress(value:p.fraction)
-                        Text("\(p.processed) / \(p.planned) operazioni elaborate (stima del lavoro iniziale)")
+                        Text("\(p.processed) / \(p.planned) operazioni elaborate (non percentuale di byte copiati)")
+                        Text("File confermati: \(p.confirmedFiles) · Cartelle create: \(p.confirmedDirectories) · Rimandati: \(p.deferredOperations) · Errori: \(p.failedOperations)")
+                            .font(.caption).foregroundStyle(.secondary)
                     } else { ProgressView().controlSize(.small) }
                     HStack(alignment: .top, spacing: 16) {
                         VStack(alignment: .leading, spacing: 2) {
@@ -66,7 +68,7 @@ struct LiveSyncPanel: View {
                         }
                         Spacer(minLength: 0)
                         VStack(alignment: .trailing, spacing: 2) {
-                            Text("Velocità media copia").font(.caption).foregroundStyle(.secondary)
+                            Text("Velocità media staging").font(.caption).foregroundStyle(.secondary)
                             Text(SyncLiveProgress.formatRate(p.meanCopyRate)).font(.system(size: 16, weight: .semibold)).monospacedDigit()
                         }
                     }
@@ -89,7 +91,7 @@ struct LiveSyncPanel: View {
                         Text("Durata: \(cycle.seconds.map(elapsedText) ?? "—")")
                     }
                 } else { Text(copy.active ? "In attesa del prossimo ciclo" : "Sincronizzazione ferma") }
-                if let next = copy.nextScheduledRun {
+                if copy.automaticCopiesEnabled,let next = copy.nextScheduledRun,next>Date() {
                     Text("Prossimo ciclo: \(macSyncDateTime(next))")
                 }
             }

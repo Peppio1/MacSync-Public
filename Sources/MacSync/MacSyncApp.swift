@@ -538,8 +538,14 @@ struct MacSyncConfigurationView: View {
     @State private var page: MacSyncPage
     @AppStorage("MacSync.appearance") private var appearance = "system"
 
+    private var visibleNextCopy:Date? {
+        guard copy.automaticCopiesEnabled,copy.liveProgress==nil,
+              let next=copy.nextScheduledRun ?? runtime.nextAutomaticAttempt,next>Date() else { return nil }
+        return next
+    }
+
     var body: some View {
-        MacSyncSectionShell(page: $page, monitoring: model.monitoring, next: copy.nextScheduledRun ?? runtime.nextAutomaticAttempt, showHeader: true, activity: nil, controls: AnyView(automaticSwitch), nameCount:copy.incompatibleNames.count) {
+        MacSyncSectionShell(page: $page, monitoring: model.monitoring, next: visibleNextCopy, showHeader: true, activity: nil, controls: AnyView(automaticSwitch), nameCount:copy.sourceNameCount) {
             VStack(alignment: .leading, spacing: 10) {
                 switch page {
                 case .overview: overviewPage
@@ -577,6 +583,13 @@ struct MacSyncConfigurationView: View {
         }
         .onChange(of:page) { nextPage in
             if !runtime.previewOnly && nextPage == .names { copy.refreshIncompatibleNames(pairs:model.configuredPairs()) }
+            if !runtime.previewOnly && nextPage == .history { copy.refresh() }
+        }
+        .onReceive(Timer.publish(every:3,on:.main,in:.common).autoconnect()) { _ in
+            if !runtime.previewOnly && page == .history { copy.refresh() }
+        }
+        .onChange(of:model.monitoring) { running in
+            if running && !runtime.previewOnly { copy.refreshIncompatibleNames(pairs:model.configuredPairs()) }
         }
         .onChange(of:copy.auditReport?.ended) { _ in
             if !runtime.previewOnly { copy.refreshIncompatibleNames(pairs:model.configuredPairs()) }
@@ -644,7 +657,7 @@ struct MacSyncConfigurationView: View {
                 HStack {
                     Label("\(model.pendingCount.formatted()) operazioni in coda", systemImage: "list.bullet.rectangle").font(.subheadline.weight(.medium))
                     Spacer()
-                    if let next = copy.nextScheduledRun ?? runtime.nextAutomaticAttempt { Text("Prossimo: " + macSyncDateTime(next)).font(.caption).foregroundStyle(Color.accentColor) }
+                    if let next = visibleNextCopy { Text("Prossimo: " + macSyncDateTime(next)).font(.caption).foregroundStyle(Color.accentColor) }
                 }
                 if let counts=model.pendingBreakdown {
                     Text("\(counts.files.formatted()) file · \(counts.directories.formatted()) cartelle · \(counts.deletions.formatted()) eliminazioni · \(counts.other.formatted()) non classificati")
@@ -1045,6 +1058,7 @@ struct MacSyncConfigurationView: View {
     }
     private var historyPage: some View {
         MacSyncPanel("Registro e dettagli", icon: "list.bullet.rectangle", fillHeight: true) {
+            if !copy.logReadWarning.isEmpty { Text(copy.logReadWarning).font(.caption).foregroundStyle(.orange) }
             HStack(spacing: 8) {
                 TextField("Cerca file o errore…", text: $copy.logSearch)
                     .textFieldStyle(.roundedBorder)
@@ -1546,9 +1560,9 @@ struct MacSyncSectionShell<Content: View>: View {
                     Button { page = item } label: {
                         HStack(spacing: 10) {
                             Image(systemName: item.icon).frame(width: 20)
-                            Text(item.rawValue).lineLimit(1).minimumScaleFactor(0.8)
+                            Text(item.rawValue).lineLimit(item == .names ? 2 : 1).minimumScaleFactor(0.9).fixedSize(horizontal:false,vertical:true)
                             Spacer(minLength: 0)
-                            if item == .names && nameCount>0 { Text(String(nameCount)).font(.caption.weight(.semibold)).foregroundStyle(MacSyncColors.orange(scheme)) }
+                            if item == .names && nameCount>0 { Text(String(nameCount)).font(.caption.weight(.semibold)).foregroundStyle(MacSyncColors.orange(scheme)).help("Nomi incompatibili nella sorgente") }
                         }
                         .font(.system(size: 14, weight: page == item ? .semibold : .regular))
                         .padding(.horizontal, 11).padding(.vertical, 11)

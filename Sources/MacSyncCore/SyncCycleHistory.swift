@@ -86,6 +86,10 @@ public struct SyncLiveProgress: Equatable, Sendable {
     public var workStarted: Date?
     public var planned: Int
     public var processed = 0
+    public var confirmedFiles = 0
+    public var confirmedDirectories = 0
+    public var deferredOperations = 0
+    public var failedOperations = 0
     public var phase = "Verifica"
     public var currentFile = ""
     public var lastCopyRate: Double?
@@ -100,6 +104,13 @@ public struct SyncLiveProgress: Equatable, Sendable {
     }
     public mutating func observe(_ event: SyncCycleEvent) {
         if event.kind.isJob { processed += 1 }
+        switch event.kind {
+        case .newFile,.updatedFile: confirmedFiles += 1
+        case .directoryCreated: confirmedDirectories += 1
+        case .deferred: deferredOperations += 1
+        case .failed: failedOperations += 1
+        default: break
+        }
         if event.kind == .stageCopy, event.seconds > 0, let bytes = event.bytes {
             lastCopyRate = Double(bytes) / event.seconds
             let sum = copiedBytes.addingReportingOverflow(bytes)
