@@ -310,7 +310,8 @@ public final class AnchoredDirectory {
     /// anchored staging folder. Verify both the collision and successful
     /// publication cases; never infer support solely from the filesystem name.
     /// Cross-directory publication is still verified at the actual call.
-    func probeExclusivePublication(shouldContinue: () -> Bool) throws -> ExclusivePublicationMethod {
+    func probeExclusivePublication(shouldContinue: () -> Bool,
+                                   onDiagnostic:(String)->Void = {_ in}) throws -> ExclusivePublicationMethod {
         try verify()
         let token=UUID().uuidString
         let a="probe-"+token+"-a", b="probe-"+token+"-b", c="probe-"+token+"-c"
@@ -328,12 +329,22 @@ public final class AnchoredDirectory {
             try verify()
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             let handle=name.withCString { openat(fd,$0,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,mode_t(0o600)) }
-            guard handle>=0 else { throw MountedCopyError.copyFailed(Int(errno)) }
+            guard handle>=0 else {
+                let code=errno; onDiagnostic("openat(O_EXCL) errno \(code)")
+                throw MountedCopyError.copyFailed(Int(code))
+            }
             defer { Darwin.close(handle) }
             var value=stat()
             guard fstat(handle,&value)==0 else { throw MountedCopyError.copyFailed(Int(errno)) }
             owned.append((UInt64(bitPattern:Int64(value.st_dev)),UInt64(value.st_ino)))
-            guard ftruncate(handle,size)==0 else { throw MountedCopyError.copyFailed(Int(errno)) }
+            // Test publication, not remote ftruncate support.
+            let bytes=[UInt8](repeating:0x4d,count:Int(size))
+            let written=bytes.withUnsafeBytes { Darwin.write(handle,$0.baseAddress,$0.count) }
+            guard written==Int(size) else {
+                let code=written<0 ? errno : EIO
+                onDiagnostic("write(probe) errno \(code)")
+                throw MountedCopyError.copyFailed(Int(code))
+            }
             return try leaf(name)
         }
         let first=try make(a,size:1), second=try make(b,size:2)
@@ -350,11 +361,13 @@ public final class AnchoredDirectory {
         }
         for method in [ExclusivePublicationMethod.renameExclusive,.hardLink] {
             let (collision,code)=try run(method,b)
+            onDiagnostic("\(method.rawValue) collision result \(collision), errno \(collision == 0 ? 0 : code)")
             guard collision != 0 else { throw MountedCopyError.destinationChanging }
             guard Self.sameFile(try leaf(a),first),Self.sameFile(try leaf(b),second) else { throw MountedCopyError.destinationChanging }
             if code == ENOTSUP || code == ENOSYS || code == EINVAL { continue }
             guard code == EEXIST else { throw MountedCopyError.copyFailed(Int(code)) }
             let (published,error)=try run(method,c)
+            onDiagnostic("\(method.rawValue) new name result \(published), errno \(published == 0 ? 0 : error)")
             if published != 0 {
                 if error == ENOTSUP || error == ENOSYS || error == EINVAL { continue }
                 throw MountedCopyError.copyFailed(Int(error))

@@ -240,6 +240,8 @@ public final class MountedFolderCopyWorker {
     private let availableCapacity: (URL) throws -> Int64?
     private var nextAfterID: Int64 = 0
     private var publicationMethods: [String:ExclusivePublicationMethod] = [:]
+    private var unsupportedNewPublicationRoots=Set<String>()
+    private enum NewPublicationUnsupported: Error { case unavailable }
     public var onEvent: ((SyncCycleEvent) -> Void)?
     public var onJobStarted: ((QueuedChange) -> Void)?
     public var onPlan: ((Int) -> Void)?
@@ -341,6 +343,14 @@ public final class MountedFolderCopyWorker {
                 continue
             }
             do {
+                if !WindowsPathSafety.validRelativePath(job.relativePath) {
+                    summary.deferred += 1
+                    emit(.deferred,job:job,mapping:mapping,detail:"Nome incompatibile: correggere in Finder")
+                    if try journal.noteBlockedName(job) {
+                        try? log.record(level:.warning,rootID:job.rootID,action:"name_blocked",relativePath:job.relativePath,message:"Nome incompatibile: operazione mantenuta in coda; nessuna copia tentata")
+                    }
+                    continue
+                }
                 if try journal.retryBlocked(job,now:now()) {
                     summary.deferred += 1
                     emit(.deferred,job:job,mapping:mapping,detail:"Riprova programmata dopo errore precedente")
@@ -421,6 +431,9 @@ public final class MountedFolderCopyWorker {
                 )
             } catch SeedVerificationError.cancelled {
                 summary.interrupted = true; return false
+            } catch NewPublicationUnsupported.unavailable {
+                summary.deferred += 1
+                emit(.deferred,job:job,mapping:mapping,detail:"SMB: pubblicazione esclusiva indisponibile; nuovo file conservato in coda")
             } catch let error as MountedCopyError {
                 let eventKind: SyncEventKind
                 switch error {
@@ -747,13 +760,23 @@ public final class MountedFolderCopyWorker {
         let stageIdentity = try CopyDirectoryIdentity.read(stageFolder)
         var method: ExclusivePublicationMethod?
         if originalTarget == nil && mapping.targetVolume.fileSystem.lowercased()=="smbfs" {
+            guard !unsupportedNewPublicationRoots.contains(job.rootID) else { throw NewPublicationUnsupported.unavailable }
             if let cached=publicationMethods[job.rootID] { method=cached }
             else {
                 let probe=try AnchoredDirectory(stageFolder,expectedVolume:mapping.targetVolume)
-                let selected=try probe.probeExclusivePublication(shouldContinue:operationAllowed)
-                publicationMethods[job.rootID]=selected
-                method=selected
-                try? log.record(level:.info,rootID:job.rootID,action:"smb_probe",message:"Metodo esclusivo verificato in staging: "+selected.rawValue)
+                do {
+                    let selected=try probe.probeExclusivePublication(shouldContinue:operationAllowed,onDiagnostic:{ message in
+                        try? self.log.record(level:.info,rootID:job.rootID,action:"smb_probe_step",message:message)
+                    })
+                    publicationMethods[job.rootID]=selected
+                    method=selected
+                    try? log.record(level:.info,rootID:job.rootID,action:"smb_probe",message:"Metodo esclusivo verificato in staging: "+selected.rawValue)
+                } catch MountedCopyError.copyFailed(let code) where [Int(ENOTSUP),Int(ENOSYS),Int(EINVAL)].contains(code) {
+                    try verifyRoots()
+                    unsupportedNewPublicationRoots.insert(job.rootID)
+                    try? log.record(level:.warning,rootID:job.rootID,action:"smb_probe_blocked",message:"Pubblicazione esclusiva non disponibile (POSIX \(code)); nessuna copia diretta, nuovi file in coda")
+                    throw NewPublicationUnsupported.unavailable
+                }
             }
         }
         let staging = stageFolder.appendingPathComponent(UUID().uuidString + ".partial")
@@ -778,7 +801,11 @@ public final class MountedFolderCopyWorker {
             try checkpoint?(.beforeStageCopy, staging)
             onPhase?("Trasferimento")
             let transferStart = ProcessInfo.processInfo.systemUptime
-            try fm.copyItem(at: src, to: staging)
+            do { try fm.copyItem(at: src, to: staging) }
+            catch {
+                try? log.record(level:.warning,rootID:job.rootID,action:"stage_copy_failed",relativePath:job.relativePath,message:SyncDiagnostic.describe(error))
+                throw error
+            }
             onPhase?("Verifica del trasferimento")
             observedStage = try readSnapshot(staging)
             if let observedStage, observedStage.kind == .file {
@@ -809,6 +836,8 @@ public final class MountedFolderCopyWorker {
                 guard try journal.uploadIsCurrent(job) else { throw MountedCopyError.sourceChanging }
                 try ensureSafeParents(src, under: mapping.source, create: false)
                 try ensureSafeParents(dst, under: mapping.target, create: false)
+                try WindowsPathSafety.checkNames(relativePath:job.relativePath,under:mapping.source)
+                try WindowsPathSafety.checkNames(relativePath:job.relativePath,under:mapping.target)
                 guard try CopyDirectoryIdentity.read(stageFolder) == stageIdentity,
                       try readSnapshot(staging) == staged else {
                     throw MountedCopyError.stagingIncomplete

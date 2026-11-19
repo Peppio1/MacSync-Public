@@ -638,6 +638,14 @@ public final class MirrorDeletionWorker {
                 emit(.deferred,job:job,mapping:nil,detail:"Coppia non configurata")
                 continue
             }
+            if !WindowsPathSafety.validRelativePath(job.relativePath) {
+                result.deferred += 1
+                emit(.deferred,job:job,mapping:mapping,detail:"Nome incompatibile: nessuna cancellazione consentita")
+                if try journal.noteBlockedName(job) {
+                    try? log.record(level:.warning,rootID:job.rootID,action:"name_blocked",relativePath:job.relativePath,message:"Nome incompatibile: cancellazione sospesa; coda preservata")
+                }
+                continue
+            }
             var recordedRemoval = false
             do {
                 try self.verifyRoots(mapping, baseline)

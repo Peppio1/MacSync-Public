@@ -59,6 +59,7 @@ public final class ChangeJournal {
             try execute("CREATE TABLE IF NOT EXISTS transfer_recovery(job_id INTEGER PRIMARY KEY, root_id TEXT NOT NULL, relative_path TEXT NOT NULL, record TEXT NOT NULL);")
             try execute("CREATE TABLE IF NOT EXISTS queue_rebuild_hold(singleton INTEGER PRIMARY KEY CHECK(singleton=1), token TEXT NOT NULL);")
             try execute("CREATE TABLE IF NOT EXISTS retired_delete_evidence(job_id INTEGER PRIMARY KEY);")
+            try execute("CREATE TABLE IF NOT EXISTS blocked_name_jobs(job_id INTEGER PRIMARY KEY);")
             try execute("CREATE TABLE IF NOT EXISTS retired_publication_evidence(job_id INTEGER PRIMARY KEY);")
             try execute("CREATE TABLE IF NOT EXISTS verified_content_cache(root_id TEXT NOT NULL, relative_path TEXT NOT NULL, binding TEXT NOT NULL, source_stamp TEXT NOT NULL, target_stamp TEXT NOT NULL, PRIMARY KEY(root_id,relative_path));")
             try execute("CREATE TABLE IF NOT EXISTS directory_bindings(root_id TEXT NOT NULL, role TEXT NOT NULL, stamp TEXT NOT NULL, PRIMARY KEY(root_id,role));")
@@ -328,6 +329,14 @@ public final class ChangeJournal {
     /// replace an existing binding automatically, even on reconnection.
     /// Job IDs change when a new monitor event supersedes an operation.
     /// Root-level holds are reserved for incompatible publication facilities.
+    // Invalid names stay pending until a separate source event replaces them.
+    @discardableResult func noteBlockedName(_ job:QueuedChange) throws -> Bool {
+        let stmt=try prepare("INSERT OR IGNORE INTO blocked_name_jobs(job_id) VALUES(?);")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_bind_int64(stmt,1,job.id)==SQLITE_OK,sqlite3_step(stmt)==SQLITE_DONE else { throw databaseFailure() }
+        return sqlite3_changes(connection)==1
+    }
+
     func retryBlocked(_ job:QueuedChange, now:Date) throws -> Bool {
         let stmt=try prepare("SELECT 1 FROM upload_retry WHERE root_id=? AND (job_id=? OR scope='root') AND next_at>? LIMIT 1;")
         defer { sqlite3_finalize(stmt) }
