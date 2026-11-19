@@ -144,6 +144,7 @@ final class MacSyncUIPreviewTests: XCTestCase {
         case .folders: return "folders"
         case .schedule: return "schedule"
         case .audit: return "audit"
+        case .names: return "names"
         case .history: return "history"
         case .settings: return "settings"
         }

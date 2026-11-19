@@ -539,13 +539,14 @@ struct MacSyncConfigurationView: View {
     @AppStorage("MacSync.appearance") private var appearance = "system"
 
     var body: some View {
-        MacSyncSectionShell(page: $page, monitoring: model.monitoring, next: copy.nextScheduledRun ?? runtime.nextAutomaticAttempt, showHeader: true, activity: nil, controls: AnyView(automaticSwitch)) {
+        MacSyncSectionShell(page: $page, monitoring: model.monitoring, next: copy.nextScheduledRun ?? runtime.nextAutomaticAttempt, showHeader: true, activity: nil, controls: AnyView(automaticSwitch), nameCount:copy.incompatibleNames.count) {
             VStack(alignment: .leading, spacing: 10) {
                 switch page {
                 case .overview: overviewPage
                 case .folders: foldersPage
                 case .schedule: schedulePage
                 case .audit: auditPage
+                case .names: IncompatibleNamesPanel(copy:copy,model:model,runtime:runtime)
                 case .history: historyPage
                 case .settings: settingsPage
                 }
@@ -558,6 +559,7 @@ struct MacSyncConfigurationView: View {
         .onAppear {
             guard !runtime.previewOnly else { return }
             copy.loadLastAudit()
+            copy.refreshIncompatibleNames(pairs:model.configuredPairs())
             copy.loadLastCycle()
             loginAtStartup.refresh()
             settings.refreshNotificationPermission()
@@ -569,7 +571,16 @@ struct MacSyncConfigurationView: View {
             settings.refreshNotificationPermission()
             runtime.refreshFolderHealth()
         }
-        .onReceive(Timer.publish(every:30,on:.main,in:.common).autoconnect()) { _ in runtime.refreshFolderHealth() }
+        .onReceive(Timer.publish(every:30,on:.main,in:.common).autoconnect()) { _ in
+            runtime.refreshFolderHealth()
+            if !runtime.previewOnly && page == .names { copy.refreshIncompatibleNames(pairs:model.configuredPairs()) }
+        }
+        .onChange(of:page) { nextPage in
+            if !runtime.previewOnly && nextPage == .names { copy.refreshIncompatibleNames(pairs:model.configuredPairs()) }
+        }
+        .onChange(of:copy.auditReport?.ended) { _ in
+            if !runtime.previewOnly { copy.refreshIncompatibleNames(pairs:model.configuredPairs()) }
+        }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for:NSWorkspace.didWakeNotification)) { _ in runtime.refreshFolderHealth() }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for:NSWorkspace.didMountNotification)) { _ in runtime.refreshFolderHealth() }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for:NSWorkspace.didUnmountNotification)) { _ in runtime.refreshFolderHealth() }
@@ -1279,7 +1290,7 @@ struct MacSyncConfigurationView: View {
 
 enum MacSyncPage: String, CaseIterable, Identifiable {
     case overview = "Panoramica", folders = "Cartelle", schedule = "Pianificazione"
-    case audit = "Verifica archivio", history = "Registro attività", settings = "Impostazioni"
+    case audit = "Verifica archivio", names = "Nomi incompatibili", history = "Registro attività", settings = "Impostazioni"
     var id: String { rawValue }
     var icon: String {
         switch self {
@@ -1287,6 +1298,7 @@ enum MacSyncPage: String, CaseIterable, Identifiable {
         case .folders: return "folder"
         case .schedule: return "calendar"
         case .audit: return "checkmark.shield"
+        case .names: return "folder.badge.questionmark"
         case .history: return "list.bullet.rectangle"
         case .settings: return "gearshape"
         }
@@ -1297,6 +1309,7 @@ enum MacSyncPage: String, CaseIterable, Identifiable {
         case .folders: return "Configura le coppie sorgente e destinazione."
         case .schedule: return "Personalizza frequenza e orari della sincronizzazione."
         case .audit: return "Scansioni rapide, SHA-256 e manutenzione controllata."
+        case .names: return "Individua i nomi da correggere manualmente in Finder."
         case .history: return "Consulta operazioni, avvisi ed errori."
         case .settings: return "Configura avvio, aspetto, recupero e sicurezza."
         }
@@ -1509,10 +1522,11 @@ struct MacSyncSectionShell<Content: View>: View {
     let activity: String?
     let showHeader: Bool
     let controls: AnyView
+    let nameCount:Int
     let content: Content
     @Environment(\.colorScheme) private var scheme
-    init(page: Binding<MacSyncPage>, monitoring: Bool, next: Date?, showHeader: Bool = false, activity: String? = nil, controls: AnyView = AnyView(EmptyView()), @ViewBuilder content: () -> Content) {
-        self._page = page; self.monitoring = monitoring; self.next = next; self.showHeader = showHeader; self.activity = activity; self.controls = controls; self.content = content()
+    init(page: Binding<MacSyncPage>, monitoring: Bool, next: Date?, showHeader: Bool = false, activity: String? = nil, controls: AnyView = AnyView(EmptyView()), nameCount:Int=0, @ViewBuilder content: () -> Content) {
+        self._page = page; self.monitoring = monitoring; self.next = next; self.showHeader = showHeader; self.activity = activity; self.controls = controls; self.nameCount=nameCount; self.content = content()
     }
     var body: some View {
         GeometryReader { geometry in
@@ -1532,8 +1546,9 @@ struct MacSyncSectionShell<Content: View>: View {
                     Button { page = item } label: {
                         HStack(spacing: 10) {
                             Image(systemName: item.icon).frame(width: 20)
-                            Text(item.rawValue)
+                            Text(item.rawValue).lineLimit(1).minimumScaleFactor(0.8)
                             Spacer(minLength: 0)
+                            if item == .names && nameCount>0 { Text(String(nameCount)).font(.caption.weight(.semibold)).foregroundStyle(MacSyncColors.orange(scheme)) }
                         }
                         .font(.system(size: 14, weight: page == item ? .semibold : .regular))
                         .padding(.horizontal, 11).padding(.vertical, 11)

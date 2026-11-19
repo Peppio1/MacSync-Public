@@ -42,6 +42,14 @@ final class MountedCopyController: ObservableObject {
         recentEntries = entries
         previewStatus = "Confronto iniziale non eseguito"
         auditSettings.enabled = false; auditSettings.repair = false; auditSettings.mode = .deep
+        if page == .names {
+            incompatibleNames=[
+                IncompatibleName(rootID:"demo",rootPath:"/Example/Archivio",relativePath:"Categoria/Cartella A ",objectKind:"directory",side:.source,reason:"Spazio finale",affectedDescendants:9),
+                IncompatibleName(rootID:"demo",rootPath:"/Example/Archivio",relativePath:"Categoria/Cartella B.",objectKind:"directory",side:.source,reason:"Punto finale",affectedDescendants:4),
+                IncompatibleName(rootID:"demo",rootPath:"/Example/Archivio",relativePath:"Categoria/Foto?.jpg",objectKind:"file",side:.source,reason:"Carattere incompatibile con Windows")
+            ]
+            namesStatus="Dati sintetici"
+        }
         if page == .overview && lastAudit == nil {
             active = true; automaticSession = true
             var progress = SyncLiveProgress(started: Date().addingTimeInterval(-155), planned: 46)
@@ -184,6 +192,62 @@ final class MountedCopyController: ObservableObject {
     }
     @Published private(set) var auditBusy = false
     @Published private(set) var auditProgress: ArchiveAuditProgress?
+    @Published private(set) var incompatibleNames:[IncompatibleName]=[]
+    @Published private(set) var namesStatus="Inventario non ancora consultato"
+    @Published private(set) var namesBusy=false
+    private var namesReportDate:Date?
+    private var namesDestinationRows:[IncompatibleName]=[]
+    private var namesSourceConflicts:[String:Set<String>]=[:]
+    private var namesConfiguration:[String]=[]
+
+    func refreshIncompatibleNames(pairs:[(id:String,path:String,destination:String,expected:VolumeFingerprint?)]) {
+        guard !previewOnly,!namesBusy else { return }
+        let configured=pairs.filter{!$0.path.isEmpty}
+        let signature=configured.map{$0.id+"\0"+$0.path+"\0"+$0.destination}
+        let report=auditReport
+        let refreshTargets=namesReportDate != report?.ended || namesConfiguration != signature
+        let oldTargets=namesDestinationRows, oldConflicts=namesSourceConflicts
+        namesBusy=true
+        DispatchQueue.global(qos:.utility).async { [weak self] in
+            do {
+                let inventory=try LocalInventory(path:Self.databaseURL().path)
+                var source:[IncompatibleName]=[]
+                var sourceConflicts=oldConflicts
+                var target=oldTargets
+                if refreshTargets {
+                    target=[]; sourceConflicts=[:]
+                    if let report {
+                        for pair in configured where !pair.destination.isEmpty {
+                            // Keep audit paths exact; do not enumerate or remount SMB.
+                            let root=URL(fileURLWithPath:pair.destination).standardizedFileURL.path
+                            target += IncompatibleName.destinationRows(report:report,rootID:pair.id,rootPath:root)
+                            let sourceRoot=URL(fileURLWithPath:pair.path).standardizedFileURL.resolvingSymlinksInPath().path
+                            sourceConflicts[pair.id]=Set(report.findings.filter{$0.rootID==pair.id && $0.sourceRoot==sourceRoot && $0.targetRoot==root && $0.directNameConflict==true}.map(\.relativePath))
+                        }
+                    }
+                }
+                for pair in configured {
+                    let root=URL(fileURLWithPath:pair.path).standardizedFileURL.resolvingSymlinksInPath().path
+                    source += try inventory.incompatibleNames(rootID:pair.id,sourcePath:root,conflicts:sourceConflicts[pair.id] ?? [])
+                }
+                let result=source+target, destination=target, conflicts=sourceConflicts
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.incompatibleNames=result
+                    self.namesDestinationRows=destination
+                    self.namesSourceConflicts=conflicts
+                    self.namesReportDate=report?.ended; self.namesConfiguration=signature
+                    self.namesStatus=report == nil ? "Sorgente: inventario locale · Destinazione: verifica archivio non disponibile" : "Sorgente: inventario locale · Destinazione: ultima verifica archivio"
+                    self.namesBusy=false
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    self?.namesStatus="Inventario non disponibile; elenco precedente conservato"
+                    self?.namesBusy=false
+                }
+            }
+        }
+    }
     @Published private(set) var auditReport: ArchiveAuditReport?
     @Published private(set) var auditStatus = "Verifica completa non eseguita"
     private var auditCancel: SeedVerificationCancellation?
