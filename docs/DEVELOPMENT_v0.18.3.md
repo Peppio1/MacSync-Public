@@ -1,0 +1,5 @@
+# MacSync v0.18.3 — candidato
+
+Rollback: rollback-before-v0.18.3. Nessun dato diagnostico reale incluso. Sezione Nomi incompatibili, inventario locale, elenco destinazione storico, apertura Finder esatta senza symlink, conteggi degli elementi sottostanti, sospensione dei percorsi invalidi senza tentativi di copia e senza autorizzare cancellazioni. Le correzioni al nome sono manuali. La destinazione viene aggiornata con una nuova verifica esplicita, non con scansioni ricorrenti.
+
+SMB: il test di capacità usa scritture ordinarie anziché ftruncate e registra operazioni/errno. Se entrambe le pubblicazioni esclusive non sono disponibili, i nuovi file rimangono in coda e gli aggiornamenti già esistenti possono proseguire; nessuna rinomina sovrascrivente come fallback. Le cancellazioni restano subordinate alle protezioni esistenti. Questo è un miglioramento candidato, non una prova di compatibilità Windows Server. Serve collaudo effettivo della creazione e sostituzione su SMB; se il client non supporta rename esclusivo o hard link non si può garantire pubblicazione atomica solo con le API attuali. Nessuna ottimizzazione della scansione SMB in questa fase.

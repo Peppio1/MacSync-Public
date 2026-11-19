@@ -37,3 +37,5 @@ MacSync-log-tecnico*.tsv
 MacSync_sync_log*.tsv
 audit-backups/
 update-backups/
+
+queue-reset-backups/
