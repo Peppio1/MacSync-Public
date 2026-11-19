@@ -415,13 +415,15 @@ public final class MirrorDeletionWorker {
     }
     private let authorization: MirrorAuthorization?
     private let protections: MirrorProtectionSettings
+    private let transferEngine: StageTransferEngine
 
     public init(
         journal: ChangeJournal, manifest: RecoveryManifest, log: SyncActivityLog,
         mappings: [MountedFolderMapping], policy: MirrorDeletionPolicy,
         cancellation: MirrorDeletionCancellation = MirrorDeletionCancellation(),
         authorization: MirrorAuthorization? = nil,
-        protections: MirrorProtectionSettings = MirrorProtectionSettings()
+        protections: MirrorProtectionSettings = MirrorProtectionSettings(),
+        transferEngine: StageTransferEngine = .native
     ) throws {
         guard policy.enabled, !mappings.isEmpty,
               Set(mappings.map(\.rootID)).count == mappings.count else {
@@ -434,6 +436,7 @@ public final class MirrorDeletionWorker {
         self.cancellation = cancellation
         self.authorization = authorization
         self.protections = protections
+        self.transferEngine = transferEngine
         guard protections.isValid else { throw MirrorDeletionFailure.noBaseline }
         self.mappings = Dictionary(uniqueKeysWithValues: mappings.map { ($0.rootID, $0) })
 
@@ -729,7 +732,11 @@ public final class MirrorDeletionWorker {
                         let parent = try AnchoredDirectory(destination.deletingLastPathComponent(),expectedVolume:mapping.targetVolume)
                         try verifyRoots(mapping,baseline)
                         guard try Self.statIfPresent(source) == nil else { throw MirrorDeletionFailure.sourceChanged }
-                        try parent.remove(destination.lastPathComponent,matching:target,shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() })
+                        if transferEngine.isDirect {
+                            try removeUsingRclone(destination,original:target,mapping:mapping,baseline:baseline,source:source,job:job,directory:false)
+                        } else {
+                            try parent.remove(destination.lastPathComponent,matching:target,shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() })
+                        }
                         result.removed += 1
                         recordedRemoval = true
                         emit(.deleted,job:job,mapping:mapping,bytes:Int64(target.st_size))
@@ -746,7 +753,11 @@ public final class MirrorDeletionWorker {
                     let parent = try AnchoredDirectory(destination.deletingLastPathComponent(),expectedVolume:mapping.targetVolume)
                     try verifyRoots(mapping,baseline)
                     guard try Self.statIfPresent(source) == nil else { throw MirrorDeletionFailure.sourceChanged }
-                    try parent.remove(destination.lastPathComponent,matching:target,directory:true,shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() })
+                    if transferEngine.isDirect {
+                        try removeUsingRclone(destination,original:target,mapping:mapping,baseline:baseline,source:source,job:job,directory:true)
+                    } else {
+                        try parent.remove(destination.lastPathComponent,matching:target,directory:true,shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() })
+                    }
                     result.directories += 1
                     recordedRemoval = true
                     emit(.directoryRemoved,job:job,mapping:mapping)
@@ -814,6 +825,24 @@ public final class MirrorDeletionWorker {
             }
         }
         return removed
+    }
+
+    private func removeUsingRclone(_ destination: URL, original: stat, mapping: MountedFolderMapping,
+                                    baseline: MirrorRootIdentity, source: URL, job: QueuedChange, directory: Bool) throws {
+        try verifyRoots(mapping,baseline)
+        guard try journal.pendingUploads(limit:1).isEmpty,
+              try journal.deletionIsCurrent(id:job.id,rootID:job.rootID,relativePath:job.relativePath),
+              try Self.statIfPresent(source)==nil,
+              let latest=try Self.statIfPresent(destination),
+              latest.st_dev==original.st_dev,latest.st_ino==original.st_ino,latest.st_mode==original.st_mode,
+              latest.st_size==original.st_size,
+              latest.st_mtimespec.tv_sec==original.st_mtimespec.tv_sec,latest.st_mtimespec.tv_nsec==original.st_mtimespec.tv_nsec,
+              latest.st_ctimespec.tv_sec==original.st_ctimespec.tv_sec,latest.st_ctimespec.tv_nsec==original.st_ctimespec.tv_nsec
+        else { throw MirrorDeletionFailure.destinationChanged }
+        try? log.record(level:.info,rootID:job.rootID,action:"rclone_delete_start",relativePath:job.relativePath,message:directory ? "Rclone rmdir" : "Rclone deletefile")
+        try transferEngine.pathOperation(directory ? "rmdir" : "deletefile",url:destination,shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() })
+        try verifyRoots(mapping,baseline)
+        guard try Self.statIfPresent(destination)==nil else { throw MirrorDeletionFailure.destinationChanged }
     }
 
     private func moveToRecovery(

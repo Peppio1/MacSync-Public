@@ -6,13 +6,20 @@ import Darwin
 public enum StageTransferEngine {
     case native
     case rclone(URL)
+    case rcloneDirect(URL)
+    var isDirect: Bool { if case .rcloneDirect = self { return true }; return false }
+    public var diagnosticName: String {
+        switch self { case .native: return "native"; case .rclone: return "rclone-staging"; case .rcloneDirect: return "rclone-direct" }
+    }
 
     /// Internal rollback switch, intentionally not a user preference.
     public static func applicationDefault() -> StageTransferEngine {
         if ProcessInfo.processInfo.environment["MACSYNC_INTERNAL_TRANSFER_ENGINE"] == "native" {
             return .native
         }
-        return .rclone(Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/rclone"))
+        let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/rclone")
+        if ProcessInfo.processInfo.environment["MACSYNC_INTERNAL_TRANSFER_ENGINE"] == "staging" { return .rclone(helper) }
+        return .rcloneDirect(helper)
     }
 
     static func arguments(source: URL, staging: URL) -> [String] {
@@ -29,6 +36,7 @@ public enum StageTransferEngine {
         switch self {
         case .native:
             try FileManager.default.copyItem(at: source, to: staging)
+        case .rcloneDirect: throw MountedCopyError.invalidMapping
         case .rclone(let executable):
             guard FileManager.default.isExecutableFile(atPath: executable.path) else {
                 throw MountedCopyError.rcloneUnavailable
@@ -45,44 +53,73 @@ public enum StageTransferEngine {
             guard lstat(staging.path, &targetStat) != 0, errno == ENOENT else {
                 throw MountedCopyError.unsafeFile
             }
-            let process = Process()
-            process.executableURL = executable
-            process.arguments = Self.arguments(source: source, staging: staging)
-            // No inherited RCLONE_* settings, remotes, credentials or shell.
-            process.environment = ["PATH": "/usr/bin:/bin", "LC_ALL": "en_US.UTF-8"]
-            process.currentDirectoryURL = URL(fileURLWithPath: "/")
-            let output = Pipe()
-            process.standardError = output
-            process.standardOutput = FileHandle.nullDevice
-            process.standardInput = FileHandle.nullDevice
-            do { try process.run() } catch { throw MountedCopyError.rcloneLaunchFailed }
-            var pending = Data()
-            var cancelled = false
-            let reader = output.fileHandleForReading
-            defer { try? reader.close() }
-            // Drain stderr on the serial worker so callbacks cannot race SQLite
-            // or the UI progress model. Raw output may contain absolute paths:
-            // never persist it or print it. Only extract numeric stats.
-            while true {
-                let chunk = reader.availableData
-                if chunk.isEmpty { break }
-                if !shouldContinue(), !cancelled {
-                    cancelled = true
-                    if process.isRunning { process.terminate() }
-                }
-                pending.append(chunk)
-                while let index = pending.firstIndex(of: 10) {
-                    let line = Data(pending.prefix(upTo: index))
-                    pending.removeSubrange(pending.startIndex...index)
-                    if let sample = Self.parseStats(line) { progress(sample.0, sample.1) }
-                }
-                if pending.count > 262144 { pending.removeAll(keepingCapacity: false) }
+            try Self.run(executable:executable,arguments:Self.arguments(source:source,staging:staging),shouldContinue:shouldContinue,progress:progress)
+        }
+    }
+
+    static func directArguments(source: URL, destination: URL, newFile: Bool) -> [String] {
+        var args = ["copyto","--config","/dev/null","--no-traverse","--ignore-times",
+                    "--retries","1","--low-level-retries","1","--multi-thread-streams","0",
+                    "--local-no-clone","--buffer-size","16Mi","--use-json-log","--stats","1s",
+                    "--stats-log-level","INFO","--log-level","INFO"]
+        if newFile { args.append("--immutable") }
+        return args + ["--",source.path,destination.path]
+    }
+
+    func copyDirect(source: URL, destination: URL, newFile: Bool, shouldContinue: () -> Bool,
+                    progress: (Int64, Double) -> Void) throws {
+        guard case .rcloneDirect(let executable) = self else { throw MountedCopyError.invalidMapping }
+        try Self.run(executable:executable,arguments:Self.directArguments(source:source,destination:destination,newFile:newFile),shouldContinue:shouldContinue,progress:progress)
+    }
+
+    // Exact paths only; no recursive or source deletion commands.
+    func pathOperation(_ verb: String, url: URL, shouldContinue: () -> Bool) throws {
+        guard case .rcloneDirect(let executable) = self,
+              ["mkdir","deletefile","rmdir"].contains(verb) else { throw MountedCopyError.invalidMapping }
+        try Self.run(executable:executable,arguments:[verb,"--config","/dev/null","--retries","1","--low-level-retries","1","--use-json-log","--log-level","INFO","--",url.path],shouldContinue:shouldContinue,progress:{ _,_ in })
+    }
+
+    private static func run(executable: URL, arguments: [String], shouldContinue: () -> Bool,
+                            progress: (Int64, Double) -> Void) throws {
+        guard shouldContinue() else { throw SeedVerificationError.cancelled }
+        guard FileManager.default.isExecutableFile(atPath:executable.path) else { throw MountedCopyError.rcloneUnavailable }
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        // No inherited RCLONE_* settings, remotes, credentials or shell.
+        process.environment = ["PATH": "/usr/bin:/bin", "LC_ALL": "en_US.UTF-8"]
+        process.currentDirectoryURL = URL(fileURLWithPath: "/")
+        let output = Pipe()
+        process.standardError = output
+        process.standardOutput = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        do { try process.run() } catch { throw MountedCopyError.rcloneLaunchFailed }
+        var pending = Data()
+        var cancelled = false
+        let reader = output.fileHandleForReading
+        defer { try? reader.close() }
+        // Drain stderr on the serial worker so callbacks cannot race SQLite
+        // or the UI progress model. Raw output may contain absolute paths:
+        // never persist it or print it. Only extract numeric stats.
+        while true {
+            let chunk = reader.availableData
+            if chunk.isEmpty { break }
+            if !shouldContinue(), !cancelled {
+                cancelled = true
+                if process.isRunning { process.terminate() }
             }
-            process.waitUntilExit()
-            if cancelled || !shouldContinue() { throw SeedVerificationError.cancelled }
-            guard process.terminationStatus == 0 else {
-                throw MountedCopyError.rcloneFailed(process.terminationStatus)
+            pending.append(chunk)
+            while let index = pending.firstIndex(of: 10) {
+                let line = Data(pending.prefix(upTo: index))
+                pending.removeSubrange(pending.startIndex...index)
+                if let sample = Self.parseStats(line) { progress(sample.0, sample.1) }
             }
+            if pending.count > 262144 { pending.removeAll(keepingCapacity: false) }
+        }
+        process.waitUntilExit()
+        if cancelled || !shouldContinue() { throw SeedVerificationError.cancelled }
+        guard process.terminationStatus == 0 else {
+            throw MountedCopyError.rcloneFailed(process.terminationStatus)
         }
     }
 

@@ -41,6 +41,7 @@ public final class ChangeJournal {
         connection = handle
 
         do {
+            try execute("PRAGMA busy_timeout=5000;")
             try execute("PRAGMA journal_mode=WAL;")
             try execute("PRAGMA synchronous=FULL;")
             try execute("PRAGMA busy_timeout=5000;")
@@ -374,6 +375,9 @@ public final class ChangeJournal {
     }
 
     public func clearUploadRetries() throws { try execute("DELETE FROM upload_retry;") }
+
+    // Root-wide upload retries are reserved for the former exclusive publication probe.
+    public func clearLegacyPublicationRetries() throws { try execute("DELETE FROM upload_retry WHERE scope='root';") }
 
     func saveTransferRecovery(_ job:QueuedChange, record:String) throws {
         guard try uploadIsCurrent(job) else { throw MountedCopyError.sourceChanging }

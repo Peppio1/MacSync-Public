@@ -381,7 +381,10 @@ final class MacSyncRuntime: ObservableObject {
     func startManualSynchronization() {
         guard !previewOnly, !shuttingDown, !savingSchedule, !folderConfigurationBusy, !finalShutdownHolding, !copy.queueRebuildRequired,
               model.monitoring, model.safetyGate.isReady, !copy.active, !copy.maintaining,
-              !copy.seedBusy, !copy.seedReady, !copy.interruptionRequested else { return }
+              !copy.seedBusy, !copy.seedReady, !copy.interruptionRequested else {
+            copy.status = copy.queueRebuildRequired ? "Sincronizzazione non avviata: verifica archivio richiesta o coda non leggibile" : !model.monitoring || !model.safetyGate.isReady ? "Sincronizzazione non avviata: monitoraggio o inventario non pronto" : "Sincronizzazione non avviata: operazione già in corso o blocco di sicurezza"
+            return
+        }
         configurationRevision += 1
         autoTimer?.invalidate(); autoTimer = nil; nextAutomaticAttempt = nil
         copy.start(sources:model.configuredPairs(),schedule:settings.schedule)

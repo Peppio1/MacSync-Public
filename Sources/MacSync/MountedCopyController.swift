@@ -22,7 +22,7 @@ final class MountedCopyController: ObservableObject {
                 if FileManager.default.fileExists(atPath:db.path) {
                     queueRebuildRequired = try ChangeJournal(path:db.path).queueRebuildToken() != nil
                 }
-            } catch { queueRebuildRequired = true }
+            } catch { queueRebuildRequired = true; status = "Impossibile leggere la coda: " + SyncDiagnostic.describe(error) }
             UserDefaults.standard.set(automaticCopiesEnabled, forKey:"MacSync.autoCopiesEnabled.v2")
             UserDefaults.standard.set(false, forKey:"MacSync.autoCopiesEnabled")
         }
@@ -758,7 +758,7 @@ final class MountedCopyController: ObservableObject {
             var mirrorWorker: MirrorDeletionWorker?
             try log.record(
                 level: .info, rootID: "app", action: "session",
-                message: "Sessione di sincronizzazione abilitata"
+                message: "Sessione di sincronizzazione abilitata — motore " + StageTransferEngine.applicationDefault().diagnosticName
             )
             let timer = DispatchSource.makeTimerSource(queue: queue)
             // Each synchronization has one connection check immediately
@@ -871,6 +871,7 @@ final class MountedCopyController: ObservableObject {
                         }
                     }
                 }
+                try? log.record(level:.info,rootID:"app",action:"cycle_start",message:"Inizio ciclo; controllo destinazioni e coda")
                 let states = Dictionary(uniqueKeysWithValues: configured.map {
                     ($0.id, DestinationProbe.inspect(
                         path: $0.destination, expectedVolume: $0.expected
@@ -940,7 +941,8 @@ final class MountedCopyController: ObservableObject {
                             manifest: RecoveryManifest(path: database.path),
                             log: log, mappings: maps, policy: policy,
                             cancellation: cancellation, authorization: authorization,
-                            protections: protections
+                            protections: protections,
+                            transferEngine: .applicationDefault()
                         )
                         mirrorWorker?.operationAllowed = { gate.isReady && !cancellation.isCancelled }
                         try? log.record(
@@ -950,9 +952,11 @@ final class MountedCopyController: ObservableObject {
                         )
                     }
                     try mirrorWorker?.verifyBeforeSynchronization()
+                    if StageTransferEngine.applicationDefault().diagnosticName == "rclone-direct" { try journal.clearLegacyPublicationRetries() }
                     let highWater = try journal.queueSequence()
                     progress.planned = try journal.plannedUploadCount(throughID:highWater)
                     progress.planned += try mirrorWorker?.plannedCount(throughID:highWater) ?? 0
+                    try? log.record(level:.info,rootID:"app",action:"queue_plan",message:"Operazioni pianificate: \(progress.planned) — motore " + StageTransferEngine.applicationDefault().diagnosticName)
                     progress.workStarted = Date()
                     worker.onEvent = observe
                     worker.onJobStarted = jobStarted

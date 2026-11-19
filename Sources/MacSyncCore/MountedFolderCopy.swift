@@ -364,6 +364,7 @@ public final class MountedFolderCopyWorker {
                 if try journal.retryBlocked(job,now:now()) {
                     summary.deferred += 1
                     emit(.deferred,job:job,mapping:mapping,detail:"Riprova programmata dopo errore precedente")
+                    if summary.deferred == 1 { try? log.record(level:.info,rootID:job.rootID,action:"retry_wait",relativePath:job.relativePath,message:"Attesa riprova; coda mantenuta") }
                     continue
                 }
                 guard try journal.uploadIsCurrent(job) else {
@@ -602,6 +603,17 @@ public final class MountedFolderCopyWorker {
         }
     }
 
+    private struct DirectRecoveryRecord: Codable {
+        let root: DirectoryBinding
+        let originalTarget: Snapshot?
+    }
+    private let directRecordPrefix = "rclone-direct-v1:"
+
+    private func directRecovery(_ job: QueuedChange) throws -> DirectRecoveryRecord? {
+        guard let record = try journal.transferRecovery(job), record.hasPrefix(directRecordPrefix) else { return nil }
+        return try JSONDecoder().decode(DirectRecoveryRecord.self,from:Data(record.dropFirst(directRecordPrefix.count).utf8))
+    }
+
     private struct RecoveryRecord: Codable {
         let name:String
         let root:DirectoryBinding
@@ -653,6 +665,7 @@ public final class MountedFolderCopyWorker {
 
     private func recoverConfirmedStage(_ job:QueuedChange,mapping:MountedFolderMapping) {
         do {
+            if try directRecovery(job) != nil { try journal.clearTransferRecovery(job); return }
             guard let record=try recoveryRecord(job) else { return }
             let dst=try mapping.fileURL(relativePath:job.relativePath,destination:true)
             try ensureSafeParents(dst,under:mapping.target,create:false)
@@ -664,6 +677,16 @@ public final class MountedFolderCopyWorker {
     }
 
     private func prepareRetry(_ job:QueuedChange,mapping:MountedFolderMapping,publicationUncertain:Bool) throws {
+        if let direct = try directRecovery(job) {
+            try mapping.verify()
+            let dst = try mapping.fileURL(relativePath:job.relativePath,destination:true)
+            guard try DirectoryBinding.read(mapping.target) == direct.root,
+                  try optionalSnapshot(dst) == direct.originalTarget else { throw MountedCopyError.destinationChanging }
+            // The old destination is still intact. A new attempt is safe.
+            try journal.clearPublicationIntent(job)
+            try journal.clearTransferRecovery(job)
+            return
+        }
         guard let record=try recoveryRecord(job) else {
             // Old builds did not record the previous target. Never overwrite
             // a newly arrived destination in an ambiguous legacy attempt.
@@ -711,7 +734,70 @@ public final class MountedFolderCopyWorker {
         try journal.clearPublicationIntent(job)
     }
 
+    private func transferDirect(_ job: QueuedChange, mapping: MountedFolderMapping) throws -> TransferOutcome {
+        guard operationAllowed() else { throw SeedVerificationError.cancelled }
+        try mapping.verify()
+        let src = try mapping.fileURL(relativePath:job.relativePath,destination:false)
+        let dst = try mapping.fileURL(relativePath:job.relativePath,destination:true)
+        try ensureSafeParents(src,under:mapping.source,create:false)
+        try WindowsPathSafety.checkNames(relativePath:job.relativePath,under:mapping.source)
+        try WindowsPathSafety.checkNames(relativePath:job.relativePath,under:mapping.target)
+        let source = try readSnapshot(src)
+        guard source.kind == .file || source.kind == .directory else { throw MountedCopyError.unsafeFile }
+        try validateExistingParents(dst, under:mapping.target)
+        let original = try optionalSnapshot(dst)
+        guard original == nil || original?.kind == source.kind else { throw MountedCopyError.destinationConflict }
+        if source.kind == .file {
+            guard now().timeIntervalSince1970-source.mtime >= minimumStableAge else { throw MountedCopyError.sourceChanging }
+            try TransferPreflight.requireCapacity(available:try availableCapacity(mapping.target),incoming:source.size,existing:0)
+        }
+        try mapping.verify()
+        guard try journal.uploadIsCurrent(job), try readSnapshot(src)==source,
+              try optionalSnapshot(dst)==original else { throw MountedCopyError.sourceChanging }
+        guard operationAllowed() else { throw SeedVerificationError.cancelled }
+        if source.kind == .directory {
+            if original == nil {
+                try? log.record(level:.info,rootID:job.rootID,action:"rclone_mkdir",relativePath:job.relativePath,message:"Rclone: creazione cartella")
+                try stageEngine.pathOperation("mkdir",url:dst,shouldContinue:operationAllowed)
+            }
+            try mapping.verify()
+            try ensureSafeParents(dst,under:mapping.target,create:false)
+            guard try readSnapshot(dst).kind == .directory, try readSnapshot(src)==source else { throw MountedCopyError.destinationChanging }
+            return TransferOutcome(bytes:0,kind:original == nil ? .directoryCreated : .directoryExisting)
+        }
+        let recovery = DirectRecoveryRecord(root:try DirectoryBinding.read(mapping.target),originalTarget:original)
+        try journal.saveTransferRecovery(job,record:directRecordPrefix+String(decoding:try JSONEncoder().encode(recovery),as:UTF8.self))
+        try journal.recordPublicationIntent(job)
+        try mapping.verify()
+        try validateExistingParents(dst,under:mapping.target)
+        guard try journal.uploadIsCurrent(job),try readSnapshot(src)==source,try optionalSnapshot(dst)==original else { throw MountedCopyError.destinationChanging }
+        try log.record(level:.info,rootID:job.rootID,action:"rclone_start",relativePath:job.relativePath,bytes:source.size,message:"Rclone copyto: pubblicazione diretta con temporaneo nativo")
+        onPhase?("Trasferimento")
+        let started = ProcessInfo.processInfo.systemUptime
+        try stageEngine.copyDirect(source:src,destination:dst,newFile:original == nil,shouldContinue:operationAllowed,
+            progress:{ [weak self] bytes, seconds in self?.onTransferProgress?(bytes,seconds) })
+        onPhase?("Verifica del trasferimento")
+        try mapping.verify()
+        try ensureSafeParents(dst,under:mapping.target,create:false)
+        let published = try readSnapshot(dst)
+        guard published.kind == .file, published.size == source.size,try readSnapshot(src)==source else { throw MountedCopyError.sourceChanging }
+        emit(.stageCopy,job:job,mapping:mapping,bytes:source.size,seconds:ProcessInfo.processInfo.systemUptime-started)
+        return TransferOutcome(bytes:source.size,kind:original == nil ? .created : .updated)
+    }
+
+    private func validateExistingParents(_ item: URL, under root: URL) throws {
+        let parent = item.deletingLastPathComponent().standardizedFileURL
+        guard parent.path == root.path || parent.path.hasPrefix(root.path+"/") else { throw MountedCopyError.unsafeFile }
+        var current = root
+        for component in parent.path.dropFirst(root.path.count).split(separator:"/") {
+            current.appendPathComponent(String(component))
+            guard let existing = try optionalSnapshot(current) else { return }
+            guard existing.kind == .directory else { throw MountedCopyError.unsafeFile }
+        }
+    }
+
     private func transfer(_ job: QueuedChange, mapping: MountedFolderMapping) throws -> TransferOutcome {
+        if stageEngine.isDirect { return try transferDirect(job,mapping:mapping) }
         guard operationAllowed() else { throw SeedVerificationError.cancelled }
         try mapping.verify()
         let targetIdentity = try CopyDirectoryIdentity.read(mapping.target)
