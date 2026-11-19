@@ -489,10 +489,10 @@ public final class AnchoredDirectory {
         }
         try remove(name,matching:current,shouldContinue:shouldContinue)
     }
-    /// Local-only rename, atomically refusing an occupied target. The
-    /// caller has already obtained a user's explicit batch confirmation.
-    func rectifyLocalName(_ old:String,as new:String,matching original:stat,shouldContinue:()->Bool) throws {
-        guard !binding.volume.isNetworkVolume,WindowsPathSafety.validComponent(new),
+    /// Exclusive same-directory rename after an explicit batch confirmation.
+    /// Filesystems that do not support RENAME_EXCL return an error.
+    func rectifyName(_ old:String,as new:String,matching original:stat,shouldContinue:()->Bool) throws {
+        guard WindowsPathSafety.validComponent(new),
               old != ".",old != "..",!old.contains("/"),!old.contains("\0"),!old.isEmpty,
               !WindowsPathSafety.validComponent(old) else { throw MountedCopyError.unsafeFile }
         try verify()

@@ -204,18 +204,32 @@ final class MountedCopyController: ObservableObject {
     @Published private(set) var namesBusy=false
     @Published private(set) var rectificationStatus=""
     @Published private(set) var rectifyingNames=false
-    var sourceNameCount:Int { incompatibleNames.filter{$0.side == .source}.count }
+    var sourceNameCount: Int { incompatibleNames.lazy.filter { $0.side == .source }.count }
+    var scanningNames: Bool { namesCancellation != nil }
 
-    func rectifyNamesAfterDrain(items:[IncompatibleName],roots:[String:String],token:SeedVerificationCancellation,
+    func rectifyNamesAfterDrain(items:[IncompatibleName],
+                                pairs:[(id:String,path:String,destination:String,expected:VolumeFingerprint?)],
+                                token:SeedVerificationCancellation,
                                 completion:@escaping @MainActor ()->Void) {
         guard !previewOnly,!rectifyingNames else { completion();return }
-        rectifyingNames=true; rectificationStatus="Verifica e rettifica locale in corso…"
+        rectifyingNames=true; rectificationStatus="Verifica e rettifica dei nomi in corso…"
         queue.async { [weak self] in
             var status=""
             var resolved=Set<String>()
             do {
                 let db=try Self.databaseURL().path
-                let result=try NameRectification.execute(items:items,roots:roots,journal:ChangeJournal(path:db),log:SyncActivityLog(path:db),shouldContinue:{!token.isCancelled})
+                let journal = try ChangeJournal(path: db)
+                let roots = Dictionary(uniqueKeysWithValues: pairs.filter { !$0.path.isEmpty }.map { ($0.id, $0.path) })
+                let requested = Set(items.filter { $0.side == .destination }.map(\.rootID))
+                var destinations: [String: MountedFolderMapping] = [:]
+                for pair in pairs where requested.contains(pair.id) {
+                    guard !pair.path.isEmpty, !pair.destination.isEmpty, let expected = pair.expected else { continue }
+                    destinations[pair.id] = try? MountedFolderMapping(
+                        rootID: pair.id, source: URL(fileURLWithPath: pair.path),
+                        target: URL(fileURLWithPath: pair.destination), expectedTargetVolume: expected)
+                }
+                let result=try NameRectification.execute(items:items,roots:roots,journal:journal,log:SyncActivityLog(path:db),
+                    destinations:destinations,shouldContinue:{!token.isCancelled})
                 resolved=result.resolvedIDs
                 status="\(result.renamed) rettificati · \(result.skipped) da correggere manualmente · \(result.failed) non verificati"
                 if result.cancelled { status+=" · interrotto" }
@@ -231,55 +245,70 @@ final class MountedCopyController: ObservableObject {
             }
         }
     }
-    private var namesReportDate:Date?
-    private var namesDestinationRows:[IncompatibleName]=[]
-    private var namesSourceConflicts:[String:Set<String>]=[:]
-    private var namesConfiguration:[String]=[]
+    private let namesQueue = DispatchQueue(label: "macsync.names.reader", qos: .utility)
+    private var namesCancellation: SeedVerificationCancellation?
+    private var namesGeneration = 0
 
-    func refreshIncompatibleNames(pairs:[(id:String,path:String,destination:String,expected:VolumeFingerprint?)]) {
-        guard !previewOnly,!namesBusy,!rectifyingNames else { return }
-        let configured=pairs.filter{!$0.path.isEmpty}
-        let signature=configured.map{$0.id+"\0"+$0.path+"\0"+$0.destination}
-        let report=auditReport
-        let refreshTargets=namesReportDate != report?.ended || namesConfiguration != signature
-        let oldTargets=namesDestinationRows, oldConflicts=namesSourceConflicts
-        namesBusy=true
-        DispatchQueue.global(qos:.utility).async { [weak self] in
+    func cancelNameScan() {
+        guard let namesCancellation else { return }
+        namesCancellation.cancel()
+        namesStatus = "Annullamento scansione richiesto…"
+    }
+
+    func refreshIncompatibleNames(pairs: [(id:String,path:String,destination:String,expected:VolumeFingerprint?)],
+                                  scan: Bool = false) {
+        guard !previewOnly, !rectifyingNames, !scanningNames, !scan || (!namesBusy && !auditBusy) else { return }
+        namesCancellation?.cancel()
+        namesGeneration += 1
+        let generation = namesGeneration
+        let cancellation = SeedVerificationCancellation()
+        namesCancellation = scan ? cancellation : nil
+        namesBusy = true
+        if scan { namesStatus = "Scansione dei nomi in corso…" }
+        namesQueue.async { [weak self] in
+            var snapshots: [NameScanSnapshot] = []
+            var unavailable = 0
+            var examined = 0
             do {
-                let inventory=try LocalInventory(path:Self.databaseURL().path)
-                var source:[IncompatibleName]=[]
-                var sourceConflicts=oldConflicts
-                var target=oldTargets
-                if refreshTargets {
-                    target=[]; sourceConflicts=[:]
-                    if let report {
-                        for pair in configured where !pair.destination.isEmpty {
-                            // Keep audit paths exact; do not enumerate or remount SMB.
-                            let root=URL(fileURLWithPath:pair.destination).standardizedFileURL.path
-                            target += IncompatibleName.destinationRows(report:report,rootID:pair.id,rootPath:root)
-                            let sourceRoot=URL(fileURLWithPath:pair.path).standardizedFileURL.resolvingSymlinksInPath().path
-                            sourceConflicts[pair.id]=Set(report.findings.filter{$0.rootID==pair.id && $0.sourceRoot==sourceRoot && $0.targetRoot==root && $0.directNameConflict==true}.map(\.relativePath))
+                let journal = try ChangeJournal(path: Self.databaseURL().path)
+                for pair in pairs {
+                    for side in IncompatibleName.Side.allCases {
+                        let value = side == .source ? pair.path : pair.destination
+                        guard !value.isEmpty else { continue }
+                        examined += 1
+                        let root = URL(fileURLWithPath: value).standardizedFileURL
+                        let volume = side == .destination ? pair.expected : nil
+                        if scan && !cancellation.isCancelled {
+                            do {
+                                let snapshot = try NameScanSnapshot.scan(rootID: pair.id, side: side,
+                                    root: root, volume: volume, shouldContinue: { !cancellation.isCancelled })
+                                try journal.saveNameScan(snapshot)
+                                snapshots.append(snapshot)
+                                continue
+                            } catch { unavailable += 1 }
+                        }
+                        if let previous = try? journal.nameScan(rootID: pair.id, side: side),
+                           previous.rootPath == root.path, previous.volume == volume {
+                            snapshots.append(previous)
                         }
                     }
                 }
-                for pair in configured {
-                    let root=URL(fileURLWithPath:pair.path).standardizedFileURL.resolvingSymlinksInPath().path
-                    source += try inventory.incompatibleNames(rootID:pair.id,sourcePath:root,conflicts:sourceConflicts[pair.id] ?? [])
-                }
-                let result=source+target, destination=target, conflicts=sourceConflicts
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.incompatibleNames=result
-                    self.namesDestinationRows=destination
-                    self.namesSourceConflicts=conflicts
-                    self.namesReportDate=report?.ended; self.namesConfiguration=signature
-                    self.namesStatus=report == nil ? "Sorgente: inventario locale · Destinazione: verifica archivio non disponibile" : "Sorgente: inventario locale · Destinazione: ultima verifica archivio"
-                    self.namesBusy=false
-                }
-            } catch {
-                DispatchQueue.main.async { [weak self] in
-                    self?.namesStatus="Inventario non disponibile; elenco precedente conservato"
-                    self?.namesBusy=false
+            } catch { unavailable += 1 }
+            let rows = snapshots.flatMap(\.rows)
+            let latest = snapshots.map(\.date).max()
+            let incomplete = unavailable > 0 || snapshots.count < examined
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.namesGeneration == generation else { return }
+                self.namesBusy = false
+                self.namesCancellation = nil
+                self.incompatibleNames = rows
+                if cancellation.isCancelled {
+                    self.namesStatus = "Scansione annullata · risultati completati o precedenti"
+                } else if let latest {
+                    self.namesStatus = "Ultimo esito salvato: " + latest.formatted(date: .abbreviated, time: .standard)
+                        + (incomplete ? " · Esito parziale, alcune posizioni non verificate" : "")
+                } else {
+                    self.namesStatus = incomplete ? "Nessun esito salvato per le posizioni non verificate" : "Nessuna scansione disponibile"
                 }
             }
         }
@@ -317,7 +346,7 @@ final class MountedCopyController: ObservableObject {
     /// A request during an active cycle waits for that cycle to finish.
     func startArchiveAudit(sources: [(id:String,path:String,destination:String,expected:VolumeFingerprint?)],
                            interactive: Bool) {
-        guard monitorGate.isReady, !interruptionRequested, liveProgress == nil, !auditBusy && !maintaining && !seedBusy && !seedReady else {
+        guard monitorGate.isReady, !interruptionRequested, liveProgress == nil, !scanningNames, !auditBusy && !maintaining && !seedBusy && !seedReady else {
             if !interactive { noteAuditSkipped("verifica, conferma o manutenzione in corso") }
             return
         }
@@ -443,9 +472,12 @@ final class MountedCopyController: ObservableObject {
  
                 var storageWarning = ""
                 do {
+                    for snapshot in report.nameScans ?? [] { try journal.saveNameScan(snapshot) }
+                } catch { storageWarning = " — impossibile salvare l’elenco dei nomi" }
+                do {
                     let data = try JSONEncoder().encode(report)
                     try data.write(to:db.deletingLastPathComponent().appendingPathComponent("last-audit.json"),options:.atomic)
-                } catch { storageWarning = " — impossibile salvare lo storico della verifica" }
+                } catch { storageWarning += " — impossibile salvare lo storico della verifica" }
                 let warning = storageWarning
                 try? auditLog?.record(level:.info,rootID:"app",action:"audit_finish",bytes:report.bytesRead,durationSeconds:report.seconds,message:"ID \(auditID) — Verifica conclusa: \(report.findings.count) elementi; \(report.queuedRepairs) riparazioni accodate" + warning)
                 for finding in report.findings where finding.kind == .uncertain {
@@ -991,10 +1023,14 @@ final class MountedCopyController: ObservableObject {
                     mirrorWorker?.onJobStarted = jobStarted
                     progress.phase = "Trasferimento"
                     publish(force:true)
+                    var lastStatusUpdate: TimeInterval = 0
                     let summary = try worker.runCycle(
                         enabled: true, pageSize: 100, throughID: highWater,
                         shouldContinue: { !cancellation.isCancelled && gate.isReady },
                         onProgress: { progress in
+                            let now = ProcessInfo.processInfo.systemUptime
+                            guard now - lastStatusUpdate >= 0.25 else { return }
+                            lastStatusUpdate = now
                             DispatchQueue.main.async { [weak self] in
                                 guard !cancellation.isCancelled else { return }
                                 self?.status = "Sincronizzazione in corso: "

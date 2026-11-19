@@ -15,15 +15,18 @@ struct IncompatibleNamesPanel:View {
     @State private var confirmation:[IncompatibleName]=[]
     @State private var showConfirmation=false
     private var eligible:[IncompatibleName] {
-        copy.incompatibleNames.filter{$0.side == .source && NameRectification.proposedName($0.name) != nil}
+        copy.incompatibleNames.filter{selectable($0)}
     }
-    private var chosen:[IncompatibleName] { eligible.filter{selected.contains($0.id)} }
+    private var chosen:[IncompatibleName] {
+        let paths = Set(eligible.lazy.filter { selected.contains($0.id) }.map { $0.rootID + "\0" + $0.relativePath })
+        return eligible.filter { paths.contains($0.rootID + "\0" + $0.relativePath) }
+    }
     private var canRectify:Bool {
         !runtime.previewOnly && !runtime.folderConfigurationBusy && !runtime.shuttingDown &&
         !copy.auditBusy && !copy.seedBusy && !copy.maintaining && !copy.rectifyingNames && !copy.namesBusy
     }
     private func selectable(_ item:IncompatibleName)->Bool {
-        item.side == .source && NameRectification.proposedName(item.name) != nil
+        NameRectification.proposedName(item.name) != nil
     }
     private var filtered:[IncompatibleName] {
         copy.incompatibleNames.filter { item in
@@ -36,16 +39,22 @@ struct IncompatibleNamesPanel:View {
         MacSyncPanel("Nomi incompatibili",icon:"folder.badge.questionmark",fillHeight:true) {
             HStack {
                 VStack(alignment:.leading,spacing:3) {
-                    Text("Sorgente: \(copy.sourceNameCount) · Destinazione: \(copy.incompatibleNames.count-copy.sourceNameCount)")
-                        .font(.headline)
-                    Text("Cartelle: \(copy.incompatibleNames.filter{$0.isDirectory}.count) · File: \(copy.incompatibleNames.filter{!$0.isDirectory}.count) · Rettificabili: \(eligible.count)").font(.caption)
+                    ForEach(IncompatibleName.Side.allCases, id: \.rawValue) { position in
+                        let rows = copy.incompatibleNames.filter { $0.side == position }
+                        let folders = rows.filter(\.isDirectory).count
+                        Text("\(position.label): \(folders) cartelle · \(rows.count - folders) file").font(.subheadline)
+                    }
                     Text("I nomi già corrispondenti possono essere incompatibili con nuove copie. Le due posizioni sono contate separatamente.")
                         .font(.caption2).foregroundStyle(.secondary)
                     Text(copy.namesStatus).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Aggiorna elenco") { copy.refreshIncompatibleNames(pairs:model.configuredPairs()) }
-                    .disabled(copy.namesBusy || runtime.previewOnly)
+                if copy.scanningNames {
+                    Button("Annulla scansione") { copy.cancelNameScan() }
+                }
+                Button("Scansiona nomi incompatibili") {
+                    copy.refreshIncompatibleNames(pairs: model.configuredPairs(), scan: true)
+                }.disabled(copy.namesBusy || copy.auditBusy || runtime.previewOnly)
             }
             HStack {
                 Picker("Tipo",selection:$directories) {
@@ -61,7 +70,7 @@ struct IncompatibleNamesPanel:View {
             TextField("Cerca nome, percorso o motivo…",text:$search).textFieldStyle(.roundedBorder)
             HStack {
                 Button("Seleziona tutto") { selected.formUnion(eligible.map(\.id)) }
-                    .help("Seleziona tutte le cartelle e tutti i file rettificabili della sorgente, anche nelle altre schede")
+                    .help("Seleziona tutte le cartelle e tutti i file rettificabili sui due lati, anche nelle altre schede")
                     .disabled(eligible.isEmpty || !canRectify)
                 Button("Seleziona visibili") { selected.formUnion(filtered.filter{selectable($0)}.map(\.id)) }
                     .disabled(!canRectify || !filtered.contains(where:{selectable($0)}))
@@ -89,9 +98,9 @@ struct IncompatibleNamesPanel:View {
                                 VStack(alignment:.leading,spacing:3) {
                                     Text(item.displayName).font(.subheadline.weight(.semibold))
                                     Text(item.side.label+" · "+item.reason).font(.caption).foregroundStyle(.secondary)
-                                    if item.side == .source,let name=NameRectification.proposedName(item.name) {
+                                    if let name=NameRectification.proposedName(item.name) {
                                         Text("Nuovo nome: "+name).foregroundStyle(.green).font(.caption)
-                                    } else if item.side == .source {
+                                    } else {
                                         Text("Correzione manuale").font(.caption).foregroundStyle(.orange)
                                     }
                                     Text(item.rootPath+"/"+item.relativePath).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
@@ -107,16 +116,16 @@ struct IncompatibleNamesPanel:View {
                 }.frame(maxHeight:.infinity)
             }
             if !message.isEmpty { Text(message).font(.caption).foregroundStyle(.secondary) }
-            Label("Rettifica solo sull'iMac, dopo conferma. Nessuna sovrascrittura. La destinazione rimane storica fino alla prossima verifica.",systemImage:"info.circle")
+            Label("Rettifica dopo conferma sui lati interessati. Nessuna sovrascrittura.",systemImage:"info.circle")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .onChange(of:copy.incompatibleNames.map(\.id)) { ids in selected.formIntersection(ids) }
         .sheet(isPresented:$showConfirmation) {
             VStack(alignment:.leading,spacing:12) {
                 Text("Conferma rettifica dei nomi").font(.title2.bold())
-                Text("\(confirmation.count) elementi selezionati. Le copie automatiche e le cancellazioni speculari verranno disattivate. Il monitor verrà riavviato al termine.")
+                Text("\(confirmation.count) elementi selezionati. Le copie automatiche e le cancellazioni speculari verranno disattivate. Il monitor verrà riavviato al termine. Le voci con lo stesso percorso sui due lati vengono incluse nel lotto.")
                     .fixedSize(horizontal:false,vertical:true)
-                Text("Spazi e punti finali rimossi, caratteri vietati sostituiti con -. Nomi riservati, conflitti e nomi già esistenti non saranno rettificati. Controlla il registro prima di riavviare la sincronizzazione.")
+                Text("Spazi e punti finali rimossi, caratteri vietati sostituiti con -. Nomi riservati, conflitti e nomi già esistenti non saranno rettificati. Dopo la rettifica, esegui Verifica archivio prima di riavviare la sincronizzazione.")
                     .font(.callout).fixedSize(horizontal:false,vertical:true)
                 List(confirmation) { item in
                     VStack(alignment:.leading,spacing:3) {

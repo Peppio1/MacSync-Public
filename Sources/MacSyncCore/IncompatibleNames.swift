@@ -2,8 +2,8 @@ import Foundation
 import Darwin
 
 /// Read-only maintenance data. A row is never permission to rename or delete.
-public struct IncompatibleName: Identifiable, Equatable, Sendable {
-    public enum Side: String, CaseIterable, Sendable {
+public struct IncompatibleName: Identifiable, Equatable, Codable, Sendable {
+    public enum Side: String, CaseIterable, Codable, Sendable {
         case source, destination
         public var label: String { self == .source ? "Sorgente" : "Destinazione" }
     }
@@ -59,6 +59,7 @@ public struct IncompatibleName: Identifiable, Equatable, Sendable {
                 result[item.relativePath]=IncompatibleName(rootID:rootID,rootPath:rootPath,relativePath:item.relativePath,objectKind:item.kind,side:side,reason:reason)
             }
         }
+        guard result.values.contains(where: \.isDirectory) else { return sortedRows(result) }
         for item in items {
             let parts=item.relativePath.split(separator:"/")
             if parts.count>1 {
@@ -68,7 +69,11 @@ public struct IncompatibleName: Identifiable, Equatable, Sendable {
                 }
             }
         }
-        return result.values.sorted{$0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending}
+        return sortedRows(result)
+    }
+
+    private static func sortedRows(_ rows: [String: IncompatibleName]) -> [IncompatibleName] {
+        rows.values.sorted { $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending }
     }
     /// The destination inventory is historical. It is never scanned on a UI timer.
     public static func destinationRows(report:ArchiveAuditReport,rootID:String,rootPath:String) -> [IncompatibleName] {
@@ -101,5 +106,46 @@ public struct IncompatibleName: Identifiable, Equatable, Sendable {
             guard kind == ((index < parts.count-1 || isDirectory) ? mode_t(S_IFDIR) : mode_t(S_IFREG)) else { throw MountedCopyError.unsafeFile }
         }
         return url
+    }
+}
+
+public struct NameScanSnapshot: Codable, Equatable, Sendable {
+    public let rootID: String
+    public let side: IncompatibleName.Side
+    public let rootPath: String
+    public let volume: VolumeFingerprint?
+    public let date: Date
+    public let rows: [IncompatibleName]
+
+    public init(rootID: String, side: IncompatibleName.Side, rootPath: String,
+                volume: VolumeFingerprint?, date: Date, rows: [IncompatibleName]) {
+        self.rootID = rootID
+        self.side = side
+        self.rootPath = rootPath
+        self.volume = volume
+        self.date = date
+        self.rows = rows
+    }
+
+    public static func scan(rootID: String, side: IncompatibleName.Side, root: URL,
+                            volume: VolumeFingerprint?, shouldContinue: () -> Bool) throws -> Self {
+        guard shouldContinue() else { throw SeedVerificationError.cancelled }
+        let path = root.standardizedFileURL
+        let resolved = path.resolvingSymlinksInPath()
+        guard side == .source || (path == resolved && volume?.isStrongIdentity == true) else {
+            throw MountedCopyError.invalidMapping
+        }
+        let binding = try DirectoryBinding.read(resolved)
+        if side == .destination {
+            guard binding.volume == volume else { throw MountedCopyError.volumeChanged }
+        } else {
+            guard !binding.volume.isNetworkVolume else { throw MountedCopyError.unsafeFile }
+        }
+        let items = try LocalScanner.scan(root: resolved, excludeManaged: true,
+            preferPOSIXMetadata: side == .destination, shouldContinue: shouldContinue)
+        let rows = IncompatibleName.collect(rootID: rootID, rootPath: resolved.path, side: side, items: items)
+        guard shouldContinue() else { throw SeedVerificationError.cancelled }
+        guard try DirectoryBinding.read(resolved) == binding else { throw MountedCopyError.volumeChanged }
+        return Self(rootID: rootID, side: side, rootPath: resolved.path, volume: volume, date: Date(), rows: rows)
     }
 }

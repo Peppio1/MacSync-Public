@@ -579,7 +579,9 @@ struct MacSyncConfigurationView: View {
         }
         .onReceive(Timer.publish(every:30,on:.main,in:.common).autoconnect()) { _ in
             runtime.refreshFolderHealth()
-            if !runtime.previewOnly && page == .names { copy.refreshIncompatibleNames(pairs:model.configuredPairs()) }
+        }
+        .onChange(of:runtime.folderConfigurationBusy) { busy in
+            if !busy && !runtime.previewOnly { copy.refreshIncompatibleNames(pairs: model.configuredPairs()) }
         }
         .onChange(of:page) { nextPage in
             if !runtime.previewOnly && nextPage == .names { copy.refreshIncompatibleNames(pairs:model.configuredPairs()) }
@@ -587,9 +589,6 @@ struct MacSyncConfigurationView: View {
         }
         .onReceive(Timer.publish(every:3,on:.main,in:.common).autoconnect()) { _ in
             if !runtime.previewOnly && page == .history { copy.refresh() }
-        }
-        .onChange(of:model.monitoring) { running in
-            if running && !runtime.previewOnly { copy.refreshIncompatibleNames(pairs:model.configuredPairs()) }
         }
         .onChange(of:copy.auditReport?.ended) { _ in
             if !runtime.previewOnly { copy.refreshIncompatibleNames(pairs:model.configuredPairs()) }
@@ -1290,7 +1289,7 @@ struct MacSyncConfigurationView: View {
             MacSyncPanel("Informazioni", icon: "info.circle", accent: false) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("MacSync · v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.18.7")").font(.subheadline.weight(.semibold))
+                        Text("MacSync · v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.18.8")").font(.subheadline.weight(.semibold))
                         Text("Registro SQLite locale").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()

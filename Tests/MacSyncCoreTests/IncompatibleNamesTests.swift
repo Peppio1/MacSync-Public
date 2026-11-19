@@ -36,6 +36,40 @@ final class IncompatibleNamesTests:XCTestCase {
         try FileManager.default.createSymbolicLink(at:leaf,withDestinationURL:root.appendingPathComponent("other"))
         XCTAssertThrowsError(try issue.revealURL(expectedRoot:root.path))
     }
+    func testDedicatedScanAndAuditShareRowsAndCacheSurvivesReopen() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .resolvingSymlinksInPath()
+        let source = base.appendingPathComponent("source")
+        let target = base.appendingPathComponent("target")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        try Data("source".utf8).write(to: source.appendingPathComponent("source "))
+        try Data("target".utf8).write(to: target.appendingPathComponent("target?"))
+        let database = base.appendingPathComponent("fixture.sqlite").path
+        _ = try LocalInventory(path: database).reconcile(rootID: "demo", root: source)
+        let journal = try ChangeJournal(path: database)
+        let mapping = try MountedFolderMapping(rootID: "demo", source: source, target: target)
+        if !mapping.targetVolume.isStrongIdentity { throw XCTSkip("Volume identity unavailable") }
+        let audit = try ArchiveAudit(journal: journal, mappings: [mapping]).run(mode: .quick)
+        let snapshots = try XCTUnwrap(audit.nameScans)
+        XCTAssertEqual(snapshots.count, 2)
+        for snapshot in snapshots {
+            let standalone = try NameScanSnapshot.scan(rootID: "demo", side: snapshot.side,
+                root: snapshot.side == .source ? source : target, volume: snapshot.volume,
+                shouldContinue: { true })
+            XCTAssertEqual(standalone.rows, snapshot.rows)
+            try journal.saveNameScan(snapshot)
+            XCTAssertEqual(try ChangeJournal(path: database).nameScan(rootID: "demo", side: snapshot.side), snapshot)
+        }
+        XCTAssertEqual(snapshots.flatMap(\.rows).map(\.relativePath), ["source ", "target?"])
+        try journal.invalidateNameScan(rootID: "demo", side: .destination)
+        XCTAssertNil(try journal.nameScan(rootID: "demo", side: .destination))
+        XCTAssertNotNil(try journal.nameScan(rootID: "demo", side: .source))
+        XCTAssertThrowsError(try NameScanSnapshot.scan(rootID: "demo", side: .destination,
+            root: target, volume: nil, shouldContinue: { true }))
+    }
+
     func testBlockedJobIsLoggedOnceAcrossRestartAndRemainsPending() throws {
         let base=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
         let src=base.appendingPathComponent("src"), dst=base.appendingPathComponent("dst")

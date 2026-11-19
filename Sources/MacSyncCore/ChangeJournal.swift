@@ -55,6 +55,7 @@ public final class ChangeJournal {
                     completed INTEGER NOT NULL DEFAULT 0
                 );
                 """)
+            try execute("CREATE TABLE IF NOT EXISTS name_scan_cache(root_id TEXT NOT NULL, side TEXT NOT NULL, snapshot TEXT NOT NULL, PRIMARY KEY(root_id, side));")
             try execute("CREATE TABLE IF NOT EXISTS publication_intents(job_id INTEGER PRIMARY KEY, root_id TEXT NOT NULL, relative_path TEXT NOT NULL);")
             try execute("CREATE TABLE IF NOT EXISTS upload_retry(scope TEXT NOT NULL, root_id TEXT NOT NULL, job_id INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at REAL NOT NULL, reason TEXT NOT NULL, PRIMARY KEY(scope,root_id,job_id));")
             try execute("CREATE TABLE IF NOT EXISTS transfer_recovery(job_id INTEGER PRIMARY KEY, root_id TEXT NOT NULL, relative_path TEXT NOT NULL, record TEXT NOT NULL);")
@@ -470,18 +471,57 @@ public final class ChangeJournal {
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseFailure() }
     }
 
+    public func nameScan(rootID: String, side: IncompatibleName.Side) throws -> NameScanSnapshot? {
+        let statement = try prepare("SELECT snapshot FROM name_scan_cache WHERE root_id=? AND side=?;")
+        defer { sqlite3_finalize(statement) }
+        try bind(rootID, at: 1, in: statement)
+        try bind(side.rawValue, at: 2, in: statement)
+        switch sqlite3_step(statement) {
+        case SQLITE_DONE: return nil
+        case SQLITE_ROW:
+            return try JSONDecoder().decode(NameScanSnapshot.self, from: Data(columnText(statement, at: 0).utf8))
+        default: throw databaseFailure()
+        }
+    }
+
+    public func invalidateNameScan(rootID: String, side: IncompatibleName.Side) throws {
+        let statement = try prepare("DELETE FROM name_scan_cache WHERE root_id=? AND side=?;")
+        defer { sqlite3_finalize(statement) }
+        try bind(rootID, at: 1, in: statement)
+        try bind(side.rawValue, at: 2, in: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseFailure() }
+    }
+
+    public func saveNameScan(_ snapshot: NameScanSnapshot) throws {
+        let value = String(decoding: try JSONEncoder().encode(snapshot), as: UTF8.self)
+        let statement = try prepare("INSERT OR REPLACE INTO name_scan_cache(root_id,side,snapshot) VALUES(?,?,?);")
+        defer { sqlite3_finalize(statement) }
+        try bind(snapshot.rootID, at: 1, in: statement)
+        try bind(snapshot.side.rawValue, at: 2, in: statement)
+        try bind(value, at: 3, in: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseFailure() }
+    }
+
     /// Read-only verification for local name maintenance. No destination
     /// probing, no enrollment of a replaced source.
     public func verifyLocalSourceBinding(rootID:String,root:URL) throws -> DirectoryBinding {
         guard try watchedRootPath(rootID:rootID)==root.path else { throw MountedCopyError.invalidMapping }
-        let stamp=try DirectoryBinding.read(root)
+        let stamp = try verifiedNameBinding(rootID: rootID, root: root, side: .source)
         guard !stamp.volume.isNetworkVolume else { throw MountedCopyError.unsafeFile }
-        let stmt=try prepare("SELECT stamp FROM directory_bindings WHERE root_id=? AND role='source';")
+        return stamp
+    }
+
+    func verifiedNameBinding(rootID: String, root: URL, side: IncompatibleName.Side) throws -> DirectoryBinding {
+        let stamp = try DirectoryBinding.read(root)
+        let stmt = try prepare("SELECT stamp FROM directory_bindings WHERE root_id=? AND role=?;")
         defer { sqlite3_finalize(stmt) }
         try bind(rootID,at:1,in:stmt)
+        try bind(side == .source ? "source" : "target", at: 2, in: stmt)
         guard sqlite3_step(stmt)==SQLITE_ROW,
               let data=columnText(stmt,at:0).data(using:.utf8),
-              try JSONDecoder().decode(DirectoryBinding.self,from:data)==stamp else { throw MountedCopyError.sourceRootChanged }
+              try JSONDecoder().decode(DirectoryBinding.self,from:data)==stamp else {
+            throw side == .source ? MountedCopyError.sourceRootChanged : MountedCopyError.volumeChanged
+        }
         return stamp
     }
 

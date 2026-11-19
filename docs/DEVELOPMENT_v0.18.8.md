@@ -2,7 +2,7 @@
 
 ## Punto di partenza
 
-Questo documento raccoglie le decisioni di progettazione e le proposte da verificare. La v0.18.8 è in progettazione. Base rilevata nel ramo `develop-v0.18.7`: [c7d28b3b877d69020fddd7b93ac85fa55d64e92d](https://github.com/Peppio1/MacSync-Public/commit/c7d28b3b877d69020fddd7b93ac85fa55d64e92d). Il ramo di documentazione parte da quel commit. Il precedente resoconto indicava CI v0.18.7 verde. Prima di usare il commit come baseline di rilascio, verificarne il run e gli artefatti in GitHub Actions.
+Questo documento raccoglie le decisioni di progettazione e le proposte da verificare. La v0.18.8 è un candidato di sviluppo da convalidare. Base rilevata nel ramo `develop-v0.18.7`: [c7d28b3b877d69020fddd7b93ac85fa55d64e92d](https://github.com/Peppio1/MacSync-Public/commit/c7d28b3b877d69020fddd7b93ac85fa55d64e92d). Il ramo di documentazione parte da quel commit. Il precedente resoconto indicava CI v0.18.7 verde. Prima di usare il commit come baseline di rilascio, verificarne il run e gli artefatti in GitHub Actions.
 
 - [Rclone diretto e limiti](DEVELOPMENT_v0.18.6.md)
 - [Registri e paginazione v0.18.7](DEVELOPMENT_v0.18.7.md)
@@ -45,3 +45,12 @@ Tracciare la latenza di navigazione, ricerca e richiesta di annullamento mentre 
 ## Ripresa da un altro account o PC
 
 Aprire il ramo `docs-v0.18.8-handoff` in MacSync-Public e partire da questo documento e dalle note v0.18.6/v0.18.7 collegate. La lettura del repository pubblico è accessibile da altri account. Per contribuire direttamente serve un account GitHub con permessi di scrittura. Per compilazione e test resta necessario macOS o un runner macOS. Nel repository usare percorsi, immagini, log, dataset e database sintetici. Escludere configurazioni operative, credenziali, chiavi private, indirizzi, percorsi, log e screenshot reali.
+
+
+## Prima integrazione
+
+- Ramo candidato: `develop-v0.18.8`. Base di rollback: `rollback-before-v0.18.8`. Un solo invio iniziale alla CI, con versione bundle 0.18.8/188.
+- La scansione dedicata è di sola lettura e conserva l'ultimo esito verificato di ciascun lato. La Verifica archivio riusa le proprie enumerazioni. SQLite memorizza uno snapshot indicizzato per coppia e lato, letto fuori dal thread dell'interfaccia. La lista usa rendering differito delle righe; una paginazione SQL per singola voce rimane da valutare con misure su archivi grandi.
+- La rettifica espande alle voci note con lo stesso percorso nella stessa coppia e chiede conferma del lotto. La destinazione deve avere un binding persistente verificato. Si usa una rinomina esclusiva sul volume attuale: il supporto effettivo di RENAME_EXCL su SMB va collaudato. Un esito incerto interrompe il lotto. Le copie automatiche e il mirror restano sospesi; dopo il riavvio dell'inventario, eseguire Verifica archivio prima di rimettere in marcia le copie.
+- La rettifica invalida la cache prima della mutazione e registra intento ed esito nel registro locale. Il recupero automatico delle rettifiche pregresse e la ripresa transazionale di un lotto interrotto restano da implementare. I due filesystem non costituiscono una transazione unica. Non eseguire il candidato su dati reali.
+- L'enumeratore dell'audit e il motore Rclone dei trasferimenti restano quelli della baseline. Promozione di lsjson e scelta del parallelismo restano subordinati al benchmark. Le prove macOS, il collaudo SMB e le misure della UI sono separati dai controlli sintattici eseguiti in Linux.

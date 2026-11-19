@@ -339,16 +339,16 @@ final class MacSyncRuntime: ObservableObject {
         }
     }
 
-    /// Explicitly confirmed source-only maintenance. Stop workers, drain all
+    /// Explicitly confirmed name maintenance. Stop workers, drain all
     /// pending mutations, then restart the local inventory. Automatic copies
     /// and mirror are left off until deliberate operator reauthorization.
     func rectifyNames(_ items:[IncompatibleName]) {
         guard !previewOnly,!items.isEmpty,!shuttingDown,!folderConfigurationBusy,!savingSchedule,
-              !copy.auditBusy,!copy.seedBusy,!copy.maintaining,!copy.rectifyingNames else { return }
-        let permitted=Set(copy.incompatibleNames.filter{$0.side == .source && NameRectification.proposedName($0.name) != nil}.map(\.id))
+              !copy.auditBusy,!copy.seedBusy,!copy.maintaining,!copy.rectifyingNames,!copy.namesBusy else { return }
+        let permitted=Set(copy.incompatibleNames.filter{ NameRectification.proposedName($0.name) != nil }.map(\.id))
         let approved=items.filter{permitted.contains($0.id)}
         guard !approved.isEmpty else { return }
-        let roots=Dictionary(uniqueKeysWithValues:model.configuredPairs().filter{!$0.path.isEmpty}.map{($0.id,$0.path)})
+        let pairs = model.configuredPairs()
         folderConfigurationBusy=true
         let token=SeedVerificationCancellation()
         folderEditCancellation=token
@@ -364,7 +364,7 @@ final class MacSyncRuntime: ObservableObject {
                     self.folderConfigurationBusy=false;self.folderEditCancellation=nil
                     self.finishShutdownIfReady();return
                 }
-                self.copy.rectifyNamesAfterDrain(items:approved,roots:roots,token:token) { [weak self] in
+                self.copy.rectifyNamesAfterDrain(items:approved,pairs:pairs,token:token) { [weak self] in
                     guard let self else { return }
                     self.folderConfigurationBusy=false;self.folderEditCancellation=nil
                     if !self.shuttingDown {
@@ -408,7 +408,7 @@ final class MacSyncRuntime: ObservableObject {
         stopCopiesForCurrentLaunch()
         auditRevision += 1
         auditTimer?.invalidate(); auditTimer = nil; nextAuditAt = nil
-        copy.cancelSeedVerification(); copy.cancelArchiveAudit(); copy.cancelMaintenance()
+        copy.cancelSeedVerification(); copy.cancelArchiveAudit(); copy.cancelMaintenance(); copy.cancelNameScan()
         model.stopMonitoring()
     }
 

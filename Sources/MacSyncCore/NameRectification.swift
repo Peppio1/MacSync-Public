@@ -26,12 +26,13 @@ public enum NameRectification {
         public var resolvedIDs:Set<String>=[]
     }
 
-    /// A batch belongs only to inventoried, configured, locally bound roots.
+    /// A batch belongs only to configured, previously bound roots.
     /// Preflight captures each object identity, rejects competing proposed
     /// names, and processes descendants before parents. A collision never
     /// results in an alternative spelling or a replacement.
     public static func execute(items:[IncompatibleName], roots:[String:String],
                                journal:ChangeJournal,log:SyncActivityLog,
+                               destinations: [String: MountedFolderMapping] = [:],
                                shouldContinue:()->Bool = {true}) throws -> Result {
         struct Move {
             let item:IncompatibleName
@@ -47,16 +48,26 @@ public enum NameRectification {
         func report(_ item:IncompatibleName,_ detail:String) throws {
             try log.record(level:.warning,rootID:item.rootID,action:"name_rectify_skipped",relativePath:SyncDiagnostic.clean(item.relativePath),message:detail)
         }
+        func verifiedRoot(_ item: IncompatibleName) throws -> (URL, DirectoryBinding) {
+            if item.side == .source {
+                guard let path = roots[item.rootID] else { throw MountedCopyError.invalidMapping }
+                let root = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+                return (root, try journal.verifyLocalSourceBinding(rootID: item.rootID, root: root))
+            }
+            guard let mapping = destinations[item.rootID], mapping.targetVolume.isStrongIdentity else {
+                throw MountedCopyError.invalidMapping
+            }
+            try mapping.verify()
+            return (mapping.target, try journal.verifiedNameBinding(rootID: item.rootID, root: mapping.target, side: .destination))
+        }
         for item in items {
             guard shouldContinue() else { result.cancelled=true;return result }
             guard seen.insert(item.id).inserted else { continue }
-            guard item.side == .source, let expected=roots[item.rootID],
-                  let name=proposedName(item.name) else {
+            guard let name=proposedName(item.name) else {
                 result.skipped+=1;try report(item,"Rettifica manuale necessaria o posizione non autorizzata");continue
             }
             do {
-                let root=URL(fileURLWithPath:expected).standardizedFileURL.resolvingSymlinksInPath()
-                let binding=try journal.verifyLocalSourceBinding(rootID:item.rootID,root:root)
+                let (root, binding) = try verifiedRoot(item)
                 let url=try item.revealURL(expectedRoot:root.path)
                 var value=stat()
                 guard url.path.withCString({lstat($0,&value)})==0 else { throw MountedCopyError.sourceMissing }
@@ -68,6 +79,13 @@ public enum NameRectification {
                 try report(item,SyncDiagnostic.describe(error))
             }
         }
+        // If a confirmed path occurs on two sides but one could not be
+        // verified, leave its counterpart untouched as well.
+        func pairedKey(_ row: IncompatibleName) -> String {
+            row.rootID + "\0" + row.relativePath
+        }
+        let paired = Dictionary(grouping: items, by: pairedKey)
+        let verified = Dictionary(grouping: moves, by: { pairedKey($0.item) })
         let counts=Dictionary(grouping:moves,by:\.collisionKey).mapValues{$0.count}
         moves.sort {
             let a=$0.item.relativePath.split(separator:"/").count,b=$1.item.relativePath.split(separator:"/").count
@@ -76,11 +94,19 @@ public enum NameRectification {
         }
         for move in moves {
             guard shouldContinue() else { result.cancelled=true;break }
+            let key = pairedKey(move.item)
+            if Set((paired[key] ?? []).map { $0.side.rawValue }).count > 1,
+               verified[key]?.count != 2 {
+                result.skipped += 1
+                try report(move.item, "Controparte non verificata; rettifica coordinata rinviata")
+                continue
+            }
             if counts[move.collisionKey,default:0]>1 {
                 result.skipped+=1;try report(move.item,"Conflitto fra nomi proposti; nessun elemento del gruppo modificato");continue
             }
             do {
-                guard try journal.verifyLocalSourceBinding(rootID:move.item.rootID,root:move.root)==move.binding,
+                let (root, binding) = try verifiedRoot(move.item)
+                guard root == move.root, binding == move.binding,
                       try move.item.revealURL(expectedRoot:move.root.path)==move.url else {
                     throw MountedCopyError.sourceRootChanged
                 }
@@ -103,10 +129,11 @@ public enum NameRectification {
                 }
                 // Journal the intended name before the mutation; the normal
                 // inventory restart reconciles even after an unexpected exit.
-                try log.record(level:.info,rootID:move.item.rootID,action:"name_rectify_start",relativePath:SyncDiagnostic.clean(move.item.relativePath),message:"Nuovo nome: "+move.new)
-                try parent.rectifyLocalName(move.item.name,as:move.new,matching:current,shouldContinue:shouldContinue)
+                try journal.invalidateNameScan(rootID: move.item.rootID, side: move.item.side)
+                try log.record(level:.info,rootID:move.item.rootID,action:"name_rectify_start",relativePath:SyncDiagnostic.clean(move.item.relativePath),message:move.item.side.label + " · Nuovo nome: " + move.new)
+                try parent.rectifyName(move.item.name,as:move.new,matching:current,shouldContinue:shouldContinue)
                 result.renamed+=1;result.resolvedIDs.insert(move.item.id)
-                try? log.record(level:.success,rootID:move.item.rootID,action:"name_rectified",relativePath:SyncDiagnostic.clean(move.item.relativePath),message:"Rettificato in: "+move.new)
+                try? log.record(level:.success,rootID:move.item.rootID,action:"name_rectified",relativePath:SyncDiagnostic.clean(move.item.relativePath),message:move.item.side.label + " · Rettificato in: " + move.new)
             } catch SeedVerificationError.cancelled {
                 result.cancelled=true;break
             } catch MountedCopyError.destinationConflict {
@@ -115,7 +142,7 @@ public enum NameRectification {
                 // Failure after the syscall can leave the outcome uncertain.
                 // Do not retry, rollback or rename another path automatically.
                 result.failed+=1;try report(move.item,SyncDiagnostic.describe(error))
-                if error as? MountedCopyError == .sourceRootChanged { break }
+                break
             }
         }
         return result

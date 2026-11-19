@@ -229,6 +229,7 @@ public struct ArchiveAuditReport: Codable, Equatable, Sendable {
     public var directoryListingCacheHits: Int? = nil
     public var directoryListingReads: Int? = nil
     public var displayCounts: AuditFindingCounts? = nil
+    public var nameScans: [NameScanSnapshot]? = nil
     public func count(_ kind: AuditFindingKind) -> Int {
         findings.lazy.filter { $0.kind == kind }.count
     }
@@ -288,6 +289,7 @@ public final class ArchiveAudit {
             let cacheBinding: String?
         }
         var pairs: [Pair] = []
+        var nameScans: [NameScanSnapshot] = []
         for mapping in mappings {
             state.phase = "Controllo coppia di cartelle"; state.currentPath = mapping.rootID; report(force:true)
             try check(); try mapping.verify()
@@ -340,6 +342,19 @@ public final class ArchiveAudit {
             let paths = Set(source.map(\.relativePath)).union(target.map(\.relativePath))
             let grouped = Dictionary(grouping:paths,by:Self.fold)
             let ambiguous = Set(grouped.filter { $0.value.count > 1 }.keys)
+            for side in IncompatibleName.Side.allCases {
+                try check()
+                let items = side == .source ? source : target
+                let root = side == .source ? mapping.source : mapping.target
+                let conflicts = Set(items.lazy.map(\.relativePath).filter {
+                    ambiguous.contains(Self.fold($0)) && !ancestorsHaveAlias($0, ambiguous)
+                })
+                nameScans.append(NameScanSnapshot(
+                    rootID: mapping.rootID, side: side, rootPath: root.path,
+                    volume: side == .destination ? mapping.targetVolume : nil,
+                    date: Date(), rows: IncompatibleName.collect(
+                        rootID: mapping.rootID, rootPath: root.path, side: side, items: items, conflicts: conflicts)))
+            }
             pairs.append(Pair(mapping:mapping,source:Dictionary(uniqueKeysWithValues:source.map{($0.relativePath,$0)}),
                 target:Dictionary(uniqueKeysWithValues:target.map{($0.relativePath,$0)}),ambiguous:ambiguous,
                 sourceStamp:sourceStamp,targetStamp:targetStamp,
@@ -546,7 +561,7 @@ public final class ArchiveAudit {
             seconds:ProcessInfo.processInfo.systemUptime-startTick,findings:findings,
             bytesRead:state.bytesRead,queuedRepairs:queued,repairRequested:repair,
             sourceMetrics:state.source,destinationMetrics:state.destination,
-            deletionCandidates:deletionCandidates,metadataMatches:metadataMatches,hashMatches:hashMatches,cachedHashMatches:cachedHashMatches,directoryListingCacheHits:listingHits,directoryListingReads:listingReads,displayCounts:state.counts)
+            deletionCandidates:deletionCandidates,metadataMatches:metadataMatches,hashMatches:hashMatches,cachedHashMatches:cachedHashMatches,directoryListingCacheHits:listingHits,directoryListingReads:listingReads,displayCounts:state.counts,nameScans:nameScans)
     }
 
     private func ancestorsHaveAlias(_ path:String,_ ambiguous:Set<String>) -> Bool {
