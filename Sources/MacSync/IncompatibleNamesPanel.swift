@@ -11,6 +11,20 @@ struct IncompatibleNamesPanel:View {
     @State private var search=""
     @State private var message=""
     @State private var revealing=false
+    @State private var selected=Set<String>()
+    @State private var confirmation:[IncompatibleName]=[]
+    @State private var showConfirmation=false
+    private var eligible:[IncompatibleName] {
+        copy.incompatibleNames.filter{$0.side == .source && NameRectification.proposedName($0.name) != nil}
+    }
+    private var chosen:[IncompatibleName] { eligible.filter{selected.contains($0.id)} }
+    private var canRectify:Bool {
+        !runtime.previewOnly && !runtime.folderConfigurationBusy && !runtime.shuttingDown &&
+        !copy.auditBusy && !copy.seedBusy && !copy.maintaining && !copy.rectifyingNames && !copy.namesBusy
+    }
+    private func selectable(_ item:IncompatibleName)->Bool {
+        item.side == .source && NameRectification.proposedName(item.name) != nil
+    }
     private var filtered:[IncompatibleName] {
         copy.incompatibleNames.filter { item in
             (side=="all" || item.side.rawValue==side) && item.isDirectory==directories &&
@@ -22,8 +36,11 @@ struct IncompatibleNamesPanel:View {
         MacSyncPanel("Nomi incompatibili",icon:"folder.badge.questionmark",fillHeight:true) {
             HStack {
                 VStack(alignment:.leading,spacing:3) {
-                    Text("Cartelle: \(copy.incompatibleNames.filter{$0.isDirectory}.count)  ·  File: \(copy.incompatibleNames.filter{!$0.isDirectory}.count)")
+                    Text("Sorgente: \(copy.sourceNameCount) · Destinazione: \(copy.incompatibleNames.count-copy.sourceNameCount)")
                         .font(.headline)
+                    Text("Cartelle: \(copy.incompatibleNames.filter{$0.isDirectory}.count) · File: \(copy.incompatibleNames.filter{!$0.isDirectory}.count) · Rettificabili: \(eligible.count)").font(.caption)
+                    Text("I nomi già corrispondenti possono essere incompatibili con nuove copie. Le due posizioni sono contate separatamente.")
+                        .font(.caption2).foregroundStyle(.secondary)
                     Text(copy.namesStatus).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -42,6 +59,19 @@ struct IncompatibleNamesPanel:View {
                 }.frame(width:190)
             }
             TextField("Cerca nome, percorso o motivo…",text:$search).textFieldStyle(.roundedBorder)
+            HStack {
+                Button("Seleziona tutto") { selected.formUnion(eligible.map(\.id)) }
+                    .help("Seleziona tutte le cartelle e tutti i file rettificabili della sorgente, anche nelle altre schede")
+                    .disabled(eligible.isEmpty || !canRectify)
+                Button("Seleziona visibili") { selected.formUnion(filtered.filter{selectable($0)}.map(\.id)) }
+                    .disabled(!canRectify || !filtered.contains(where:{selectable($0)}))
+                Button("Deseleziona") { selected.removeAll() }.disabled(chosen.isEmpty)
+                Spacer()
+                Button("Rettifica (\(chosen.count))") {
+                    confirmation=chosen;showConfirmation=true
+                }.buttonStyle(.borderedProminent).disabled(chosen.isEmpty || !canRectify)
+            }
+            if !copy.rectificationStatus.isEmpty { Text(copy.rectificationStatus).font(.caption).foregroundStyle(.secondary) }
             if copy.namesBusy { ProgressView().controlSize(.small) }
             if filtered.isEmpty {
                 Text("Nessun elemento nella selezione.").foregroundStyle(.secondary).frame(maxWidth:.infinity,minHeight:80)
@@ -50,10 +80,20 @@ struct IncompatibleNamesPanel:View {
                     LazyVStack(alignment:.leading,spacing:8) {
                         ForEach(filtered) { item in
                             HStack(alignment:.top,spacing:10) {
+                                Toggle("",isOn:Binding(get:{selected.contains(item.id)},set:{ value in
+                                    if value { selected.insert(item.id) } else { selected.remove(item.id) }
+                                })).toggleStyle(.checkbox).labelsHidden()
+                                    .accessibilityLabel("Seleziona "+item.displayName)
+                                    .disabled(!selectable(item) || !canRectify)
                                 Image(systemName:item.isDirectory ? "folder" : "doc").foregroundStyle(.orange)
                                 VStack(alignment:.leading,spacing:3) {
                                     Text(item.displayName).font(.subheadline.weight(.semibold))
                                     Text(item.side.label+" · "+item.reason).font(.caption).foregroundStyle(.secondary)
+                                    if item.side == .source,let name=NameRectification.proposedName(item.name) {
+                                        Text("Nuovo nome: "+name).foregroundStyle(.green).font(.caption)
+                                    } else if item.side == .source {
+                                        Text("Correzione manuale").font(.caption).foregroundStyle(.orange)
+                                    }
                                     Text(item.rootPath+"/"+item.relativePath).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                                     if item.affectedDescendants>0 {
                                         Text("\(item.affectedDescendants) elementi contenuti interessati").font(.caption)
@@ -67,8 +107,34 @@ struct IncompatibleNamesPanel:View {
                 }.frame(maxHeight:.infinity)
             }
             if !message.isEmpty { Text(message).font(.caption).foregroundStyle(.secondary) }
-            Label("Nessuna rinomina automatica. Correggi preferibilmente la sorgente; la lista destinazione si aggiorna dopo la prossima verifica archivio.",systemImage:"info.circle")
+            Label("Rettifica solo sull'iMac, dopo conferma. Nessuna sovrascrittura. La destinazione rimane storica fino alla prossima verifica.",systemImage:"info.circle")
                 .font(.caption).foregroundStyle(.secondary)
+        }
+        .onChange(of:copy.incompatibleNames.map(\.id)) { ids in selected.formIntersection(ids) }
+        .sheet(isPresented:$showConfirmation) {
+            VStack(alignment:.leading,spacing:12) {
+                Text("Conferma rettifica dei nomi").font(.title2.bold())
+                Text("\(confirmation.count) elementi selezionati. Le copie automatiche e le cancellazioni speculari verranno disattivate. Il monitor verrà riavviato al termine.")
+                    .fixedSize(horizontal:false,vertical:true)
+                Text("Spazi e punti finali rimossi, caratteri vietati sostituiti con -. Nomi riservati, conflitti e nomi già esistenti non saranno rettificati. Controlla il registro prima di riavviare la sincronizzazione.")
+                    .font(.callout).fixedSize(horizontal:false,vertical:true)
+                List(confirmation) { item in
+                    VStack(alignment:.leading,spacing:3) {
+                        Text(item.displayName+" → "+(NameRectification.proposedName(item.name) ?? "Correzione manuale")).font(.headline)
+                        Text(item.rootPath+"/"+item.relativePath).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                HStack {
+                    Spacer()
+                    Button("Annulla") { showConfirmation=false }
+                    Button("Conferma rettifica") {
+                        let items=confirmation
+                        showConfirmation=false
+                        selected.removeAll()
+                        runtime.rectifyNames(items)
+                    }.buttonStyle(.borderedProminent).disabled(!canRectify)
+                }
+            }.padding(20).frame(width:650,height:500)
         }
     }
     private func reveal(_ item:IncompatibleName) {

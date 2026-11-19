@@ -195,6 +195,35 @@ final class MountedCopyController: ObservableObject {
     @Published private(set) var incompatibleNames:[IncompatibleName]=[]
     @Published private(set) var namesStatus="Inventario non ancora consultato"
     @Published private(set) var namesBusy=false
+    @Published private(set) var rectificationStatus=""
+    @Published private(set) var rectifyingNames=false
+    var sourceNameCount:Int { incompatibleNames.filter{$0.side == .source}.count }
+
+    func rectifyNamesAfterDrain(items:[IncompatibleName],roots:[String:String],token:SeedVerificationCancellation,
+                                completion:@escaping @MainActor ()->Void) {
+        guard !previewOnly,!rectifyingNames else { completion();return }
+        rectifyingNames=true; rectificationStatus="Verifica e rettifica locale in corso…"
+        queue.async { [weak self] in
+            var status=""
+            var resolved=Set<String>()
+            do {
+                let db=try Self.databaseURL().path
+                let result=try NameRectification.execute(items:items,roots:roots,journal:ChangeJournal(path:db),log:SyncActivityLog(path:db),shouldContinue:{!token.isCancelled})
+                resolved=result.resolvedIDs
+                status="\(result.renamed) rettificati · \(result.skipped) da correggere manualmente · \(result.failed) non verificati"
+                if result.cancelled { status+=" · interrotto" }
+            } catch { status="Rettifica interrotta: "+SyncDiagnostic.describe(error)+"; controllare il registro" }
+            let finalStatus=status, completedIDs=resolved
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { completion();return }
+                self.incompatibleNames.removeAll{completedIDs.contains($0.id)}
+                self.rectificationStatus=finalStatus+" · Copie e cancellazioni sospese"
+                self.rectifyingNames=false
+                self.refresh()
+                completion()
+            }
+        }
+    }
     private var namesReportDate:Date?
     private var namesDestinationRows:[IncompatibleName]=[]
     private var namesSourceConflicts:[String:Set<String>]=[:]

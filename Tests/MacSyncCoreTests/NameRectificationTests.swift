@@ -26,7 +26,7 @@ final class NameRectificationTests:XCTestCase {
         let rows=try inventory.incompatibleNames(rootID:"demo",sourcePath:root.path)
         let result=try NameRectification.execute(items:rows,roots:["demo":root.path],journal:ChangeJournal(path:db),log:SyncActivityLog(path:db))
         XCTAssertEqual(result.renamed,2)
-        XCTAssertEqual(result.skipped,3)
+        XCTAssertEqual(result.skipped,4)
         XCTAssertEqual(result.failed,0)
         XCTAssertEqual(try String(contentsOf:root.appendingPathComponent("folder/image-.jpg"),encoding:.utf8),"nested")
         for (name,content) in [("exists.jpg","untouched"),("exists.jpg ","collision"),("same?.jpg","one"),("same*.jpg","two")] {

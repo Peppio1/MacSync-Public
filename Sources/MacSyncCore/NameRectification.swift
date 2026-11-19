@@ -45,7 +45,7 @@ public enum NameRectification {
         var result=Result(), moves:[Move]=[]
         var seen=Set<String>()
         func report(_ item:IncompatibleName,_ detail:String) throws {
-            try log.record(level:.warning,rootID:item.rootID,action:"name_rectify_skipped",relativePath:item.relativePath,message:detail)
+            try log.record(level:.warning,rootID:item.rootID,action:"name_rectify_skipped",relativePath:SyncDiagnostic.clean(item.relativePath),message:detail)
         }
         for item in items {
             guard shouldContinue() else { result.cancelled=true;return result }
@@ -103,10 +103,10 @@ public enum NameRectification {
                 }
                 // Journal the intended name before the mutation; the normal
                 // inventory restart reconciles even after an unexpected exit.
-                try log.record(level:.info,rootID:move.item.rootID,action:"name_rectify_start",relativePath:move.item.relativePath,message:"Nuovo nome: "+move.new)
+                try log.record(level:.info,rootID:move.item.rootID,action:"name_rectify_start",relativePath:SyncDiagnostic.clean(move.item.relativePath),message:"Nuovo nome: "+move.new)
                 try parent.rectifyLocalName(move.item.name,as:move.new,matching:current,shouldContinue:shouldContinue)
                 result.renamed+=1;result.resolvedIDs.insert(move.item.id)
-                try? log.record(level:.success,rootID:move.item.rootID,action:"name_rectified",relativePath:move.item.relativePath,message:"Rettificato in: "+move.new)
+                try? log.record(level:.success,rootID:move.item.rootID,action:"name_rectified",relativePath:SyncDiagnostic.clean(move.item.relativePath),message:"Rettificato in: "+move.new)
             } catch SeedVerificationError.cancelled {
                 result.cancelled=true;break
             } catch MountedCopyError.destinationConflict {

@@ -339,6 +339,45 @@ final class MacSyncRuntime: ObservableObject {
         }
     }
 
+    /// Explicitly confirmed source-only maintenance. Stop workers, drain all
+    /// pending mutations, then restart the local inventory. Automatic copies
+    /// and mirror are left off until deliberate operator reauthorization.
+    func rectifyNames(_ items:[IncompatibleName]) {
+        guard !previewOnly,!items.isEmpty,!shuttingDown,!folderConfigurationBusy,!savingSchedule,
+              !copy.auditBusy,!copy.seedBusy,!copy.maintaining,!copy.rectifyingNames else { return }
+        let permitted=Set(copy.incompatibleNames.filter{$0.side == .source && NameRectification.proposedName($0.name) != nil}.map(\.id))
+        let approved=items.filter{permitted.contains($0.id)}
+        guard !approved.isEmpty else { return }
+        let roots=Dictionary(uniqueKeysWithValues:model.configuredPairs().filter{!$0.path.isEmpty}.map{($0.id,$0.path)})
+        folderConfigurationBusy=true
+        let token=SeedVerificationCancellation()
+        folderEditCancellation=token
+        stopAllOperations()
+        copy.setAutomaticCopiesEnabled(false)
+        copy.revokeMirrorAuthorization()
+        copy.invalidateSeedReport()
+        copy.afterWorkerStopped { [weak self] in
+            guard let self else { return }
+            self.model.afterMonitorStopped { [weak self] in
+                guard let self else { return }
+                if self.shuttingDown || token.isCancelled {
+                    self.folderConfigurationBusy=false;self.folderEditCancellation=nil
+                    self.finishShutdownIfReady();return
+                }
+                self.copy.rectifyNamesAfterDrain(items:approved,roots:roots,token:token) { [weak self] in
+                    guard let self else { return }
+                    self.folderConfigurationBusy=false;self.folderEditCancellation=nil
+                    if !self.shuttingDown {
+                        self.model.startMonitoring()
+                        self.automaticStatus="Rettifica terminata: attendi l'inventario prima di riavviare le copie"
+                        self.scheduleArchiveAudit()
+                    }
+                    self.finishShutdownIfReady()
+                }
+            }
+        }
+    }
+
     func startManualSynchronization() {
         guard !previewOnly, !shuttingDown, !savingSchedule, !folderConfigurationBusy, !finalShutdownHolding, !copy.queueRebuildRequired,
               model.monitoring, model.safetyGate.isReady, !copy.active, !copy.maintaining,
