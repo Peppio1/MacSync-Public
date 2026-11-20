@@ -116,4 +116,51 @@ final class NameRectificationTests:XCTestCase {
         XCTAssertEqual(try log.technicalPage().first { $0.entry.action == "name_rectification_copy_avoided" }?.entry.bytes,
             Int64(content.count))
     }
+    func testPendingDestinationCollisionDoesNotBlockAnIndependentLocalRename() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .resolvingSymlinksInPath()
+        let source = base.appendingPathComponent("source"), target = base.appendingPathComponent("target")
+        let fm = FileManager.default
+        try fm.createDirectory(at: source, withIntermediateDirectories: true)
+        try fm.createDirectory(at: target, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+        let blocked = "a?.jpg", independent = "b?.jpg"
+        let data = Data([1])
+        for root in [source, target] { try data.write(to: root.appendingPathComponent(blocked)) }
+        try data.write(to: source.appendingPathComponent(independent))
+        let db = base.appendingPathComponent("fixture.sqlite").path
+        _ = try LocalInventory(path: db).reconcile(rootID: "demo", root: source)
+        let mapping = try MountedFolderMapping(rootID: "demo", source: source, target: target)
+        if !mapping.targetVolume.isStrongIdentity { throw XCTSkip("Volume identity unavailable") }
+        let journal = try ChangeJournal(path: db)
+        try journal.verifyDirectoryBindings([mapping], allowNewTarget: true)
+        let log = try SyncActivityLog(path: db)
+        let rows = [(IncompatibleName.Side.destination, target, blocked), (.source, source, blocked),
+                    (.source, source, independent)].map { side, root, name in
+            IncompatibleName(rootID: "demo", rootPath: root.path, relativePath: name,
+                objectKind: "file", side: side, reason: "Carattere incompatibile")
+        }
+        let collision = target.appendingPathComponent("a-.jpg")
+        let occupied = Data([2])
+        let first = try NameRectification.execute(items: rows, roots: ["demo": source.path],
+            journal: journal, log: log, destinations: ["demo": mapping], onProgress: { checked, _ in
+                if checked == 0 { XCTAssertNoThrow(try occupied.write(to: collision)) }
+            })
+        XCTAssertEqual(first.renamed, 1)
+        XCTAssertEqual(first.failed, 1)
+        XCTAssertNotNil(first.firstFailure)
+        XCTAssertTrue(try journal.hasPendingNameRectification())
+        XCTAssertEqual(try Data(contentsOf: collision), occupied)
+        XCTAssertEqual(try Data(contentsOf: source.appendingPathComponent(blocked)), data)
+        XCTAssertEqual(try Data(contentsOf: source.appendingPathComponent("b-.jpg")), data)
+
+        try fm.removeItem(at: collision)
+        let reopened = try ChangeJournal(path: db)
+        let resumed = try NameRectification.execute(items: [], roots: ["demo": source.path],
+            journal: reopened, log: log, destinations: ["demo": mapping])
+        XCTAssertEqual(resumed.renamed, 2)
+        XCTAssertFalse(try reopened.hasPendingNameRectification())
+        XCTAssertEqual(try Data(contentsOf: collision), data)
+    }
+
 }

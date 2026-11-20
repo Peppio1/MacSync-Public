@@ -498,7 +498,7 @@ public final class ChangeJournal {
         guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseFailure() }
     }
 
-    func advanceNameRectification(to offset: Int, finished: Bool, rootID: String?, path: String?) throws {
+    func advanceNameRectification(to offset: Int, finished: Bool, rootID: String?, path: String?, remainingPlan: Data?) throws {
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
             if let rootID, let path {
@@ -514,6 +514,8 @@ public final class ChangeJournal {
             }
             if finished {
                 try saveNameRectification(nil)
+            } else if let remainingPlan {
+                try saveNameRectification(remainingPlan)
             } else {
                 let update = try prepare("UPDATE name_rectification_batch SET next_move=? WHERE singleton=1;")
                 defer { sqlite3_finalize(update) }

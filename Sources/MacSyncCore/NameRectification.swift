@@ -22,6 +22,7 @@ public enum NameRectification {
         public var renamed=0
         public var skipped=0
         public var failed=0
+        public var firstFailure: String?
         public var cancelled=false
         public var resolvedIDs:Set<String>=[]
     }
@@ -82,6 +83,7 @@ public enum NameRectification {
     public static func execute(items: [IncompatibleName], roots: [String: String],
                                journal: ChangeJournal, log: SyncActivityLog,
                                destinations: [String: MountedFolderMapping] = [:],
+                               onProgress: (Int, Int) -> Void = { _, _ in },
                                shouldContinue: () -> Bool = { true }) throws -> Result {
         var result = Result()
         func report(_ item: IncompatibleName, action: String, level: SyncLogLevel, message: String) {
@@ -144,11 +146,22 @@ public enum NameRectification {
             if !moves.isEmpty { try journal.saveNameRectification(JSONEncoder().encode(moves)) }
         }
 
+        var deferred: [Move] = []
         let offset = resume?.offset ?? 0
         guard (0...moves.count).contains(offset) else { throw JournalError.database("Rettifica non leggibile") }
+        onProgress(offset, moves.count)
         for (index, move) in moves.enumerated().dropFirst(offset) {
             guard shouldContinue() else { result.cancelled = true; break }
+            defer { onProgress(index + 1, moves.count) }
             let item = move.item
+            if deferred.contains(where: { pending in
+                pending.item.rootID == item.rootID &&
+                    (pending.item.relativePath == item.relativePath ||
+                     pending.item.relativePath.hasPrefix(item.relativePath + "/"))
+            }) {
+                deferred.append(move)
+                continue
+            }
             do {
                 let (root, binding) = try verifiedRoot(item)
                 guard root.path == item.rootPath, binding == move.binding else { throw MountedCopyError.volumeChanged }
@@ -190,9 +203,13 @@ public enum NameRectification {
                     }
                 }
                 let path = move.parentPath.isEmpty ? move.newName : move.parentPath + "/" + move.newName
-                try journal.advanceNameRectification(to: index + 1, finished: index + 1 == moves.count,
+                // An unresolved move must keep its old path and its position
+                // ahead of any dependent rename when the batch is reopened.
+                let remaining = deferred.isEmpty ? nil
+                    : try JSONEncoder().encode(deferred + Array(moves.dropFirst(index + 1)))
+                try journal.advanceNameRectification(to: index + 1, finished: index + 1 == moves.count && deferred.isEmpty,
                     rootID: item.side == .destination ? item.rootID : nil,
-                    path: item.side == .destination ? path : nil)
+                    path: item.side == .destination ? path : nil, remainingPlan: remaining)
                 result.renamed += 1
                 result.resolvedIDs.insert(item.id)
                 let action = resume == nil ? "name_rectified_" : "name_rectification_resumed_"
@@ -202,8 +219,10 @@ public enum NameRectification {
                 break
             } catch {
                 result.failed += 1
-                report(item, action: "name_rectification_pending_" + item.side.rawValue, level: .warning, message: SyncDiagnostic.describe(error))
-                break
+                let reason = SyncDiagnostic.describe(error)
+                if result.firstFailure == nil { result.firstFailure = item.side.label + " · " + reason }
+                report(item, action: "name_rectification_pending_" + item.side.rawValue, level: .warning, message: reason)
+                deferred.append(move)
             }
         }
         return result

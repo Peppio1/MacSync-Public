@@ -86,7 +86,16 @@ struct IncompatibleNamesPanel:View {
                 }.buttonStyle(.borderedProminent)
                     .disabled(!canRectify || (runtime.rectificationPending ? copy.active : chosen.isEmpty))
             }
-            if !copy.rectificationStatus.isEmpty {
+            if runtime.preparingRectification {
+                ProgressView("Arresto delle attività prima della rettifica…")
+                    .progressViewStyle(.linear)
+            } else if let progress = copy.rectificationProgress {
+                ProgressView(value: Double(progress.checked), total: Double(progress.total)) {
+                    Text("Rettifica · \(progress.checked) di \(progress.total) voci esaminate")
+                }
+            } else if copy.rectifyingNames {
+                ProgressView(copy.rectificationStatus).progressViewStyle(.linear)
+            } else if !copy.rectificationStatus.isEmpty {
                 Text(copy.rectificationStatus).font(.caption).foregroundStyle(.secondary)
             } else if runtime.rectificationPending {
                 Text("Rettifica in sospeso. Riprendi il lotto quando le cartelle sono disponibili.")

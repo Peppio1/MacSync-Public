@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import SwiftUI
+import ServiceManagement
 import UserNotifications
 import MacSyncCore
 
@@ -52,6 +53,7 @@ final class MacSyncRuntime: ObservableObject {
     @Published private(set) var nextAuditAt: Date?
     private var auditRevision = 0
     @Published private(set) var rectificationPending = false
+    @Published private(set) var preparingRectification = false
     private var suspendedUntilNextLaunch = false
     private var configurationRevision = 0
     private var outages = ConnectionOutageTracker()
@@ -248,6 +250,39 @@ final class MacSyncRuntime: ObservableObject {
         }
     }
 
+    func resetApplicationData() {
+        guard !previewOnly, !shuttingDown, !preparingSignedUpdate, let storageGuard else { return }
+        let confirmation = NSAlert()
+        confirmation.alertStyle = .warning
+        confirmation.messageText = "Azzerare tutti i dati di MacSync?"
+        confirmation.informativeText = "Verranno eliminati configurazione, database, coda, registri e backup interni. I file nelle cartelle sincronizzate e le voci del Portachiavi restano intatti. MacSync si chiuderà e completerà il ripristino alla prossima apertura."
+        confirmation.addButton(withTitle: "Annulla")
+        confirmation.addButton(withTitle: "Azzera dati e chiudi")
+        guard confirmation.runModal() == .alertSecondButtonReturn else { return }
+        let paths = model.configuredPairs().flatMap { [$0.path, $0.destination] } +
+            [model.photoUploads, model.photoEditing, model.destinationUploads, model.destinationEditing]
+        requestShutdown { [weak self] in
+            guard let self else { return }
+            do {
+                let service = SMAppService.mainApp
+                if service.status == .enabled || service.status == .requiresApproval {
+                    try service.unregister()
+                }
+                try storageGuard.scheduleFactoryReset(configuredPaths: paths)
+            } catch {
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "Ripristino non avviato"
+                alert.informativeText = error.localizedDescription
+                alert.addButton(withTitle: "Chiudi MacSync")
+                alert.runModal()
+            }
+            self.automaticStatus = "MacSync in chiusura"
+            DispatchQueue.main.async { NSApplication.shared.terminate(nil) }
+        }
+        automaticStatus = "Chiusura delle attività per il ripristino…"
+    }
+
     func requestShutdown(_ completion: @escaping @MainActor () -> Void) {
         if shuttingDown {
             // A refused update termination leaves workers stopped; allow
@@ -374,6 +409,7 @@ final class MacSyncRuntime: ObservableObject {
     private func performNameRectification(_ approved: [IncompatibleName]) {
         let pairs = model.configuredPairs()
         folderConfigurationBusy=true
+        preparingRectification=true
         let token=SeedVerificationCancellation()
         folderEditCancellation=token
         stopAllOperations()
@@ -384,6 +420,7 @@ final class MacSyncRuntime: ObservableObject {
             guard let self else { return }
             self.model.afterMonitorStopped { [weak self] in
                 guard let self else { return }
+                self.preparingRectification=false
                 if self.shuttingDown || token.isCancelled {
                     self.folderConfigurationBusy=false;self.folderEditCancellation=nil
                     self.finishShutdownIfReady();return

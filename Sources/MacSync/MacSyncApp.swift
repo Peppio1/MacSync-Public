@@ -1287,6 +1287,16 @@ struct MacSyncConfigurationView: View {
             }
             SoftwareUpdatesPanel(updates: runtime.updates)
             DiagnosticReportPanel(copy: copy, previewOnly: runtime.previewOnly)
+            MacSyncPanel("Ripristino MacSync", icon: "arrow.counterclockwise", accent: false) {
+                HStack {
+                    Text("Azzera impostazioni, database, coda, registri e backup interni.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Azzera tutti i dati…") { runtime.resetApplicationData() }
+                        .buttonStyle(MacSyncStopStyle())
+                        .disabled(runtime.previewOnly || runtime.shuttingDown)
+                }
+            }
             MacSyncPanel("Informazioni", icon: "info.circle", accent: false) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {

@@ -204,6 +204,7 @@ final class MountedCopyController: ObservableObject {
     @Published private(set) var namesBusy=false
     @Published private(set) var nameScanStarted: Date?
     @Published private(set) var rectificationStatus=""
+    @Published private(set) var rectificationProgress: (checked: Int, total: Int)?
     @Published private(set) var rectifyingNames=false
     var sourceNameCount: Int { incompatibleNames.lazy.filter { $0.side == .source }.count }
     var scanningNames: Bool { namesCancellation != nil }
@@ -233,8 +234,14 @@ final class MountedCopyController: ObservableObject {
                 }
                 let log = try SyncActivityLog(path: db)
                 log.cycleID = UUID().uuidString
+                var lastProgress = -Double.infinity
                 let result=try NameRectification.execute(items:items,roots:roots,journal:journal,log:log,
-                    destinations:destinations,shouldContinue:{!token.isCancelled})
+                    destinations:destinations, onProgress: { checked, total in
+                        let now = ProcessInfo.processInfo.systemUptime
+                        guard total > 0, checked == total || now - lastProgress >= 0.15 else { return }
+                        lastProgress = now
+                        DispatchQueue.main.async { [weak self] in self?.rectificationProgress = (checked, total) }
+                    }, shouldContinue:{!token.isCancelled})
                 pending = try journal.hasPendingNameRectification()
                 try? log.record(level: pending ? .warning : .info, rootID: "app",
                     action: pending ? "name_rectification_waiting" : "name_rectification_finish",
@@ -242,6 +249,7 @@ final class MountedCopyController: ObservableObject {
                 resolved=result.resolvedIDs
                 status="\(result.renamed) rettificati · \(result.skipped) da correggere manualmente · \(result.failed) non verificati"
                 if result.cancelled { status+=" · interrotto" }
+                if let reason = result.firstFailure { status += "\n" + reason }
             } catch { status="Rettifica interrotta: "+SyncDiagnostic.describe(error)+"; controllare il registro" }
             let finalStatus=status, completedIDs=resolved, needsRetry=pending
             DispatchQueue.main.async { [weak self] in
@@ -249,6 +257,7 @@ final class MountedCopyController: ObservableObject {
                 self.incompatibleNames.removeAll{completedIDs.contains($0.id)}
                 self.rectificationStatus=finalStatus + (needsRetry ? " · Rettifica in attesa di verifica" : " · Copie e cancellazioni sospese")
                 self.rectifyingNames=false
+                self.rectificationProgress=nil
                 self.refresh()
                 completion(needsRetry)
             }

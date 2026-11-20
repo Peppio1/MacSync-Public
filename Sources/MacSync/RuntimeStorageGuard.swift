@@ -25,6 +25,10 @@ final class RuntimeStorageGuard {
             requested: requested, snapshot: snapshot, defaults: .standard)
     }
 
+    func scheduleFactoryReset(configuredPaths: [String]) throws {
+        try FactoryReset.schedule(in: folder, configuredPaths: configuredPaths)
+    }
+
     private static func inspectPendingUpdate(folder: URL, defaults: UserDefaults) throws -> UpdateRecoveryCoordinator.Pending? {
         guard let pending = try UpdateRecoveryCoordinator(root: folder).startup(application: Bundle.main.bundleURL,
                                                                                    defaults: defaults) else { return nil }
@@ -51,6 +55,14 @@ final class RuntimeStorageGuard {
             let lock = try ExclusiveArchiveLock(url:folder.appendingPathComponent("archive.lock"))
             let db = folder.appendingPathComponent("inventory.sqlite")
             let defaults = UserDefaults.standard
+            try FactoryReset.completeIfScheduled(in: folder) {
+                if let identifier = Bundle.main.bundleIdentifier {
+                    defaults.removePersistentDomain(forName: identifier)
+                }
+                let legacyKeys = defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix("MacSync.") }
+                for key in legacyKeys { defaults.removeObject(forKey: key) }
+                guard defaults.synchronize() else { throw CocoaError(.fileWriteUnknown) }
+            }
             let exists = FileManager.default.fileExists(atPath:db.path)
             let previousIdentity = defaults.string(forKey:"MacSync.databaseFileIdentity.v014")
             guard exists || previousIdentity == nil else { throw JournalError.database("Database operativo mancante: ripristinare una copia verificata") }
