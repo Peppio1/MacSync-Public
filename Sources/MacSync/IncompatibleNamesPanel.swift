@@ -81,7 +81,16 @@ struct IncompatibleNamesPanel:View {
                 }.buttonStyle(.borderedProminent).disabled(chosen.isEmpty || !canRectify)
             }
             if !copy.rectificationStatus.isEmpty { Text(copy.rectificationStatus).font(.caption).foregroundStyle(.secondary) }
-            if copy.namesBusy { ProgressView().controlSize(.small) }
+            if let started = copy.nameScanStarted {
+                HStack(spacing: 12) {
+                    ProgressView().progressViewStyle(.linear)
+                    Text(started, style: .timer)
+                        .monospacedDigit().font(.caption).foregroundStyle(.secondary)
+                        .accessibilityLabel("Tempo trascorso")
+                }
+            } else if copy.namesBusy {
+                ProgressView().controlSize(.small)
+            }
             if filtered.isEmpty {
                 Text("Nessun elemento nella selezione.").foregroundStyle(.secondary).frame(maxWidth:.infinity,minHeight:80)
             } else {

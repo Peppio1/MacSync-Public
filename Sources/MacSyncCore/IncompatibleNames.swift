@@ -40,9 +40,19 @@ public struct IncompatibleName: Identifiable, Equatable, Codable, Sendable {
     /// Report each offending leaf once, not every descendant of an invalid parent.
     /// Counts include nested objects; they are informational, not queue counts.
     public static func collect(rootID:String,rootPath:String,side:Side,items:[TrackedItem],conflicts:Set<String> = []) -> [IncompatibleName] {
+        (try? collect(rootID: rootID, rootPath: rootPath, side: side, items: items,
+            conflicts: conflicts, shouldContinue: { true })) ?? []
+    }
+
+    static func collect(rootID: String, rootPath: String, side: Side, items: [TrackedItem],
+                        conflicts: Set<String> = [], shouldContinue: () -> Bool) throws -> [IncompatibleName] {
+        func check() throws {
+            if !shouldContinue() { throw SeedVerificationError.cancelled }
+        }
         var result:[String:IncompatibleName]=[:]
         var byFold:[String:[TrackedItem]]=[:]
         for item in items where item.kind == "file" || item.kind == "directory" {
+            try check()
             let parts=item.relativePath.split(separator:"/",omittingEmptySubsequences:false)
             guard let leaf=parts.last else { continue }
             // Fold only the final component, not its ancestors: alias
@@ -53,6 +63,7 @@ public struct IncompatibleName: Identifiable, Equatable, Codable, Sendable {
         }
         for group in byFold.values {
             for item in group {
+                try check()
                 guard let leaf=item.relativePath.split(separator:"/").last.map(String.init) else { continue }
                 let conflict=group.count>1 || conflicts.contains(item.relativePath)
                 guard let reason=reason(forComponent:leaf) ?? (conflict ? "Conflitto fra nomi equivalenti in Windows" : nil) else { continue }
@@ -61,6 +72,7 @@ public struct IncompatibleName: Identifiable, Equatable, Codable, Sendable {
         }
         guard result.values.contains(where: \.isDirectory) else { return sortedRows(result) }
         for item in items {
+            try check()
             let parts=item.relativePath.split(separator:"/")
             if parts.count>1 {
                 for n in 1..<parts.count {
@@ -128,7 +140,8 @@ public struct NameScanSnapshot: Codable, Equatable, Sendable {
     }
 
     public static func scan(rootID: String, side: IncompatibleName.Side, root: URL,
-                            volume: VolumeFingerprint?, shouldContinue: () -> Bool) throws -> Self {
+                            volume: VolumeFingerprint?, shouldContinue: () -> Bool,
+                            onProgress: (Int, String) -> Void = { _, _ in }) throws -> Self {
         guard shouldContinue() else { throw SeedVerificationError.cancelled }
         let path = root.standardizedFileURL
         let resolved = path.resolvingSymlinksInPath()
@@ -141,9 +154,17 @@ public struct NameScanSnapshot: Codable, Equatable, Sendable {
         } else {
             guard !binding.volume.isNetworkVolume else { throw MountedCopyError.unsafeFile }
         }
+        var count = 0
         let items = try LocalScanner.scan(root: resolved, excludeManaged: true,
-            preferPOSIXMetadata: side == .destination, shouldContinue: shouldContinue)
-        let rows = IncompatibleName.collect(rootID: rootID, rootPath: resolved.path, side: side, items: items)
+            preferPOSIXMetadata: side == .destination, shouldContinue: shouldContinue,
+            onItem: { item in
+                count += 1
+                onProgress(count, item.relativePath)
+            })
+        onProgress(count, "")
+        let rows = try IncompatibleName.collect(
+            rootID: rootID, rootPath: resolved.path, side: side, items: items,
+            shouldContinue: shouldContinue)
         guard shouldContinue() else { throw SeedVerificationError.cancelled }
         guard try DirectoryBinding.read(resolved) == binding else { throw MountedCopyError.volumeChanged }
         return Self(rootID: rootID, side: side, rootPath: resolved.path, volume: volume, date: Date(), rows: rows)

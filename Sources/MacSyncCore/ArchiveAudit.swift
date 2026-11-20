@@ -328,13 +328,22 @@ public final class ArchiveAudit {
             let targetPrior = state.destination.scanSeconds
             scanStart = ProcessInfo.processInfo.systemUptime
             state.phase = "Analisi destinazione"; state.currentPath = mapping.rootID; report(force:true)
-            let target = try LocalScanner.scan(root:mapping.target,excludeManaged:true,
-                preferPOSIXMetadata:true,
-                shouldContinue:{ !cancellation.isCancelled },onVisit:{ relative in
-                    state.currentPath = mapping.rootID + " / " + relative; diagnosticSnapshot()
-                },onItem:{ item in
-                    state.destination.scanSeconds = targetPrior + ProcessInfo.processInfo.systemUptime-scanStart
-                    scanned(item)
+            enum ScanUpdate: Sendable { case visit(String), item(TrackedItem) }
+            let target = try InventoryReadLane.archive.read(
+                shouldContinue: { !cancellation.isCancelled }, onUpdate: { (updates: [ScanUpdate]) in
+                    for update in updates {
+                        switch update {
+                        case .visit(let path):
+                            state.currentPath = mapping.rootID + " / " + path
+                            diagnosticSnapshot()
+                        case .item(let item):
+                            state.destination.scanSeconds = targetPrior + ProcessInfo.processInfo.systemUptime - scanStart
+                            scanned(item)
+                        }
+                    }
+                }, work: { active, report in
+                    try LocalScanner.scan(root: mapping.target, excludeManaged: true, preferPOSIXMetadata: true,
+                        shouldContinue: active, onVisit: { report(.visit($0)) }, onItem: { report(.item($0)) })
                 })
             state.destination.scanSeconds = targetPrior + ProcessInfo.processInfo.systemUptime-scanStart
             try mapping.verify()
@@ -350,11 +359,14 @@ public final class ArchiveAudit {
                 let conflicts = Set(items.lazy.map(\.relativePath).filter {
                     ambiguous.contains(Self.fold($0)) && !self.ancestorsHaveAlias($0, ambiguous)
                 })
+                state.phase = "Controllo nomi incompatibili · " + side.label
+                report(force: true)
                 nameScans.append(NameScanSnapshot(
                     rootID: mapping.rootID, side: side, rootPath: root.path,
                     volume: side == .destination ? mapping.targetVolume : nil,
-                    date: Date(), rows: IncompatibleName.collect(
-                        rootID: mapping.rootID, rootPath: root.path, side: side, items: items, conflicts: conflicts)))
+                    date: Date(), rows: try IncompatibleName.collect(
+                        rootID: mapping.rootID, rootPath: root.path, side: side, items: items, conflicts: conflicts,
+                        shouldContinue: { !cancellation.isCancelled })))
             }
             pairs.append(Pair(mapping:mapping,source:Dictionary(uniqueKeysWithValues:source.map{($0.relativePath,$0)}),
                 target:Dictionary(uniqueKeysWithValues:target.map{($0.relativePath,$0)}),ambiguous:ambiguous,

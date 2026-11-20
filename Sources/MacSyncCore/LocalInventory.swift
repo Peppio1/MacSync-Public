@@ -210,8 +210,8 @@ public enum LocalScanner {
             if let enumerationError { throw enumerationError }
             throw JournalError.database("Cannot enumerate source directory")
         }
-        for case let file as URL in enumerator {
-            if enumerationError != nil { break }
+        while enumerationError == nil && shouldContinue() {
+            guard let file = enumerator.nextObject() as? URL else { break }
             visit(file)
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             if (excludeManaged && file.lastPathComponent.lowercased().hasPrefix(".macsync-")) ||
@@ -233,6 +233,7 @@ public enum LocalScanner {
                 break
             }
         }
+        guard shouldContinue() else { throw SeedVerificationError.cancelled }
         if let enumerationError {
             if let url = enumerationErrorURL { visit(url) }
             throw enumerationError

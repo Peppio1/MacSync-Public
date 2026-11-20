@@ -202,6 +202,7 @@ final class MountedCopyController: ObservableObject {
     @Published private(set) var incompatibleNames:[IncompatibleName]=[]
     @Published private(set) var namesStatus="Inventario non ancora consultato"
     @Published private(set) var namesBusy=false
+    @Published private(set) var nameScanStarted: Date?
     @Published private(set) var rectificationStatus=""
     @Published private(set) var rectifyingNames=false
     var sourceNameCount: Int { incompatibleNames.lazy.filter { $0.side == .source }.count }
@@ -272,28 +273,69 @@ final class MountedCopyController: ObservableObject {
         let cancellation = SeedVerificationCancellation()
         namesCancellation = scan ? cancellation : nil
         namesBusy = true
-        if scan { namesStatus = "Scansione dei nomi in corso…" }
+        if scan {
+            nameScanStarted = Date()
+            namesStatus = "Preparazione scansione dei nomi…"
+        }
+        let total = pairs.reduce(0) { $0 + ($1.path.isEmpty ? 0 : 1) + ($1.destination.isEmpty ? 0 : 1) }
         namesQueue.async { [weak self] in
+            var warnings: [String] = []
             var snapshots: [NameScanSnapshot] = []
             var unavailable = 0
             var examined = 0
             do {
-                let journal = try ChangeJournal(path: Self.databaseURL().path)
+                let db = try Self.databaseURL().path
+                let journal = try ChangeJournal(path: db)
+                let log = scan ? try? SyncActivityLog(path: db) : nil
+                log?.cycleID = UUID().uuidString
+                try? log?.record(level: .info, rootID: "app", action: "name_scan_start", message: "Scansione dei nomi avviata")
                 for pair in pairs {
                     for side in IncompatibleName.Side.allCases {
                         let value = side == .source ? pair.path : pair.destination
                         guard !value.isEmpty else { continue }
                         examined += 1
-                        let root = URL(fileURLWithPath: value).standardizedFileURL
+                        let root = URL(fileURLWithPath: value, isDirectory: true).standardizedFileURL
                         let volume = side == .destination ? pair.expected : nil
                         if scan && !cancellation.isCancelled {
+                            let phase = "\(side.label) · Posizione \(examined) di \(total)"
+                            let started = ProcessInfo.processInfo.systemUptime
+                            var lastPosted = started
+                            func show(_ status: String) {
+                                DispatchQueue.main.async { [weak self] in
+                                    guard let self, self.namesGeneration == generation, !cancellation.isCancelled else { return }
+                                    self.namesStatus = status
+                                }
+                            }
+                            show(phase + " · Apertura cartella…")
                             do {
-                                let snapshot = try NameScanSnapshot.scan(rootID: pair.id, side: side,
-                                    root: root, volume: volume, shouldContinue: { !cancellation.isCancelled })
+                                struct Update: Sendable { let count: Int; let path: String }
+                                let snapshot = try InventoryReadLane.names.read(
+                                    shouldContinue: { !cancellation.isCancelled },
+                                    onUpdate: { (updates: [Update]) in
+                                        guard let newest = updates.last else { return }
+                                        let now = ProcessInfo.processInfo.systemUptime
+                                        guard newest.path.isEmpty || now - lastPosted >= 0.8 else { return }
+                                        lastPosted = now
+                                        let detail = newest.path.isEmpty ? "Analisi dei nomi…" : newest.path
+                                        show(phase + " · \(newest.count) elementi letti · " + detail)
+                                    }, work: { active, report in
+                                        try NameScanSnapshot.scan(rootID: pair.id, side: side, root: root, volume: volume,
+                                            shouldContinue: active, onProgress: { report(Update(count: $0, path: $1)) })
+                                    })
+                                guard !cancellation.isCancelled else { throw SeedVerificationError.cancelled }
                                 try journal.saveNameScan(snapshot)
                                 snapshots.append(snapshot)
+                                try? log?.record(level: .success, rootID: pair.id, action: "name_scan_\(side.rawValue)_finish",
+                                    durationSeconds: ProcessInfo.processInfo.systemUptime - started,
+                                    message: "\(snapshot.rows.count) nomi incompatibili")
                                 continue
-                            } catch { unavailable += 1 }
+                            } catch {
+                                unavailable += 1
+                                let detail = (error as? InventoryReadLane.Failure)?.errorDescription ?? SyncDiagnostic.describe(error)
+                                if !cancellation.isCancelled { warnings.append(side.label + ": " + detail) }
+                                try? log?.record(level: .warning, rootID: pair.id, action: "name_scan_\(side.rawValue)_incomplete",
+                                    durationSeconds: ProcessInfo.processInfo.systemUptime - started, message: detail)
+                            }
                         }
                         if let previous = try? journal.nameScan(rootID: pair.id, side: side),
                            previous.rootPath == root.path, previous.volume == volume {
@@ -308,13 +350,17 @@ final class MountedCopyController: ObservableObject {
                 side.label + ": " + (dates[side]?.formatted(date: .abbreviated, time: .shortened) ?? "nessun esito")
             }.joined(separator: " · ")
             let incomplete = unavailable > 0 || snapshots.count < examined
+            let lastWarning = warnings.first
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.namesGeneration == generation else { return }
                 self.namesBusy = false
                 self.namesCancellation = nil
+                self.nameScanStarted = nil
                 self.incompatibleNames = rows
                 if cancellation.isCancelled {
                     self.namesStatus = "Scansione annullata · risultati completati o precedenti"
+                } else if let lastWarning {
+                    self.namesStatus = dateSummary + " · Esito parziale · " + lastWarning
                 } else if !dates.isEmpty {
                     self.namesStatus = dateSummary
                         + (incomplete ? " · Esito parziale, alcune posizioni non verificate" : "")
@@ -529,6 +575,8 @@ final class MountedCopyController: ObservableObject {
                 else if let block { cause="Verifica interrotta dal monitoraggio: " + block }
                 else if let seed=error as? SeedVerificationError, case .cancelled=seed, !cancel.mayCommit {
                     cause="Verifica interrotta: inventario non pronto durante l’accodamento; transazione annullata"
+                } else if let read = error as? InventoryReadLane.Failure {
+                    cause = "Verifica interrotta in destinazione: " + (read.errorDescription ?? "")
                 } else { cause="Verifica non riuscita: " + SyncDiagnostic.describe(error) }
                 let context=SyncDiagnostic.clean("ID \(auditID) — \(cause); fase: \(last.phase); ultimo elemento: \(last.currentPath.isEmpty ? "—" : last.currentPath); confrontati: \(last.compared)/\(last.total); byte letti: \(last.bytesRead)",limit:3000)
                 try? auditLog?.record(level:explicit ? .info : .error,rootID:currentRoot,action:"audit_error",bytes:max(0,last.bytesRead),durationSeconds:max(0,Date().timeIntervalSince(started)),message:context)
