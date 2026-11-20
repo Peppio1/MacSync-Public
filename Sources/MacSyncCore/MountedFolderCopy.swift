@@ -298,14 +298,8 @@ public final class MountedFolderCopyWorker {
             summary.disabled = true
             return summary
         }
-        guard try journal.queueRebuildToken() == nil, try !journal.hasPendingNameRectification() else { summary.interrupted=true; return summary }
-        rectificationScopes = try journal.nameRectificationScopes()
-        transferDiagnostics = [:]
-        defer {
-            for (action, seconds) in transferDiagnostics.sorted(by: { $0.key < $1.key }) {
-                try? log.record(level: .info, rootID: "app", action: action, durationSeconds: seconds, message: "Tempo cumulativo del ciclo")
-            }
-        }
+        guard try prepareCycle() else { summary.interrupted = true; return summary }
+        defer { flushTransferDiagnostics() }
         _ = try journal.retireExcludedJobs()
         var jobs = try journal.pendingUploads(limit: maxJobs, afterID: nextAfterID)
         if jobs.isEmpty && nextAfterID != 0 {
@@ -328,7 +322,8 @@ public final class MountedFolderCopyWorker {
             summary.disabled = true
             return summary
         }
-        guard try journal.queueRebuildToken() == nil else { summary.interrupted=true; return summary }
+        guard try prepareCycle() else { summary.interrupted = true; return summary }
+        defer { flushTransferDiagnostics() }
         _ = try journal.retireExcludedJobs()
         guard let pendingUpper = try journal.pendingUploadUpperBound() else { onPlan?(0); return summary }
         let upper = min(pendingUpper, throughID ?? Int64.max)
@@ -347,6 +342,21 @@ public final class MountedFolderCopyWorker {
         }
         summary.interrupted = true
         return summary
+    }
+
+    private func prepareCycle() throws -> Bool {
+        guard try journal.queueRebuildToken() == nil, try !journal.hasPendingNameRectification() else { return false }
+        rectificationScopes = try journal.nameRectificationScopes()
+        transferDiagnostics = [:]
+        return true
+    }
+
+    private func flushTransferDiagnostics() {
+        guard stageEngine.isDirect, log.cycleID != nil else { return }
+        for (action, seconds) in transferDiagnostics.sorted(by: { $0.key < $1.key }) {
+            try? log.record(level: .info, rootID: "app", action: action, durationSeconds: seconds,
+                message: "Tempo cumulativo del ciclo")
+        }
     }
 
     /// Serial batch processing; returns false if transfers should stop.
@@ -410,7 +420,7 @@ public final class MountedFolderCopyWorker {
                 let outcome = try transfer(job, mapping: mapping)
                 let acknowledgeStarted = ProcessInfo.processInfo.systemUptime
                 let acknowledged = try journal.acknowledgeUpload(job)
-                recordDuration("metric_queue_acknowledgment", since: acknowledgeStarted)
+                if stageEngine.isDirect { recordDuration("metric_queue_acknowledgment", since: acknowledgeStarted) }
                 guard acknowledged else {
                     // The published version may have been superseded while
                     // completing the job. Keep its backup for manual recovery.
