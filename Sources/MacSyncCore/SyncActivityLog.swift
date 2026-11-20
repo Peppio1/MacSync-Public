@@ -123,7 +123,8 @@ public final class SyncActivityLog {
     }
 
     public func technicalPage(limit:Int = 100, level:SyncLogLevel? = nil, search:String = "",
-                              beforeID:Int64? = nil, afterID:Int64? = nil) throws -> [TechnicalLogRow] {
+                              beforeID:Int64? = nil, afterID:Int64? = nil,
+                              since: Date? = nil) throws -> [TechnicalLogRow] {
         let check=try prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_activity_context_v2';")
         let rc=sqlite3_step(check)
         sqlite3_finalize(check)
@@ -132,6 +133,7 @@ public final class SyncActivityLog {
         var sql = "SELECT a.id,a.event_time,a.level,a.root_id,a.action,a.relative_path,a.bytes,a.duration_seconds,a.message,"
         sql += hasContext ? "c.cycle_id,c.job_id FROM sync_activity a LEFT JOIN sync_activity_context_v2 c ON c.activity_id=a.id" : "NULL,NULL FROM sync_activity a"
         sql += " WHERE a.id<? AND a.id>?"
+        if since != nil { sql += " AND a.event_time>=?" }
         if level != nil { sql += " AND a.level=?" }
         if !search.isEmpty {
             sql += " AND (instr(lower(a.relative_path),lower(?))>0 OR instr(lower(a.message),lower(?))>0 OR instr(lower(a.action),lower(?))>0 OR instr(lower(a.root_id),lower(?))>0"
@@ -144,6 +146,10 @@ public final class SyncActivityLog {
         guard sqlite3_bind_int64(query,1,beforeID ?? Int64.max)==SQLITE_OK,
               sqlite3_bind_int64(query,2,afterID ?? 0)==SQLITE_OK else { throw failure() }
         var index:Int32=3
+        if let since {
+            guard sqlite3_bind_double(query,index,since.timeIntervalSince1970)==SQLITE_OK else { throw failure() }
+            index += 1
+        }
         if let level { try bind(level.rawValue,index,query); index += 1 }
         if !search.isEmpty {
             for _ in 0..<(hasContext ? 6 : 4) { try bind(search,index,query); index += 1 }

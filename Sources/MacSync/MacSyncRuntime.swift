@@ -51,6 +51,8 @@ final class MacSyncRuntime: ObservableObject {
     private var auditTimer: Timer?
     @Published private(set) var nextAuditAt: Date?
     private var auditRevision = 0
+    private var rectificationRetry: Timer?
+    private var rectificationPending = false
     private var suspendedUntilNextLaunch = false
     private var configurationRevision = 0
     private var outages = ConnectionOutageTracker()
@@ -98,6 +100,14 @@ final class MacSyncRuntime: ObservableObject {
             self?.prepareSignedUpdate(release)
         }
         updates.start()
+        if let path = try? copy.historyPath() {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let pending = (try? ChangeJournal(path: path).hasPendingNameRectification()) == true
+                DispatchQueue.main.async { [weak self] in
+                    if pending { self?.scheduleRectificationResume() }
+                }
+            }
+        }
     }
 
     deinit { autoTimer?.invalidate(); auditTimer?.invalidate(); finalShutdownTimer?.invalidate() }
@@ -343,11 +353,33 @@ final class MacSyncRuntime: ObservableObject {
     /// pending mutations, then restart the local inventory. Automatic copies
     /// and mirror are left off until deliberate operator reauthorization.
     func rectifyNames(_ items:[IncompatibleName]) {
-        guard !previewOnly,!items.isEmpty,!shuttingDown,!folderConfigurationBusy,!savingSchedule,
+        guard !previewOnly,!rectificationPending,!items.isEmpty,!shuttingDown,!folderConfigurationBusy,!savingSchedule,
               !copy.auditBusy,!copy.seedBusy,!copy.maintaining,!copy.rectifyingNames,!copy.namesBusy else { return }
         let permitted=Set(copy.incompatibleNames.filter{ NameRectification.proposedName($0.name) != nil }.map(\.id))
         let approved=items.filter{permitted.contains($0.id)}
         guard !approved.isEmpty else { return }
+        performNameRectification(approved)
+    }
+
+    private func scheduleRectificationResume() {
+        rectificationPending = true
+        rectificationRetry?.invalidate()
+        guard !shuttingDown else { return }
+        rectificationRetry = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, !self.shuttingDown else { return }
+                guard !self.folderConfigurationBusy, !self.savingSchedule, !self.copy.active,
+                      !self.copy.maintaining, !self.copy.auditBusy, !self.copy.namesBusy, !self.copy.seedBusy,
+                      !self.preparingSignedUpdate, !self.finalShutdownHolding else {
+                    self.scheduleRectificationResume()
+                    return
+                }
+                self.performNameRectification([])
+            }
+        }
+    }
+
+    private func performNameRectification(_ approved: [IncompatibleName]) {
         let pairs = model.configuredPairs()
         folderConfigurationBusy=true
         let token=SeedVerificationCancellation()
@@ -364,12 +396,14 @@ final class MacSyncRuntime: ObservableObject {
                     self.folderConfigurationBusy=false;self.folderEditCancellation=nil
                     self.finishShutdownIfReady();return
                 }
-                self.copy.rectifyNamesAfterDrain(items:approved,pairs:pairs,token:token) { [weak self] in
+                self.copy.rectifyNamesAfterDrain(items:approved,pairs:pairs,token:token) { [weak self] pending in
                     guard let self else { return }
                     self.folderConfigurationBusy=false;self.folderEditCancellation=nil
+                    self.rectificationPending = pending
                     if !self.shuttingDown {
                         self.model.startMonitoring()
-                        self.automaticStatus="Rettifica terminata: attendi l'inventario prima di riavviare le copie"
+                        if pending { self.scheduleRectificationResume() }
+                        self.automaticStatus = pending ? "Rettifica in attesa: verifica automatica programmata" : "Rettifica terminata: attendi l'inventario prima di riavviare le copie"
                         self.scheduleArchiveAudit()
                     }
                     self.finishShutdownIfReady()
@@ -380,7 +414,7 @@ final class MacSyncRuntime: ObservableObject {
 
     func startManualSynchronization() {
         guard !previewOnly, !shuttingDown, !savingSchedule, !folderConfigurationBusy, !finalShutdownHolding, !copy.queueRebuildRequired,
-              model.monitoring, model.safetyGate.isReady, !copy.active, !copy.maintaining,
+              !rectificationPending, model.monitoring, model.safetyGate.isReady, !copy.active, !copy.maintaining,
               !copy.seedBusy, !copy.seedReady, !copy.interruptionRequested else {
             guard !previewOnly else { return }
             copy.status = copy.queueRebuildRequired ? "Sincronizzazione non avviata: verifica archivio richiesta o coda non leggibile" : !model.monitoring || !model.safetyGate.isReady ? "Sincronizzazione non avviata: monitoraggio o inventario non pronto" : "Sincronizzazione non avviata: operazione già in corso o blocco di sicurezza"
@@ -772,7 +806,7 @@ final class MacSyncRuntime: ObservableObject {
         autoTimer = nil
         nextAutomaticAttempt = nil
         guard !shuttingDown, !savingSchedule, !folderConfigurationBusy, !suspendedUntilNextLaunch, !finalShutdownHolding,
-              copy.automaticCopiesEnabled, !copy.queueRebuildRequired,
+              !rectificationPending, copy.automaticCopiesEnabled, !copy.queueRebuildRequired,
               !copy.active, !copy.maintaining, !copy.auditBusy, !copy.interruptionRequested, copy.liveProgress == nil else { return }
         let schedule = settings.schedule
         let now = Date()

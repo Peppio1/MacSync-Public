@@ -55,6 +55,8 @@ public final class ChangeJournal {
                     completed INTEGER NOT NULL DEFAULT 0
                 );
                 """)
+            try execute("CREATE TABLE IF NOT EXISTS name_rectification_batch(singleton INTEGER PRIMARY KEY CHECK(singleton=1), plan TEXT NOT NULL, next_move INTEGER NOT NULL DEFAULT 0);")
+            try execute("CREATE TABLE IF NOT EXISTS name_rectification_scopes(root_id TEXT NOT NULL, path TEXT NOT NULL, expires REAL NOT NULL, PRIMARY KEY(root_id,path));")
             try execute("CREATE TABLE IF NOT EXISTS name_scan_cache(root_id TEXT NOT NULL, side TEXT NOT NULL, snapshot TEXT NOT NULL, PRIMARY KEY(root_id, side));")
             try execute("CREATE TABLE IF NOT EXISTS publication_intents(job_id INTEGER PRIMARY KEY, root_id TEXT NOT NULL, relative_path TEXT NOT NULL);")
             try execute("CREATE TABLE IF NOT EXISTS upload_retry(scope TEXT NOT NULL, root_id TEXT NOT NULL, job_id INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at REAL NOT NULL, reason TEXT NOT NULL, PRIMARY KEY(scope,root_id,job_id));")
@@ -469,6 +471,76 @@ public final class ChangeJournal {
         guard sqlite3_bind_int64(stmt,1,job.id) == SQLITE_OK else { throw databaseFailure() }
         try bind(job.rootID,at:2,in:stmt); try bind(job.relativePath,at:3,in:stmt)
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseFailure() }
+    }
+
+    func pendingNameRectification() throws -> (data: Data, offset: Int)? {
+        let statement = try prepare("SELECT plan,next_move FROM name_rectification_batch WHERE singleton=1;")
+        defer { sqlite3_finalize(statement) }
+        switch sqlite3_step(statement) {
+        case SQLITE_ROW: return (Data(columnText(statement, at: 0).utf8), Int(sqlite3_column_int64(statement, 1)))
+        case SQLITE_DONE: return nil
+        default: throw databaseFailure()
+        }
+    }
+
+    public func hasPendingNameRectification() throws -> Bool {
+        try pendingNameRectification() != nil
+    }
+
+    func saveNameRectification(_ data: Data?) throws {
+        guard let data else {
+            try execute("DELETE FROM name_rectification_batch WHERE singleton=1;")
+            return
+        }
+        let statement = try prepare("INSERT OR REPLACE INTO name_rectification_batch(singleton,plan) VALUES(1,?);")
+        defer { sqlite3_finalize(statement) }
+        try bind(String(decoding: data, as: UTF8.self), at: 1, in: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseFailure() }
+    }
+
+    func advanceNameRectification(to offset: Int, finished: Bool, rootID: String?, path: String?) throws {
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            if let rootID, let path {
+                try execute("DELETE FROM name_rectification_scopes WHERE expires<=CAST(strftime('%s','now') AS INTEGER);")
+                let add = try prepare("""
+                    INSERT OR REPLACE INTO name_rectification_scopes(root_id,path,expires)
+                    VALUES(?,?,strftime('%s','now')+604800);
+                    """)
+                defer { sqlite3_finalize(add) }
+                try bind(rootID, at: 1, in: add)
+                try bind(path, at: 2, in: add)
+                guard sqlite3_step(add) == SQLITE_DONE else { throw databaseFailure() }
+            }
+            if finished {
+                try saveNameRectification(nil)
+            } else {
+                let update = try prepare("UPDATE name_rectification_batch SET next_move=? WHERE singleton=1;")
+                defer { sqlite3_finalize(update) }
+                guard sqlite3_bind_int64(update, 1, Int64(offset)) == SQLITE_OK,
+                      sqlite3_step(update) == SQLITE_DONE else { throw databaseFailure() }
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    func nameRectificationScopes() throws -> [String: [String]] {
+        let query = try prepare("""
+            SELECT root_id,path FROM name_rectification_scopes
+            WHERE expires>CAST(strftime('%s','now') AS INTEGER);
+            """)
+        defer { sqlite3_finalize(query) }
+        var scopes: [String: [String]] = [:]
+        while true {
+            switch sqlite3_step(query) {
+            case SQLITE_DONE: return scopes
+            case SQLITE_ROW: scopes[columnText(query, at: 0), default: []].append(columnText(query, at: 1))
+            default: throw databaseFailure()
+            }
+        }
     }
 
     public func nameScan(rootID: String, side: IncompatibleName.Side) throws -> NameScanSnapshot? {

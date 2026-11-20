@@ -19,6 +19,7 @@ struct TechnicalLogSheet: View {
     @State private var more=false
     @State private var expanded=Set<String>()
     @State private var request=UUID()
+    @State private var complete = false
     private let ticker=Timer.publish(every:5,on:.main,in:.common).autoconnect()
     private let pageSize=100
     private let displayLimit=5000
@@ -51,9 +52,11 @@ struct TechnicalLogSheet: View {
     var body: some View {
         VStack(alignment:.leading,spacing:12) {
             HStack {
-                Text("Registro tecnico").font(.title2.bold())
+                Text(complete ? "Log Completo" : "Registro tecnico").font(.title2.bold())
                 Spacer()
-                Button("Chiudi") { dismiss() }
+                Button(complete ? "Torna al registro" : "Chiudi") {
+                    if complete { switchView(complete: false) } else { dismiss() }
+                }
             }
             HStack {
                 TextField("Cerca file, azione, errore o ID",text:$filter).onSubmit { reset() }
@@ -65,9 +68,9 @@ struct TechnicalLogSheet: View {
                     Text("Successi").tag("success")
                     Text("Info").tag("info")
                 }.frame(width:180)
-                Button("Aggiorna") { refresh() }.disabled(loading)
             }
-            HStack {
+            if !complete {
+                HStack {
                 Picker("Dettaglio",selection:$verbosity) {
                     Text("Normale").tag("normal")
                     Text("Dettagliato").tag("detailed")
@@ -75,6 +78,7 @@ struct TechnicalLogSheet: View {
                 }.frame(width:260)
                 Spacer()
                 Text("Si applica alle prossime operazioni Rclone").font(.caption).foregroundStyle(.secondary)
+                }
             }
             HStack {
                 Text("\(rows.count) eventi caricati").font(.caption).foregroundStyle(.secondary)
@@ -85,6 +89,9 @@ struct TechnicalLogSheet: View {
             ScrollView {
                 LazyVStack(alignment:.leading,spacing:10) {
                     if rows.isEmpty && !loading { Text("Nessun evento disponibile").foregroundStyle(.secondary).padding(10) }
+                    if complete {
+                        ForEach(rows) { row in eventRow(row) }
+                    } else {
                     ForEach(groups) { group in
                         DisclosureGroup(isExpanded:Binding(
                             get:{expanded.contains(group.id)},
@@ -102,7 +109,8 @@ struct TechnicalLogSheet: View {
                             }
                         }.padding(10).background(Color.secondary.opacity(0.06),in:RoundedRectangle(cornerRadius:8))
                     }
-                    if more && rows.count<displayLimit {
+                    }
+                    if more && (complete || rows.count<displayLimit) {
                         Button("Carica altri 100 eventi") { load(.older) }.disabled(loading).frame(maxWidth:.infinity)
                     }
                 }.padding(8)
@@ -117,14 +125,11 @@ struct TechnicalLogSheet: View {
                     NSPasteboard.general.clearContents(); NSPasteboard.general.setString(fallback,forType:.string)
                 }.disabled(fallback.isEmpty)
             }
-            Text("Caricamento a pagine. Le esportazioni possono contenere nomi di file: controllali prima di condividerle.").font(.caption).foregroundStyle(.secondary)
-            HStack {
-                Spacer()
-                Button("Copia eventi caricati") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(TechnicalLogRow.tsv(rows),forType:.string)
-                }.disabled(rows.isEmpty)
-                Button("Esporta fino a 5.000 eventi…") { export() }.disabled(loading)
+            if !complete {
+                HStack {
+                    Spacer()
+                    Button("Log Completo") { switchView(complete: true) }
+                }
             }
         }.padding(20).frame(minWidth:850,minHeight:580)
         .onAppear {
@@ -134,7 +139,7 @@ struct TechnicalLogSheet: View {
             } else { reset() }
         }
         .onChange(of:level) { _ in if fixtureRows==nil { reset() } }
-        .onReceive(ticker) { _ in if fixtureRows==nil && !loading { refresh() } }
+        .onReceive(ticker) { _ in if fixtureRows==nil && !loading && !complete { refresh() } }
     }
     private func eventRow(_ row:TechnicalLogRow) -> some View {
         let e=row.entry
@@ -151,10 +156,10 @@ struct TechnicalLogSheet: View {
         } label: {
             HStack(alignment:.top,spacing:8) {
                 Image(systemName:symbol(e.level)).foregroundStyle(color(e.level)).frame(width:18)
-                Text(Self.clock.string(from:e.timestamp)).font(.system(size:11,design:.monospaced)).foregroundStyle(.secondary)
+                Text(complete ? e.timestamp.formatted(date: .numeric, time: .standard) : Self.clock.string(from:e.timestamp)).font(.system(size:11,design:.monospaced)).foregroundStyle(.secondary)
                 Text(row.component).font(.caption.bold()).frame(width:75,alignment:.leading)
                 VStack(alignment:.leading,spacing:2) {
-                    Text(e.message).font(.callout).lineLimit(2)
+                    Text(e.message).font(.callout).lineLimit(complete ? nil : 2)
                     if !e.relativePath.isEmpty { Text(e.relativePath).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
                 }
                 Spacer(minLength:0)
@@ -162,7 +167,14 @@ struct TechnicalLogSheet: View {
         }.padding(.vertical,3)
     }
     private enum LoadMode: Equatable { case first, older, newer }
+    private func switchView(complete: Bool) {
+        self.complete = complete
+        filter = ""
+        if level != "all" { level = "all" }
+        reset()
+    }
     private func reset() {
+        guard fixtureRows == nil else { return }
         appliedFilter=filter
         rows=[]; more=false; expanded=[]
         load(.first)
@@ -177,6 +189,8 @@ struct TechnicalLogSheet: View {
             let before=mode == .older ? rows.last?.id : nil
             let after=mode == .newer ? rows.first?.id : nil
             let count=pageSize
+            let complete = self.complete
+            let started = ProcessInfo.processInfo.systemUptime
             DispatchQueue.global(qos:.utility).async {
                 let diagnostics=TechnicalFallbackLog.recent(databasePath:path)
                 do {
@@ -188,13 +202,20 @@ struct TechnicalLogSheet: View {
                         let batch=Array(page.prefix(count))
                         switch mode {
                         case .first: rows=batch; more=page.count>count
-                        case .older: rows=Array((rows+batch).prefix(displayLimit)); more=page.count>count
+                        case .older:
+                            if complete { rows.append(contentsOf: batch) }
+                            else { rows=Array((rows+batch).prefix(displayLimit)) }
+                            more=page.count>count
                         case .newer:
                             if page.count>count { rows=batch; more=true }
                             else { rows=Array((batch+rows).prefix(displayLimit)) }
                         }
                         if mode == .first, let first=rows.first { expanded.insert(first.cycleID ?? "legacy") }
                         status="Registro aggiornato"; loading=false
+                        if mode == .first && complete {
+                            MountedCopyController.recordDiagnosticDuration("metric_full_log_open",
+                                seconds: ProcessInfo.processInfo.systemUptime - started)
+                        }
                     }
                 } catch {
                     let detail=SyncDiagnostic.describe(error)
@@ -205,22 +226,5 @@ struct TechnicalLogSheet: View {
                 }
             }
         } catch { status=SyncDiagnostic.describe(error); loading=false }
-    }
-    private func export() {
-        guard fixtureRows==nil else { return }
-        guard let path=try? copy.historyPath() else { return }
-        let panel=NSSavePanel(); panel.nameFieldStringValue="MacSync-log-tecnico.tsv"
-        guard panel.runModal() == .OK, let url=panel.url else { return }
-        let selected=SyncLogLevel(rawValue:level), query=appliedFilter
-        DispatchQueue.global(qos:.utility).async {
-            do {
-                let content=try SyncActivityLog(path:path,readOnly:true).technicalPage(limit:5000,level:selected,search:query)
-                try TechnicalLogRow.tsv(content).write(to:url,atomically:true,encoding:.utf8)
-                DispatchQueue.main.async { status="Registro esportato" }
-            } catch {
-                let detail=SyncDiagnostic.describe(error)
-                DispatchQueue.main.async { status="Esportazione fallita: "+detail }
-            }
-        }
     }
 }

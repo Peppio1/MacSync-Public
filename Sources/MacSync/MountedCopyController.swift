@@ -210,17 +210,19 @@ final class MountedCopyController: ObservableObject {
     func rectifyNamesAfterDrain(items:[IncompatibleName],
                                 pairs:[(id:String,path:String,destination:String,expected:VolumeFingerprint?)],
                                 token:SeedVerificationCancellation,
-                                completion:@escaping @MainActor ()->Void) {
-        guard !previewOnly,!rectifyingNames else { completion();return }
+                                completion:@escaping @MainActor (Bool)->Void) {
+        guard !previewOnly,!rectifyingNames else { completion(false);return }
         rectifyingNames=true; rectificationStatus="Verifica e rettifica dei nomi in corso…"
         queue.async { [weak self] in
             var status=""
             var resolved=Set<String>()
+            var pending = true
+            let started = ProcessInfo.processInfo.systemUptime
             do {
                 let db=try Self.databaseURL().path
                 let journal = try ChangeJournal(path: db)
                 let roots = Dictionary(uniqueKeysWithValues: pairs.filter { !$0.path.isEmpty }.map { ($0.id, $0.path) })
-                let requested = Set(items.filter { $0.side == .destination }.map(\.rootID))
+                let requested = items.isEmpty ? Set(pairs.map(\.id)) : Set(items.filter { $0.side == .destination }.map(\.rootID))
                 var destinations: [String: MountedFolderMapping] = [:]
                 for pair in pairs where requested.contains(pair.id) {
                     guard !pair.path.isEmpty, !pair.destination.isEmpty, let expected = pair.expected else { continue }
@@ -228,20 +230,26 @@ final class MountedCopyController: ObservableObject {
                         rootID: pair.id, source: URL(fileURLWithPath: pair.path),
                         target: URL(fileURLWithPath: pair.destination), expectedTargetVolume: expected)
                 }
-                let result=try NameRectification.execute(items:items,roots:roots,journal:journal,log:SyncActivityLog(path:db),
+                let log = try SyncActivityLog(path: db)
+                log.cycleID = UUID().uuidString
+                let result=try NameRectification.execute(items:items,roots:roots,journal:journal,log:log,
                     destinations:destinations,shouldContinue:{!token.isCancelled})
+                pending = try journal.hasPendingNameRectification()
+                try? log.record(level: pending ? .warning : .info, rootID: "app",
+                    action: pending ? "name_rectification_waiting" : "name_rectification_finish",
+                    durationSeconds: ProcessInfo.processInfo.systemUptime - started, message: "Esito del lotto")
                 resolved=result.resolvedIDs
                 status="\(result.renamed) rettificati · \(result.skipped) da correggere manualmente · \(result.failed) non verificati"
                 if result.cancelled { status+=" · interrotto" }
             } catch { status="Rettifica interrotta: "+SyncDiagnostic.describe(error)+"; controllare il registro" }
-            let finalStatus=status, completedIDs=resolved
+            let finalStatus=status, completedIDs=resolved, needsRetry=pending
             DispatchQueue.main.async { [weak self] in
-                guard let self else { completion();return }
+                guard let self else { completion(needsRetry);return }
                 self.incompatibleNames.removeAll{completedIDs.contains($0.id)}
-                self.rectificationStatus=finalStatus+" · Copie e cancellazioni sospese"
+                self.rectificationStatus=finalStatus + (needsRetry ? " · Rettifica in attesa di verifica" : " · Copie e cancellazioni sospese")
                 self.rectifyingNames=false
                 self.refresh()
-                completion()
+                completion(needsRetry)
             }
         }
     }
@@ -295,7 +303,10 @@ final class MountedCopyController: ObservableObject {
                 }
             } catch { unavailable += 1 }
             let rows = snapshots.flatMap(\.rows)
-            let latest = snapshots.map(\.date).max()
+            let dates = Dictionary(grouping: snapshots, by: \.side).compactMapValues { $0.map(\.date).min() }
+            let dateSummary = IncompatibleName.Side.allCases.map { side in
+                side.label + ": " + (dates[side]?.formatted(date: .abbreviated, time: .shortened) ?? "nessun esito")
+            }.joined(separator: " · ")
             let incomplete = unavailable > 0 || snapshots.count < examined
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.namesGeneration == generation else { return }
@@ -304,8 +315,8 @@ final class MountedCopyController: ObservableObject {
                 self.incompatibleNames = rows
                 if cancellation.isCancelled {
                     self.namesStatus = "Scansione annullata · risultati completati o precedenti"
-                } else if let latest {
-                    self.namesStatus = "Ultimo esito salvato: " + latest.formatted(date: .abbreviated, time: .standard)
+                } else if !dates.isEmpty {
+                    self.namesStatus = dateSummary
                         + (incomplete ? " · Esito parziale, alcune posizioni non verificate" : "")
                 } else {
                     self.namesStatus = incomplete ? "Nessun esito salvato per le posizioni non verificate" : "Nessuna scansione disponibile"
@@ -316,6 +327,7 @@ final class MountedCopyController: ObservableObject {
     @Published private(set) var auditReport: ArchiveAuditReport?
     @Published private(set) var auditStatus = "Verifica completa non eseguita"
     private var auditCancel: SeedVerificationCancellation?
+    private var auditCancelRequestedAt: Double?
 
     private var loadingLastAudit = false
     private var auditRevision = 0
@@ -379,6 +391,7 @@ final class MountedCopyController: ObservableObject {
         guard let auditToken=gate.beginAudit() else { auditStatus="Inventario non pronto: verifica rinviata"; return }
         let cancel = SeedVerificationCancellation(shouldContinue:{ gate.auditBlockReason(auditToken) == nil },commitAllowed:{ gate.auditCommitAllowed(auditToken) })
         auditCancel = cancel
+        auditCancelRequestedAt = nil
         auditRevision += 1
         let revision = auditRevision
         auditBusy = true
@@ -389,6 +402,7 @@ final class MountedCopyController: ObservableObject {
         queue.async { [weak self] in
             let auditLog = try? SyncActivityLog(path:db.path)
             let auditID=UUID().uuidString
+            auditLog?.cycleID = auditID
             let started=Date()
             var last=ArchiveAuditProgress(started:started)
             last.phase="Preparazione verifica"
@@ -480,11 +494,22 @@ final class MountedCopyController: ObservableObject {
                 } catch { storageWarning += " — impossibile salvare lo storico della verifica" }
                 let warning = storageWarning
                 try? auditLog?.record(level:.info,rootID:"app",action:"audit_finish",bytes:report.bytesRead,durationSeconds:report.seconds,message:"ID \(auditID) — Verifica conclusa: \(report.findings.count) elementi; \(report.queuedRepairs) riparazioni accodate" + warning)
+                for (action, metrics) in [("metric_audit_source_scan", report.sourceMetrics),
+                                           ("metric_audit_destination_scan", report.destinationMetrics)] {
+                    guard let metrics else { continue }
+                    try? auditLog?.record(level: .info, rootID: "app", action: action,
+                        bytes: metrics.detectedBytes, durationSeconds: metrics.scanSeconds, message: "Scansione archivio")
+                }
+                if let seconds = report.comparisonSeconds {
+                    try? auditLog?.record(level: .info, rootID: "app", action: "metric_audit_comparison",
+                        bytes: report.bytesRead, durationSeconds: seconds, message: "Letture per hash e confronto")
+                }
                 for finding in report.findings where finding.kind == .uncertain {
                     try? auditLog?.record(level:.warning,rootID:finding.rootID,action:"audit_uncertain",relativePath:finding.relativePath,message:finding.detail.isEmpty ? "Confronto non verificabile" : finding.detail)
                 }
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
+                    self.finishAuditCancellationMetric(cycleID: auditID)
                     self.auditReport = savedReport
                     if rebuildToken != nil { self.queueRebuildRequired = false }
                     self.seedReady = false; self.seedVerifiedCount = acknowledged
@@ -508,6 +533,7 @@ final class MountedCopyController: ObservableObject {
                 let context=SyncDiagnostic.clean("ID \(auditID) — \(cause); fase: \(last.phase); ultimo elemento: \(last.currentPath.isEmpty ? "—" : last.currentPath); confrontati: \(last.compared)/\(last.total); byte letti: \(last.bytesRead)",limit:3000)
                 try? auditLog?.record(level:explicit ? .info : .error,rootID:currentRoot,action:"audit_error",bytes:max(0,last.bytesRead),durationSeconds:max(0,Date().timeIntervalSince(started)),message:context)
                 DispatchQueue.main.async { [weak self] in
+                    self?.finishAuditCancellationMetric(cycleID: auditID)
                     self?.auditStatus = cause
                     self?.refresh()
                     self?.auditProgress = nil
@@ -524,8 +550,25 @@ final class MountedCopyController: ObservableObject {
     }
 
     func cancelArchiveAudit() {
+        if auditBusy && auditCancelRequestedAt == nil {
+            auditCancelRequestedAt = ProcessInfo.processInfo.systemUptime
+        }
         auditCancel?.cancel()
         auditStatus = "Annullamento richiesto"
+    }
+
+    private func finishAuditCancellationMetric(cycleID: String) {
+        guard let start = auditCancelRequestedAt else { return }
+        auditCancelRequestedAt = nil
+        Self.recordDiagnosticDuration("metric_audit_cancellation", seconds: ProcessInfo.processInfo.systemUptime - start, cycleID: cycleID)
+    }
+
+    nonisolated static func recordDiagnosticDuration(_ action: String, seconds: Double, cycleID: String? = nil) {
+        DispatchQueue.global(qos: .utility).async {
+            guard let path = try? databaseURL().path, let log = try? SyncActivityLog(path: path) else { return }
+            log.cycleID = cycleID
+            try? log.record(level: .info, rootID: "app", action: action, durationSeconds: seconds, message: "Durata diagnostica")
+        }
     }
     private var seedReport: SeedVerificationReport?
     private var seedSession: SeededArchiveSession?

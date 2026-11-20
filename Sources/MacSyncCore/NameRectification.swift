@@ -26,27 +26,67 @@ public enum NameRectification {
         public var resolvedIDs:Set<String>=[]
     }
 
-    /// A batch belongs only to configured, previously bound roots.
-    /// Preflight captures each object identity, rejects competing proposed
-    /// names, and processes descendants before parents. A collision never
-    /// results in an alternative spelling or a replacement.
-    public static func execute(items:[IncompatibleName], roots:[String:String],
-                               journal:ChangeJournal,log:SyncActivityLog,
-                               destinations: [String: MountedFolderMapping] = [:],
-                               shouldContinue:()->Bool = {true}) throws -> Result {
-        struct Move {
-            let item:IncompatibleName
-            let root:URL
-            let binding:DirectoryBinding
-            let url:URL
-            let snapshot:stat
-            let new:String
-            var collisionKey:String { item.rootID+"\0"+url.deletingLastPathComponent().path+"\0"+WindowsPathSafety.comparisonFold(new) }
+    private struct Move: Codable {
+        let item: IncompatibleName
+        let binding: DirectoryBinding
+        let inode: UInt64
+        let birthSeconds: Int64
+        let birthNanos: Int64
+        let size: Int64
+        let mtimeSeconds: Int64
+        let mtimeNanos: Int64
+        let ctimeSeconds: Int64
+        let ctimeNanos: Int64
+        let mode: UInt16
+        let newName: String
+
+        init(item: IncompatibleName, binding: DirectoryBinding, snapshot: stat, newName: String) {
+            self.item = item
+            self.binding = binding
+            self.inode = UInt64(snapshot.st_ino)
+            self.birthSeconds = Int64(snapshot.st_birthtimespec.tv_sec)
+            self.birthNanos = Int64(snapshot.st_birthtimespec.tv_nsec)
+            self.size = Int64(snapshot.st_size)
+            self.mtimeSeconds = Int64(snapshot.st_mtimespec.tv_sec)
+            self.mtimeNanos = Int64(snapshot.st_mtimespec.tv_nsec)
+            self.ctimeSeconds = Int64(snapshot.st_ctimespec.tv_sec)
+            self.ctimeNanos = Int64(snapshot.st_ctimespec.tv_nsec)
+            self.mode = UInt16(snapshot.st_mode)
+            self.newName = newName
         }
-        var result=Result(), moves:[Move]=[]
-        var seen=Set<String>()
-        func report(_ item:IncompatibleName,_ detail:String) throws {
-            try log.record(level:.warning,rootID:item.rootID,action:"name_rectify_skipped",relativePath:SyncDiagnostic.clean(item.relativePath),message:detail)
+
+        func matches(_ snapshot: stat, renamed: Bool) -> Bool {
+            guard self.inode == UInt64(snapshot.st_ino), self.mode == UInt16(snapshot.st_mode),
+                  self.birthSeconds == Int64(snapshot.st_birthtimespec.tv_sec),
+                  self.birthNanos == Int64(snapshot.st_birthtimespec.tv_nsec) else { return false }
+            return item.isDirectory || (
+                self.size == Int64(snapshot.st_size) &&
+                self.mtimeSeconds == Int64(snapshot.st_mtimespec.tv_sec) &&
+                self.mtimeNanos == Int64(snapshot.st_mtimespec.tv_nsec) &&
+                (renamed || (self.ctimeSeconds == Int64(snapshot.st_ctimespec.tv_sec) &&
+                             self.ctimeNanos == Int64(snapshot.st_ctimespec.tv_nsec)))
+            )
+        }
+
+        var parentPath: String {
+            item.relativePath.split(separator: "/").dropLast().joined(separator: "/")
+        }
+
+        var collisionKey: String {
+            item.rootID + "\0" + item.side.rawValue + "\0" + parentPath + "\0" + WindowsPathSafety.comparisonFold(newName)
+        }
+    }
+
+    /// A confirmed batch persists before its first mutation. Resume checks
+    /// exact paths and identities again, including after a lost SMB response.
+    public static func execute(items: [IncompatibleName], roots: [String: String],
+                               journal: ChangeJournal, log: SyncActivityLog,
+                               destinations: [String: MountedFolderMapping] = [:],
+                               shouldContinue: () -> Bool = { true }) throws -> Result {
+        var result = Result()
+        func report(_ item: IncompatibleName, action: String, level: SyncLogLevel, message: String) {
+            try? log.record(level: level, rootID: item.rootID, action: action,
+                relativePath: SyncDiagnostic.clean(item.relativePath), message: message)
         }
         func verifiedRoot(_ item: IncompatibleName) throws -> (URL, DirectoryBinding) {
             if item.side == .source {
@@ -60,88 +100,96 @@ public enum NameRectification {
             try mapping.verify()
             return (mapping.target, try journal.verifiedNameBinding(rootID: item.rootID, root: mapping.target, side: .destination))
         }
-        for item in items {
-            guard shouldContinue() else { result.cancelled=true;return result }
-            guard seen.insert(item.id).inserted else { continue }
-            guard let name=proposedName(item.name) else {
-                result.skipped+=1;try report(item,"Rettifica manuale necessaria o posizione non autorizzata");continue
+        func counterpartKey(_ item: IncompatibleName) -> String { item.rootID + "\0" + item.relativePath }
+        let resume = try journal.pendingNameRectification()
+        var moves: [Move] = []
+        if let resume {
+            guard items.isEmpty else { throw JournalError.database("Rettifica precedente in attesa") }
+            moves = try JSONDecoder().decode([Move].self, from: resume.data)
+        } else {
+            var seen = Set<String>()
+            let paired = Dictionary(grouping: items, by: counterpartKey)
+            for item in items where seen.insert(item.id).inserted {
+                guard shouldContinue() else { result.cancelled = true; return result }
+                guard let name = proposedName(item.name) else { result.skipped += 1; continue }
+                do {
+                    let (root, binding) = try verifiedRoot(item)
+                    let url = try item.revealURL(expectedRoot: root.path)
+                    let parent = try AnchoredDirectory(url.deletingLastPathComponent(), expectedVolume: binding.volume)
+                    let snapshot = try parent.leaf(item.name)
+                    try parent.checkRectification(old: item.name, new: name, matching: snapshot)
+                    moves.append(Move(item: item, binding: binding, snapshot: snapshot, newName: name))
+                } catch {
+                    result.skipped += 1
+                    report(item, action: "name_rectify_skipped", level: .warning, message: SyncDiagnostic.describe(error))
+                }
             }
+            let collisions = Dictionary(grouping: moves, by: \.collisionKey).mapValues(\.count)
+            let verified = Dictionary(grouping: moves.filter { collisions[$0.collisionKey] == 1 }, by: { counterpartKey($0.item) })
+            moves = moves.filter { move in
+                let key = counterpartKey(move.item)
+                let bothSides = Set((paired[key] ?? []).map { $0.side.rawValue }).count == 2
+                guard collisions[move.collisionKey] == 1, !bothSides || verified[key]?.count == 2 else {
+                    result.skipped += 1
+                    report(move.item, action: "name_rectify_skipped", level: .warning, message: "Conflitto o controparte non verificata")
+                    return false
+                }
+                return true
+            }
+            moves.sort {
+                let a = $0.item.relativePath.split(separator: "/").count
+                let b = $1.item.relativePath.split(separator: "/").count
+                return a == b ? $0.item.id < $1.item.id : a > b
+            }
+            if !moves.isEmpty { try journal.saveNameRectification(JSONEncoder().encode(moves)) }
+        }
+
+        let offset = resume?.offset ?? 0
+        guard (0...moves.count).contains(offset) else { throw JournalError.database("Rettifica non leggibile") }
+        for (index, move) in moves.enumerated().dropFirst(offset) {
+            guard shouldContinue() else { result.cancelled = true; break }
+            let item = move.item
             do {
                 let (root, binding) = try verifiedRoot(item)
-                let url=try item.revealURL(expectedRoot:root.path)
-                var value=stat()
-                guard url.path.withCString({lstat($0,&value)})==0 else { throw MountedCopyError.sourceMissing }
-                let expectedKind=mode_t(item.isDirectory ? S_IFDIR : S_IFREG)
-                guard value.st_mode & mode_t(S_IFMT)==expectedKind else { throw MountedCopyError.unsafeFile }
-                moves.append(Move(item:item,root:root,binding:binding,url:url,snapshot:value,new:name))
-            } catch {
-                result.skipped+=1
-                try report(item,SyncDiagnostic.describe(error))
-            }
-        }
-        // If a confirmed path occurs on two sides but one could not be
-        // verified, leave its counterpart untouched as well.
-        func pairedKey(_ row: IncompatibleName) -> String {
-            row.rootID + "\0" + row.relativePath
-        }
-        let paired = Dictionary(grouping: items, by: pairedKey)
-        let verified = Dictionary(grouping: moves, by: { pairedKey($0.item) })
-        let counts=Dictionary(grouping:moves,by:\.collisionKey).mapValues{$0.count}
-        moves.sort {
-            let a=$0.item.relativePath.split(separator:"/").count,b=$1.item.relativePath.split(separator:"/").count
-            if a != b { return a>b }
-            return $0.item.id<$1.item.id
-        }
-        for move in moves {
-            guard shouldContinue() else { result.cancelled=true;break }
-            let key = pairedKey(move.item)
-            if Set((paired[key] ?? []).map { $0.side.rawValue }).count > 1,
-               verified[key]?.count != 2 {
-                result.skipped += 1
-                try report(move.item, "Controparte non verificata; rettifica coordinata rinviata")
-                continue
-            }
-            if counts[move.collisionKey,default:0]>1 {
-                result.skipped+=1;try report(move.item,"Conflitto fra nomi proposti; nessun elemento del gruppo modificato");continue
-            }
-            do {
-                let (root, binding) = try verifiedRoot(move.item)
-                guard root == move.root, binding == move.binding,
-                      try move.item.revealURL(expectedRoot:move.root.path)==move.url else {
-                    throw MountedCopyError.sourceRootChanged
+                guard root.path == item.rootPath, binding == move.binding else { throw MountedCopyError.volumeChanged }
+                let parentURL: URL
+                if move.parentPath.isEmpty {
+                    parentURL = root
+                } else {
+                    let parentItem = IncompatibleName(rootID: item.rootID, rootPath: item.rootPath,
+                        relativePath: move.parentPath, objectKind: "directory", side: item.side, reason: "")
+                    parentURL = try parentItem.revealURL(expectedRoot: root.path)
                 }
-                let parent=try AnchoredDirectory(move.url.deletingLastPathComponent(),expectedVolume:move.binding.volume)
-                let current=try parent.leaf(move.item.name)
-                // Child renames may legitimately change the timestamps of a
-                // parent directory. Pin its identity, but do not mistake
-                // those changes for replacement. Files still require the
-                // complete original metadata snapshot.
-                guard current.st_dev==move.snapshot.st_dev,current.st_ino==move.snapshot.st_ino,
-                      current.st_birthtimespec.tv_sec==move.snapshot.st_birthtimespec.tv_sec,
-                      current.st_birthtimespec.tv_nsec==move.snapshot.st_birthtimespec.tv_nsec,
-                      current.st_mode==move.snapshot.st_mode else { throw MountedCopyError.sourceChanging }
-                if !move.item.isDirectory {
-                    guard current.st_size==move.snapshot.st_size,
-                          current.st_mtimespec.tv_sec==move.snapshot.st_mtimespec.tv_sec,
-                          current.st_mtimespec.tv_nsec==move.snapshot.st_mtimespec.tv_nsec,
-                          current.st_ctimespec.tv_sec==move.snapshot.st_ctimespec.tv_sec,
-                          current.st_ctimespec.tv_nsec==move.snapshot.st_ctimespec.tv_nsec else { throw MountedCopyError.sourceChanging }
+                let parent = try AnchoredDirectory(parentURL, expectedVolume: binding.volume)
+                let names = try FileManager.default.contentsOfDirectory(atPath: parentURL.path)
+                let oldExists = names.contains { $0.utf8.elementsEqual(item.name.utf8) }
+                let newExists = names.contains { $0.utf8.elementsEqual(move.newName.utf8) }
+                if oldExists && !newExists {
+                    let old = try parent.leaf(item.name)
+                    guard move.matches(old, renamed: false) else { throw MountedCopyError.sourceChanging }
+                    try journal.invalidateNameScan(rootID: item.rootID, side: item.side)
+                    report(item, action: "name_rectify_start", level: .info,
+                        message: item.side.label + " · Nuovo nome: " + move.newName)
+                    try parent.rectifyName(item.name, as: move.newName, matching: old, shouldContinue: shouldContinue)
+                } else {
+                    guard !oldExists, newExists, move.matches(try parent.leaf(move.newName), renamed: true) else {
+                        throw MountedCopyError.destinationConflict
+                    }
                 }
-                // Journal the intended name before the mutation; the normal
-                // inventory restart reconciles even after an unexpected exit.
-                try journal.invalidateNameScan(rootID: move.item.rootID, side: move.item.side)
-                try log.record(level:.info,rootID:move.item.rootID,action:"name_rectify_start",relativePath:SyncDiagnostic.clean(move.item.relativePath),message:move.item.side.label + " · Nuovo nome: " + move.new)
-                try parent.rectifyName(move.item.name,as:move.new,matching:current,shouldContinue:shouldContinue)
-                result.renamed+=1;result.resolvedIDs.insert(move.item.id)
-                try? log.record(level:.success,rootID:move.item.rootID,action:"name_rectified",relativePath:SyncDiagnostic.clean(move.item.relativePath),message:move.item.side.label + " · Rettificato in: " + move.new)
+                let path = move.parentPath.isEmpty ? move.newName : move.parentPath + "/" + move.newName
+                try journal.advanceNameRectification(to: index + 1, finished: index + 1 == moves.count,
+                    rootID: item.side == .destination ? item.rootID : nil,
+                    path: item.side == .destination ? path : nil)
+                result.renamed += 1
+                result.resolvedIDs.insert(item.id)
+                let action = resume == nil ? "name_rectified_" : "name_rectification_resumed_"
+                report(item, action: action + item.side.rawValue, level: .success, message: item.side.label + " · Rettificato in: " + move.newName)
             } catch SeedVerificationError.cancelled {
-                result.cancelled=true;break
-            } catch MountedCopyError.destinationConflict {
-                result.skipped+=1;try report(move.item,"Nome risultante già presente o equivalente; nessuna sovrascrittura")
+                result.cancelled = true
+                break
             } catch {
-                // Failure after the syscall can leave the outcome uncertain.
-                // Do not retry, rollback or rename another path automatically.
-                result.failed+=1;try report(move.item,SyncDiagnostic.describe(error))
+                result.failed += 1
+                report(item, action: "name_rectification_pending_" + item.side.rawValue, level: .warning, message: SyncDiagnostic.describe(error))
                 break
             }
         }

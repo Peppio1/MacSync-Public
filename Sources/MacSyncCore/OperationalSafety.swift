@@ -489,9 +489,7 @@ public final class AnchoredDirectory {
         }
         try remove(name,matching:current,shouldContinue:shouldContinue)
     }
-    /// Exclusive same-directory rename after an explicit batch confirmation.
-    /// Filesystems that do not support RENAME_EXCL return an error.
-    func rectifyName(_ old:String,as new:String,matching original:stat,shouldContinue:()->Bool) throws {
+    func checkRectification(old: String, new: String, matching original: stat) throws {
         guard WindowsPathSafety.validComponent(new),
               old != ".",old != "..",!old.contains("/"),!old.contains("\0"),!old.isEmpty,
               !WindowsPathSafety.validComponent(old) else { throw MountedCopyError.unsafeFile }
@@ -505,6 +503,12 @@ public final class AnchoredDirectory {
               [mode_t(S_IFREG),mode_t(S_IFDIR)].contains(original.st_mode & mode_t(S_IFMT)) else {
             throw MountedCopyError.sourceChanging
         }
+    }
+
+    /// Exclusive same-directory rename after an explicit batch confirmation.
+    /// Filesystems that do not support RENAME_EXCL return an error.
+    func rectifyName(_ old:String,as new:String,matching original:stat,shouldContinue:()->Bool) throws {
+        try checkRectification(old: old, new: new, matching: original)
         try verify()
         guard shouldContinue() else { throw SeedVerificationError.cancelled }
         let rc=old.withCString { a in new.withCString { b in renameatx_np(fd,a,fd,b,UInt32(RENAME_EXCL)) } }

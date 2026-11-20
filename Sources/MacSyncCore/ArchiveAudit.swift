@@ -230,6 +230,7 @@ public struct ArchiveAuditReport: Codable, Equatable, Sendable {
     public var directoryListingReads: Int? = nil
     public var displayCounts: AuditFindingCounts? = nil
     public var nameScans: [NameScanSnapshot]? = nil
+    public var comparisonSeconds: Double? = nil
     public func count(_ kind: AuditFindingKind) -> Int {
         findings.lazy.filter { $0.kind == kind }.count
     }
@@ -365,6 +366,7 @@ public final class ArchiveAudit {
         var metadataMatches = 0, hashMatches = 0, cachedHashMatches = 0
         var candidates: [(MountedFolderMapping, TrackedItem, String, SeedFileFingerprint?)] = []
         state.comparisonStarted = Date()
+        let comparisonTick = ProcessInfo.processInfo.systemUptime
         state.phase = mode == .deep ? "Verifica SHA-256" : (mode == .intelligent ? "Verifica intelligente" : "Confronto metadati")
         report(force:true)
         var listingHits = 0, listingReads = 0
@@ -532,6 +534,7 @@ public final class ArchiveAudit {
                   try Self.rootStamp(mapping.target) == pair.targetStamp else { throw MountedCopyError.volumeChanged }
         }
         try check()
+        let comparisonSeconds = ProcessInfo.processInfo.systemUptime - comparisonTick
         state.phase = "Finalizzazione"; state.currentPath = ""; report(force:true)
         var repairs: [(rootID:String, sourcePath:String, item:TrackedItem)] = []
         if repair {
@@ -561,7 +564,7 @@ public final class ArchiveAudit {
             seconds:ProcessInfo.processInfo.systemUptime-startTick,findings:findings,
             bytesRead:state.bytesRead,queuedRepairs:queued,repairRequested:repair,
             sourceMetrics:state.source,destinationMetrics:state.destination,
-            deletionCandidates:deletionCandidates,metadataMatches:metadataMatches,hashMatches:hashMatches,cachedHashMatches:cachedHashMatches,directoryListingCacheHits:listingHits,directoryListingReads:listingReads,displayCounts:state.counts,nameScans:nameScans)
+            deletionCandidates:deletionCandidates,metadataMatches:metadataMatches,hashMatches:hashMatches,cachedHashMatches:cachedHashMatches,directoryListingCacheHits:listingHits,directoryListingReads:listingReads,displayCounts:state.counts,nameScans:nameScans,comparisonSeconds:comparisonSeconds)
     }
 
     private func ancestorsHaveAlias(_ path:String,_ ambiguous:Set<String>) -> Bool {

@@ -68,9 +68,10 @@ public enum StageTransferEngine {
 
     func copyDirect(source: URL, destination: URL, newFile: Bool, shouldContinue: () -> Bool,
                     diagnostic: (SyncLogLevel,String) -> Void = { _,_ in },
+                    launched: () -> Void = {},
                     progress: (Int64, Double) -> Void) throws {
         guard case .rcloneDirect(let executable) = self else { throw MountedCopyError.invalidMapping }
-        try Self.run(executable:executable,arguments:Self.directArguments(source:source,destination:destination,newFile:newFile),shouldContinue:shouldContinue,diagnostic:diagnostic,progress:progress)
+        try Self.run(executable:executable,arguments:Self.directArguments(source:source,destination:destination,newFile:newFile),shouldContinue:shouldContinue,diagnostic:diagnostic,launched:launched,progress:progress)
     }
 
     // Exact paths only; no recursive or source deletion commands.
@@ -82,6 +83,7 @@ public enum StageTransferEngine {
 
     private static func run(executable: URL, arguments: [String], shouldContinue: () -> Bool,
                             diagnostic: (SyncLogLevel,String) -> Void = { _,_ in },
+                            launched: () -> Void = {},
                             progress: (Int64, Double) -> Void) throws {
         guard shouldContinue() else { throw SeedVerificationError.cancelled }
         guard FileManager.default.isExecutableFile(atPath:executable.path) else { throw MountedCopyError.rcloneUnavailable }
@@ -99,6 +101,7 @@ public enum StageTransferEngine {
         process.standardOutput = FileHandle.nullDevice
         process.standardInput = FileHandle.nullDevice
         do { try process.run() } catch { throw MountedCopyError.rcloneLaunchFailed }
+        launched()
         var pending = Data()
         var cancelled = false
         var seen:[String:Int]=[:]

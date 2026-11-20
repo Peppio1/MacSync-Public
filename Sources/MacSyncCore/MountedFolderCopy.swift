@@ -246,6 +246,12 @@ public final class MountedFolderCopyWorker {
     private let now: () -> Date
     private let availableCapacity: (URL) throws -> Int64?
     private var nextAfterID: Int64 = 0
+    private var rectificationScopes: [String: [String]] = [:]
+    private var transferDiagnostics: [String: Double] = [:]
+
+    private func recordDuration(_ action: String, since started: Double) {
+        transferDiagnostics[action, default: 0] += ProcessInfo.processInfo.systemUptime - started
+    }
     private var publicationMethods: [String:ExclusivePublicationMethod] = [:]
     private var unsupportedNewPublicationRoots=Set<String>()
     private enum NewPublicationUnsupported: Error { case unavailable }
@@ -292,7 +298,14 @@ public final class MountedFolderCopyWorker {
             summary.disabled = true
             return summary
         }
-        guard try journal.queueRebuildToken() == nil else { summary.interrupted=true; return summary }
+        guard try journal.queueRebuildToken() == nil, try !journal.hasPendingNameRectification() else { summary.interrupted=true; return summary }
+        rectificationScopes = try journal.nameRectificationScopes()
+        transferDiagnostics = [:]
+        defer {
+            for (action, seconds) in transferDiagnostics.sorted(by: { $0.key < $1.key }) {
+                try? log.record(level: .info, rootID: "app", action: action, durationSeconds: seconds, message: "Tempo cumulativo del ciclo")
+            }
+        }
         _ = try journal.retireExcludedJobs()
         var jobs = try journal.pendingUploads(limit: maxJobs, afterID: nextAfterID)
         if jobs.isEmpty && nextAfterID != 0 {
@@ -379,19 +392,26 @@ public final class MountedFolderCopyWorker {
                 // Only hash an ordinary existing queued file if its size and
                 // mtime look equal. A same-size/same-date edit still copies
                 // if the actual bytes differ.
-                let mayAlreadyMatch = previousPublication || ((try? metadataMayMatch(job,mapping:mapping)) == true)
-                if mayAlreadyMatch, try reconcilePublished(job,mapping:mapping) {
+                let rectified = rectificationScopes[job.rootID]?.contains {
+                    job.relativePath == $0 || job.relativePath.hasPrefix($0 + "/")
+                } == true
+                let mayAlreadyMatch = previousPublication || rectified || ((try? metadataMayMatch(job,mapping:mapping)) == true)
+                if mayAlreadyMatch, let verifiedBytes = try reconcilePublished(job,mapping:mapping) {
                     recoverConfirmedStage(job,mapping:mapping)
                     try? journal.clearRetry(job)
                     summary.reconciled += 1
                     let message=previousPublication ? "Pubblicazione precedente verificata SHA-256" : "File già corrispondente SHA-256"
                     emit(.noChange,job:job,mapping:mapping,detail:message)
-                    try? log.record(level:.success,rootID:job.rootID,action:"reconciled",relativePath:job.relativePath,message:message+"; nessuna nuova copia")
+                    try? log.record(level:.success,rootID:job.rootID,action:rectified ? "name_rectification_copy_avoided" : "reconciled",
+                        relativePath:job.relativePath,bytes:rectified ? verifiedBytes : 0,message:message+"; nessuna nuova copia")
                     continue
                 }
                 try prepareRetry(job,mapping:mapping,publicationUncertain:previousPublication)
                 let outcome = try transfer(job, mapping: mapping)
-                guard try journal.acknowledgeUpload(job) else {
+                let acknowledgeStarted = ProcessInfo.processInfo.systemUptime
+                let acknowledged = try journal.acknowledgeUpload(job)
+                recordDuration("metric_queue_acknowledgment", since: acknowledgeStarted)
+                guard acknowledged else {
                     // The published version may have been superseded while
                     // completing the job. Keep its backup for manual recovery.
                     summary.deferred += 1
@@ -526,19 +546,19 @@ public final class MountedFolderCopyWorker {
         return abs(a.mtime-b.mtime)<=2
     }
 
-    private func reconcilePublished(_ job: QueuedChange,mapping:MountedFolderMapping) throws -> Bool {
+    private func reconcilePublished(_ job: QueuedChange,mapping:MountedFolderMapping) throws -> Int64? {
         let token = SeedVerificationCancellation(shouldContinue:operationAllowed)
         let verifier = try SeededArchiveVerifier(journal:journal,mappings:[mapping])
         do {
             try WindowsPathSafety.checkNames(relativePath:job.relativePath,under:mapping.source)
             try WindowsPathSafety.checkNames(relativePath:job.relativePath,under:mapping.target)
-            guard let match = try verifier.verifyOne(job,mapping:mapping,cancellation:token,onBytesRead:{_ in}) else { return false }
+            guard let match = try verifier.verifyOne(job,mapping:mapping,cancellation:token,onBytesRead:{_ in}) else { return nil }
             let report = SeedVerificationReport(matches:[match],inspected:1,missingOrDifferent:0,deferred:0,bytesRead:0)
-            guard try verifier.approve(report:report,cancellation:token) == 1 else { return false }
+            guard try verifier.approve(report:report,cancellation:token) == 1 else { return nil }
             try? journal.clearPublicationIntent(job)
-            return true
+            return match.verifiedBytes
         } catch SeedVerificationError.cancelled { throw SeedVerificationError.cancelled }
-        catch { try mapping.verify(); return false }
+        catch { try mapping.verify(); return nil }
     }
 
     private enum TransferKind { case created, updated, directoryCreated, directoryExisting }
@@ -739,6 +759,7 @@ public final class MountedFolderCopyWorker {
     }
 
     private func transferDirect(_ job: QueuedChange, mapping: MountedFolderMapping) throws -> TransferOutcome {
+        let checksStarted = ProcessInfo.processInfo.systemUptime
         guard operationAllowed() else { throw SeedVerificationError.cancelled }
         try mapping.verify()
         let src = try mapping.fileURL(relativePath:job.relativePath,destination:false)
@@ -778,8 +799,14 @@ public final class MountedFolderCopyWorker {
         try log.record(level:.info,rootID:job.rootID,action:"rclone_start",relativePath:job.relativePath,bytes:source.size,message:"Rclone copyto: pubblicazione diretta con temporaneo nativo")
         onPhase?("Trasferimento")
         let started = ProcessInfo.processInfo.systemUptime
+        recordDuration("metric_copy_preflight", since: checksStarted)
         try stageEngine.copyDirect(source:src,destination:dst,newFile:original == nil,shouldContinue:operationAllowed,
-            diagnostic:{ self.recordRcloneDiagnostic($0,$1,job:job) },progress:{ [weak self] bytes, seconds in self?.onTransferProgress?(bytes,seconds) })
+            diagnostic:{ self.recordRcloneDiagnostic($0,$1,job:job) },
+            launched:{ self.recordDuration("metric_rclone_process_launch", since: started) },
+            progress:{ [weak self] bytes, seconds in self?.onTransferProgress?(bytes,seconds) })
+        recordDuration("metric_rclone_total_process", since: started)
+        let verification = ProcessInfo.processInfo.systemUptime
+        defer { recordDuration("metric_copy_postflight", since: verification) }
         onPhase?("Verifica del trasferimento")
         try mapping.verify()
         try ensureSafeParents(dst,under:mapping.target,create:false)

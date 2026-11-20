@@ -1286,14 +1286,14 @@ struct MacSyncConfigurationView: View {
                 }
             }
             SoftwareUpdatesPanel(updates: runtime.updates)
+            DiagnosticReportPanel(copy: copy, previewOnly: runtime.previewOnly)
             MacSyncPanel("Informazioni", icon: "info.circle", accent: false) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("MacSync · v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.18.8")").font(.subheadline.weight(.semibold))
+                        Text("MacSync · v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.18.9")").font(.subheadline.weight(.semibold))
                         Text("Registro SQLite locale").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("Esporta registro…") { copy.exportLog() }
                     Button("Apri cartella app…") { NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL]) }
                 }
             }

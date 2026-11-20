@@ -68,4 +68,52 @@ final class NameRectificationTests:XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: original.path))
         XCTAssertEqual(try String(contentsOf: published, encoding: .utf8), "original")
     }
+
+    func testConfirmedBatchSurvivesCancellationAndReconcilesByContent() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .resolvingSymlinksInPath()
+        let source = base.appendingPathComponent("source"), target = base.appendingPathComponent("target")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let old = "sample?.psd", new = "sample-.psd"
+        let content = Data("identical".utf8)
+        try content.write(to: source.appendingPathComponent(old))
+        try content.write(to: target.appendingPathComponent(old))
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -80)],
+            ofItemAtPath: source.appendingPathComponent(old).path)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -40)],
+            ofItemAtPath: target.appendingPathComponent(old).path)
+        let db = base.appendingPathComponent("fixture.sqlite").path
+        let inventory = try LocalInventory(path: db)
+        _ = try inventory.reconcile(rootID: "demo", root: source)
+        let mapping = try MountedFolderMapping(rootID: "demo", source: source, target: target)
+        if !mapping.targetVolume.isStrongIdentity { throw XCTSkip("Volume identity unavailable") }
+        let journal = try ChangeJournal(path: db)
+        try journal.verifyDirectoryBindings([mapping], allowNewTarget: true)
+        let log = try SyncActivityLog(path: db)
+        let rows = IncompatibleName.Side.allCases.map { side in
+            IncompatibleName(rootID: "demo", rootPath: side == .source ? source.path : target.path,
+                relativePath: old, objectKind: "file", side: side, reason: "Carattere incompatibile")
+        }
+        let first = try NameRectification.execute(items: rows, roots: ["demo": source.path], journal: journal,
+            log: log, destinations: ["demo": mapping],
+            shouldContinue: { !FileManager.default.fileExists(atPath: target.appendingPathComponent(new).path) })
+        XCTAssertTrue(first.cancelled)
+        XCTAssertEqual(first.renamed, 1)
+        let reopened = try ChangeJournal(path: db)
+        XCTAssertTrue(try reopened.hasPendingNameRectification())
+        let worker = try MountedFolderCopyWorker(journal: reopened, log: log, mappings: [mapping])
+        XCTAssertTrue(try worker.runCycle(enabled: true).interrupted)
+        let second = try NameRectification.execute(items: [], roots: ["demo": source.path], journal: reopened,
+            log: log, destinations: ["demo": mapping])
+        XCTAssertEqual(second.renamed, 1)
+        XCTAssertFalse(try reopened.hasPendingNameRectification())
+        _ = try inventory.reconcile(rootID: "demo", root: source)
+        let copied = try worker.runCycle(enabled: true)
+        XCTAssertEqual(copied.reconciled, 1)
+        XCTAssertEqual(copied.bytes, 0)
+        XCTAssertEqual(try log.technicalPage().first { $0.entry.action == "name_rectification_copy_avoided" }?.entry.bytes,
+            Int64(content.count))
+    }
 }
