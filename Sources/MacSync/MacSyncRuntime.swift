@@ -51,8 +51,7 @@ final class MacSyncRuntime: ObservableObject {
     private var auditTimer: Timer?
     @Published private(set) var nextAuditAt: Date?
     private var auditRevision = 0
-    private var rectificationRetry: Timer?
-    private var rectificationPending = false
+    @Published private(set) var rectificationPending = false
     private var suspendedUntilNextLaunch = false
     private var configurationRevision = 0
     private var outages = ConnectionOutageTracker()
@@ -104,7 +103,9 @@ final class MacSyncRuntime: ObservableObject {
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 let pending = (try? ChangeJournal(path: path).hasPendingNameRectification()) == true
                 DispatchQueue.main.async { [weak self] in
-                    if pending { self?.scheduleRectificationResume() }
+                    guard let self, pending, !self.shuttingDown else { return }
+                    self.rectificationPending = true
+                    self.automaticStatus = "Rettifica in attesa: riprendila da Nomi incompatibili"
                 }
             }
         }
@@ -354,29 +355,20 @@ final class MacSyncRuntime: ObservableObject {
     /// and mirror are left off until deliberate operator reauthorization.
     func rectifyNames(_ items:[IncompatibleName]) {
         guard !previewOnly,!rectificationPending,!items.isEmpty,!shuttingDown,!folderConfigurationBusy,!savingSchedule,
-              !copy.auditBusy,!copy.seedBusy,!copy.maintaining,!copy.rectifyingNames,!copy.namesBusy else { return }
+              !copy.auditBusy,!copy.seedBusy,!copy.maintaining,!copy.rectifyingNames,!copy.namesBusy,
+              !preparingSignedUpdate,!finalShutdownHolding else { return }
         let permitted=Set(copy.incompatibleNames.filter{ NameRectification.proposedName($0.name) != nil }.map(\.id))
         let approved=items.filter{permitted.contains($0.id)}
         guard !approved.isEmpty else { return }
         performNameRectification(approved)
     }
 
-    private func scheduleRectificationResume() {
-        rectificationPending = true
-        rectificationRetry?.invalidate()
-        guard !shuttingDown else { return }
-        rectificationRetry = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, !self.shuttingDown else { return }
-                guard !self.folderConfigurationBusy, !self.savingSchedule, !self.copy.active,
-                      !self.copy.maintaining, !self.copy.auditBusy, !self.copy.namesBusy, !self.copy.seedBusy,
-                      !self.preparingSignedUpdate, !self.finalShutdownHolding else {
-                    self.scheduleRectificationResume()
-                    return
-                }
-                self.performNameRectification([])
-            }
-        }
+    func resumeNameRectification() {
+        guard rectificationPending, !previewOnly, !shuttingDown, !folderConfigurationBusy,
+              !savingSchedule, !copy.active, !copy.maintaining, !copy.auditBusy,
+              !copy.namesBusy, !copy.seedBusy, !copy.rectifyingNames,
+              !preparingSignedUpdate, !finalShutdownHolding else { return }
+        performNameRectification([])
     }
 
     private func performNameRectification(_ approved: [IncompatibleName]) {
@@ -402,8 +394,7 @@ final class MacSyncRuntime: ObservableObject {
                     self.rectificationPending = pending
                     if !self.shuttingDown {
                         self.model.startMonitoring()
-                        if pending { self.scheduleRectificationResume() }
-                        self.automaticStatus = pending ? "Rettifica in attesa: verifica automatica programmata" : "Rettifica terminata: attendi l'inventario prima di riavviare le copie"
+                        self.automaticStatus = pending ? "Rettifica in attesa: riprendila da Nomi incompatibili" : "Rettifica terminata: attendi l'inventario prima di riavviare le copie"
                         self.scheduleArchiveAudit()
                     }
                     self.finishShutdownIfReady()
@@ -417,7 +408,11 @@ final class MacSyncRuntime: ObservableObject {
               !rectificationPending, model.monitoring, model.safetyGate.isReady, !copy.active, !copy.maintaining,
               !copy.seedBusy, !copy.seedReady, !copy.interruptionRequested else {
             guard !previewOnly else { return }
-            copy.status = copy.queueRebuildRequired ? "Sincronizzazione non avviata: verifica archivio richiesta o coda non leggibile" : !model.monitoring || !model.safetyGate.isReady ? "Sincronizzazione non avviata: monitoraggio o inventario non pronto" : "Sincronizzazione non avviata: operazione già in corso o blocco di sicurezza"
+            if rectificationPending {
+                copy.status = "Sincronizzazione sospesa: riprendi la rettifica da Nomi incompatibili"
+            } else {
+                copy.status = copy.queueRebuildRequired ? "Sincronizzazione non avviata: verifica archivio richiesta o coda non leggibile" : !model.monitoring || !model.safetyGate.isReady ? "Sincronizzazione non avviata: monitoraggio o inventario non pronto" : "Sincronizzazione non avviata: operazione già in corso o blocco di sicurezza"
+            }
             copy.recordBlockedStart(reason:copy.status)
             return
         }

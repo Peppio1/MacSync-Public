@@ -25,6 +25,7 @@ struct IncompatibleNamesPanel:View {
         !runtime.previewOnly && !runtime.folderConfigurationBusy && !runtime.shuttingDown &&
         !copy.auditBusy && !copy.seedBusy && !copy.maintaining && !copy.rectifyingNames && !copy.namesBusy
     }
+    private var canSelect: Bool { canRectify && !runtime.rectificationPending }
     private func selectable(_ item:IncompatibleName)->Bool {
         NameRectification.proposedName(item.name) != nil
     }
@@ -71,16 +72,26 @@ struct IncompatibleNamesPanel:View {
             HStack {
                 Button("Seleziona tutto") { selected.formUnion(eligible.map(\.id)) }
                     .help("Seleziona tutte le cartelle e tutti i file rettificabili sui due lati, anche nelle altre schede")
-                    .disabled(eligible.isEmpty || !canRectify)
+                    .disabled(eligible.isEmpty || !canSelect)
                 Button("Seleziona visibili") { selected.formUnion(filtered.filter{selectable($0)}.map(\.id)) }
-                    .disabled(!canRectify || !filtered.contains(where:{selectable($0)}))
+                    .disabled(!canSelect || !filtered.contains(where:{selectable($0)}))
                 Button("Deseleziona") { selected.removeAll() }.disabled(chosen.isEmpty)
                 Spacer()
-                Button("Rettifica (\(chosen.count))") {
-                    confirmation=chosen;showConfirmation=true
-                }.buttonStyle(.borderedProminent).disabled(chosen.isEmpty || !canRectify)
+                Button(runtime.rectificationPending ? "Riprendi rettifica" : "Rettifica (\(chosen.count))") {
+                    if runtime.rectificationPending {
+                        runtime.resumeNameRectification()
+                    } else {
+                        confirmation=chosen;showConfirmation=true
+                    }
+                }.buttonStyle(.borderedProminent)
+                    .disabled(!canRectify || (runtime.rectificationPending ? copy.active : chosen.isEmpty))
             }
-            if !copy.rectificationStatus.isEmpty { Text(copy.rectificationStatus).font(.caption).foregroundStyle(.secondary) }
+            if !copy.rectificationStatus.isEmpty {
+                Text(copy.rectificationStatus).font(.caption).foregroundStyle(.secondary)
+            } else if runtime.rectificationPending {
+                Text("Rettifica in sospeso. Riprendi il lotto quando le cartelle sono disponibili.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if let started = copy.nameScanStarted {
                 HStack(spacing: 12) {
                     ProgressView().progressViewStyle(.linear)
@@ -102,7 +113,7 @@ struct IncompatibleNamesPanel:View {
                                     if value { selected.insert(item.id) } else { selected.remove(item.id) }
                                 })).toggleStyle(.checkbox).labelsHidden()
                                     .accessibilityLabel("Seleziona "+item.displayName)
-                                    .disabled(!selectable(item) || !canRectify)
+                                    .disabled(!selectable(item) || !canSelect)
                                 Image(systemName:item.isDirectory ? "folder" : "doc").foregroundStyle(.orange)
                                 VStack(alignment:.leading,spacing:3) {
                                     Text(item.displayName).font(.subheadline.weight(.semibold))
@@ -150,7 +161,7 @@ struct IncompatibleNamesPanel:View {
                         showConfirmation=false
                         selected.removeAll()
                         runtime.rectifyNames(items)
-                    }.buttonStyle(.borderedProminent).disabled(!canRectify)
+                    }.buttonStyle(.borderedProminent).disabled(!canSelect)
                 }
             }.padding(20).frame(width:650,height:500)
         }
