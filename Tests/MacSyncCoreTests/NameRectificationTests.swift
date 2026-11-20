@@ -144,7 +144,12 @@ final class NameRectificationTests:XCTestCase {
         let occupied = Data([2])
         let first = try NameRectification.execute(items: rows, roots: ["demo": source.path],
             journal: journal, log: log, destinations: ["demo": mapping], onProgress: { checked, _ in
-                if checked == 0 { XCTAssertNoThrow(try occupied.write(to: collision)) }
+                guard checked == 0 else { return }
+                do {
+                    try occupied.write(to: collision)
+                } catch {
+                    XCTFail("Impossibile creare la collisione di prova: \(error)")
+                }
             })
         XCTAssertEqual(first.renamed, 1)
         XCTAssertEqual(first.failed, 1)
