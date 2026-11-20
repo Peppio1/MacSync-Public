@@ -1,0 +1,182 @@
+name: Publish verified v0.18.12 signed update
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-v01812.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macsync-publish-v01812
+  cancel-in-progress: false
+
+env:
+  RUN_ID: '44732177452'
+  TESTED_SHA: '6aa53401204baaa724f18f8c8fa4ebeb394f8337'
+  ARTIFACT_ID: '14628891737'
+  ARTIFACT_SHA: '5ed017db0f24a8d50cbf09fa3be30feb9b1415d1219005dff0da25144fa83eb1'
+  TAG: 'v0.18.12'
+  ZIP_NAME: 'MacSync-v0.18.12-macOS-universal.zip'
+  DMG_NAME: 'MacSync-v0.18.12-macOS-universal.dmg'
+  PUBLIC_KEY: 'SDsuoQo3jF5WNHSC1yo6B92Nanc9bBdjHJ8O474h9LU='
+
+jobs:
+  sign:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[publish-v0.18.12]')
+    runs-on: macos-15
+    timeout-minutes: 15
+    environment: macsync-release
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Verify original successful run, artifact digest and exact packaged application
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Peppio1/MacSync-Public
+          test "$(git rev-parse HEAD^)" = "$TESTED_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" > build-run.json
+          jq -e --arg sha "$TESTED_SHA" '.head_sha == $sha and .head_branch == "develop-v0.18.12" and .run_attempt == 1 and .status == "completed" and .conclusion == "success"' build-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/attempts/1/jobs" > build-jobs.json
+          jq -e 'any(.jobs[]; .name == "build" and .conclusion == "success" and any(.steps[]; .name == "Check 57 PNG artifacts" and .conclusion == "success") and any(.steps[]; .name == "Prepare pinned Rclone binaries" and .conclusion == "success") and any(.steps[]; .name == "Build universal protected SMB rename helper" and .conclusion == "success") and any(.steps[]; .name == "Tests" and .conclusion == "success") and any(.steps[]; .name == "Create graphical DMG and verify mounted contents" and .conclusion == "success") and any(.steps[]; .name == "Validate Sparkle 2.10.0 with disposable signing keys" and .conclusion == "success"))' build-jobs.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > artifact.json
+          jq -e --arg sha "$TESTED_SHA" --arg digest "sha256:$ARTIFACT_SHA" --argjson run "$RUN_ID" '.name == "MacSync-macOS-universal" and .expired == false and .digest == $digest and .workflow_run.id == $run and .workflow_run.head_sha == $sha' artifact.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > tested-artifact.zip
+          printf '%s  tested-artifact.zip\n' "$ARTIFACT_SHA" | shasum -a 256 -c -
+          mkdir signing-input
+          unzip -q tested-artifact.zip -d signing-input
+          (cd signing-input && shasum -a 256 -c "$ZIP_NAME.sha256" && shasum -a 256 -c "$DMG_NAME.sha256")
+          mkdir "$RUNNER_TEMP/verify-package"
+          ditto -x -k "signing-input/$ZIP_NAME" "$RUNNER_TEMP/verify-package"
+          app="$RUNNER_TEMP/verify-package/MacSync.app"
+          plist="$app/Contents/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$plist")" = com.macsync.prototype
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$plist")" = 0.18.12
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$plist")" = 192
+          test "$(/usr/libexec/PlistBuddy -c 'Print SUPublicEDKey' "$plist")" = "$PUBLIC_KEY"
+          test "$(/usr/libexec/PlistBuddy -c 'Print SUFeedURL' "$plist")" = 'https://github.com/Peppio1/MacSync-Public/releases/latest/download/appcast.xml'
+          test "$(/usr/libexec/PlistBuddy -c 'Print SURequireSignedFeed' "$plist")" = true
+          test "$(/usr/libexec/PlistBuddy -c 'Print SUVerifyUpdateBeforeExtraction' "$plist")" = true
+          printf '%s  %s\n' '0dd750be1d060b75f6b4075122e7ef2bf7f59d74090a3872217dc9a417bd5620' 'Packaging/Branding/MacSync-Approved-Original.png' | shasum -a 256 -c -
+          python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["approved_original"] is True and d["source_sha256"]=="0dd750be1d060b75f6b4075122e7ef2bf7f59d74090a3872217dc9a417bd5620"' "$app/Contents/Resources/branding-provenance.json"
+          codesign --verify --all-architectures --deep --strict "$app"
+          lipo "$app/Contents/MacOS/MacSync" -verify_arch arm64 x86_64
+          lipo "$app/Contents/MacOS/MacSyncRecovery" -verify_arch arm64 x86_64
+          lipo "$app/Contents/Helpers/rclone" -verify_arch arm64 x86_64
+          codesign --verify --strict --all-architectures "$app/Contents/Helpers/rclone"
+          lipo "$app/Contents/Helpers/rclone-smb-rename" -verify_arch arm64 x86_64
+          codesign --verify --strict --all-architectures "$app/Contents/Helpers/rclone-smb-rename"
+          "$app/Contents/Helpers/rclone" version | grep -F "rclone v1.76.0"
+          hdiutil verify "signing-input/$DMG_NAME"
+          bash Packaging/prepare-release-signing.sh
+      - name: Sign tested archive and appcast with protected production key
+        env:
+          MACSYNC_SPARKLE_PRIVATE_KEY: ${{ secrets.MACSYNC_SPARKLE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          GITHUB_SHA="$TESTED_SHA" GITHUB_RUN_ID="$RUN_ID" bash Packaging/sign-release-candidate.sh "signing-input/$ZIP_NAME"
+          cmp "signing-input/$ZIP_NAME" "signing-output/$ZIP_NAME"
+          cmp "signing-input/$DMG_NAME" "signing-output/$DMG_NAME"
+          cp "signing-input/$DMG_NAME.sha256" signing-output/
+          (cd signing-output && shasum -a 256 -c SHA256SUMS && shasum -a 256 -c "$DMG_NAME.sha256")
+      - uses: actions/upload-artifact@v6
+        with:
+          name: MacSync-v01812-signed
+          path: signing-output/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: sign
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/download-artifact@v5
+        with:
+          name: MacSync-v01812-signed
+          path: candidate
+      - name: Independently verify signed package and feed metadata
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "$TESTED_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+          cd candidate
+          test "$(grep '^commit=' build-provenance.txt)" = "commit=$TESTED_SHA"
+          test "$(grep '^run=' build-provenance.txt)" = "run=$RUN_ID"
+          test "$(grep '^version=' build-provenance.txt)" = "version=0.18.12"
+          sha256sum -c SHA256SUMS
+          sha256sum -c "$ZIP_NAME.sha256"
+          sha256sum -c "$DMG_NAME.sha256"
+          printf '302a300506032b6570032100' | xxd -r -p > /tmp/macsync-pub.der
+          printf '%s' "$PUBLIC_KEY" | base64 -d >> /tmp/macsync-pub.der
+          base64 -d "$ZIP_NAME.edsignature" > /tmp/macsync-signature.bin
+          openssl pkeyutl -verify -pubin -keyform DER -inkey /tmp/macsync-pub.der -rawin -in "$ZIP_NAME" -sigfile /tmp/macsync-signature.bin
+          python3 - <<'PY'
+          import os, pathlib, xml.etree.ElementTree as ET
+          name=os.environ['ZIP_NAME']
+          ns='{http://www.andymatuschak.org/xml-namespaces/sparkle}'
+          item=ET.parse('appcast.xml').getroot().find('channel/item')
+          assert item is not None
+          assert item.findtext(ns+'version')=='192'
+          assert item.findtext(ns+'shortVersionString')=='0.18.12'
+          assert item.findtext(ns+'minimumSystemVersion')=='13.0'
+          enc=item.find('enclosure')
+          assert enc.attrib['url']=='https://github.com/Peppio1/MacSync-Public/releases/download/v0.18.12/'+name
+          assert enc.attrib[ns+'edSignature']==pathlib.Path(name+'.edsignature').read_text().strip()
+          assert int(enc.attrib['length'])==pathlib.Path(name).stat().st_size
+          PY
+      - name: Upload to a draft and expose the update only after all assets are present
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release already exists: refusing to overwrite"; exit 1
+          fi
+          if existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null)"; then
+            test "$existing" = "$TESTED_SHA"
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$TESTED_SHA" >/dev/null
+          fi
+          gh release create "$TAG" \
+            "candidate/$DMG_NAME" "candidate/$DMG_NAME.sha256" \
+            "candidate/$ZIP_NAME" "candidate/$ZIP_NAME.sha256" \
+            "candidate/$ZIP_NAME.edsignature" candidate/appcast.xml \
+            candidate/build-provenance.txt candidate/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --draft --latest=false \
+            --title "MacSync v0.18.12 — Aggiornamento di collaudo" \
+            --notes-file docs/RELEASE_v0.18.12.md
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,assets > draft.json
+          jq -e '.isDraft == true and .isPrerelease == false and (.assets | length == 8) and all(.assets[]; .size > 0)' draft.json
+          python3 - <<'PY'
+          import json, pathlib
+          local={p.name:p.stat().st_size for p in pathlib.Path('candidate').iterdir() if p.is_file()}
+          remote={p['name']:p['size'] for p in json.load(open('draft.json'))['assets']}
+          assert len(local)==8 and local==remote
+          PY
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,assets,url > published.json
+          jq -e '.isDraft == false and .isPrerelease == false and (.assets | length == 8)' published.json
+          gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name | grep -Fx "$TAG"
+          curl --fail --location --silent --show-error --retry 3 "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/appcast.xml" -o public-appcast.xml
+          cmp public-appcast.xml candidate/appcast.xml
+          cat published.json
