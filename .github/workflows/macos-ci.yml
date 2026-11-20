@@ -2,7 +2,7 @@ name: macOS CI
 
 on:
   push:
-    branches: [main, develop-v0.18.1, develop-v0.18.2, develop-v0.18.3, develop-v0.18.4, develop-v0.18.5, develop-v0.18.6, develop-v0.18.7, develop-v0.18.11]
+    branches: [main, develop-v0.18.1, develop-v0.18.2, develop-v0.18.3, develop-v0.18.4, develop-v0.18.5, develop-v0.18.6, develop-v0.18.7, develop-v0.18.11, develop-v0.18.12]
     paths:
       - 'Package.swift'
       - 'Sources/**'
@@ -55,8 +55,14 @@ jobs:
           approved="$("$RUNNER_TEMP/macsync-packaging/bin/python" -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["approved_original"]).lower())' "$RUNNER_TEMP/macsync-branding/branding-provenance.json")"
           echo "approved=$approved" >> "$GITHUB_OUTPUT"
           echo "Approved original: $approved"
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache: false
       - name: Prepare pinned Rclone binaries
         run: bash Packaging/prepare-rclone.sh "$RUNNER_TEMP/macsync-rclone"
+      - name: Build universal protected SMB rename helper
+        run: bash Packaging/prepare-rclone-smb-rename.sh "$RUNNER_TEMP/macsync-rclone"
       - name: Tests
         env:
           MACSYNC_TEST_RCLONE: ${{ runner.temp }}/macsync-rclone/rclone
@@ -119,8 +125,12 @@ jobs:
           install -m 755 "$RUNNER_TEMP/macsync-rclone/rclone" dist/MacSync.app/Contents/Helpers/rclone
           lipo dist/MacSync.app/Contents/Helpers/rclone -verify_arch arm64 x86_64
           codesign --force --sign - dist/MacSync.app/Contents/Helpers/rclone
+          install -m 755 "$RUNNER_TEMP/macsync-rclone/rclone-smb-rename" dist/MacSync.app/Contents/Helpers/rclone-smb-rename
+          lipo dist/MacSync.app/Contents/Helpers/rclone-smb-rename -verify_arch arm64 x86_64
+          codesign --force --sign - dist/MacSync.app/Contents/Helpers/rclone-smb-rename
           mkdir -p dist/MacSync.app/Contents/Resources
           install -m 644 Packaging/Rclone-LICENSE.txt dist/MacSync.app/Contents/Resources/Rclone-LICENSE.txt
+          install -m 644 Packaging/RcloneSMBRename/go-smb2-LICENSE.txt dist/MacSync.app/Contents/Resources/go-smb2-LICENSE.txt
           install -m 644 "$RUNNER_TEMP/macsync-rclone/provenance.txt" dist/MacSync.app/Contents/Resources/Rclone-provenance.txt
           install -m 755 "Packaging/Ripristina MacSync.command" "dist/MacSync.app/Contents/Resources/Ripristina MacSync.command"
           for f in MacSync.icns MacSyncBrand.png MacSyncMenuTemplate.png branding-provenance.json; do
@@ -142,7 +152,7 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print LSMinimumSystemVersion' "$info")" = 13.0
           test "$(/usr/libexec/PlistBuddy -c 'Print LSUIElement' "$info")" = true
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIconFile' "$info")" = MacSync.icns
-          test "$version" = 0.18.11
+          test "$version" = 0.18.12
           test -s dist/MacSync.app/Contents/Resources/MacSync.icns
           test -x "$exe"
           lipo "$exe" -info
@@ -163,6 +173,8 @@ jobs:
           codesign --verify --strict "$unpacked/Contents/MacOS/MacSyncRecovery"
           lipo "$unpacked/Contents/Helpers/rclone" -verify_arch arm64 x86_64
           codesign --verify --strict --all-architectures "$unpacked/Contents/Helpers/rclone"
+          lipo "$unpacked/Contents/Helpers/rclone-smb-rename" -verify_arch arm64 x86_64
+          codesign --verify --strict --all-architectures "$unpacked/Contents/Helpers/rclone-smb-rename"
           "$unpacked/Contents/Helpers/rclone" version | grep -F "rclone v1.76.0"
           (cd dist && shasum -a 256 "$zip" > "$zip.sha256")
       - name: Create graphical DMG and verify mounted contents
@@ -288,12 +300,12 @@ jobs:
       - name: Verify exact protected candidate and prepare signing tools
         run: |
           set -euo pipefail
-          (cd signing-input && shasum -a 256 -c MacSync-v0.18.11-macOS-universal.zip.sha256)
-          (cd signing-input && shasum -a 256 -c MacSync-v0.18.11-macOS-universal.dmg.sha256)
+          (cd signing-input && shasum -a 256 -c MacSync-v0.18.12-macOS-universal.zip.sha256)
+          (cd signing-input && shasum -a 256 -c MacSync-v0.18.12-macOS-universal.dmg.sha256)
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           printf '%s  %s\n' '0dd750be1d060b75f6b4075122e7ef2bf7f59d74090a3872217dc9a417bd5620' 'Packaging/Branding/MacSync-Approved-Original.png' | shasum -a 256 -c -
           mkdir "$RUNNER_TEMP/verify-branded-package"
-          ditto -x -k signing-input/MacSync-v0.18.11-macOS-universal.zip "$RUNNER_TEMP/verify-branded-package"
+          ditto -x -k signing-input/MacSync-v0.18.12-macOS-universal.zip "$RUNNER_TEMP/verify-branded-package"
           python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["approved_original"] is True and d["source_sha256"]=="0dd750be1d060b75f6b4075122e7ef2bf7f59d74090a3872217dc9a417bd5620"' "$RUNNER_TEMP/verify-branded-package/MacSync.app/Contents/Resources/branding-provenance.json"
           codesign --verify --deep --strict "$RUNNER_TEMP/verify-branded-package/MacSync.app"
           bash Packaging/prepare-release-signing.sh
@@ -302,7 +314,7 @@ jobs:
           MACSYNC_SPARKLE_PRIVATE_KEY: ${{ secrets.MACSYNC_SPARKLE_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          bash Packaging/sign-release-candidate.sh signing-input/MacSync-v0.18.11-macOS-universal.zip
+          bash Packaging/sign-release-candidate.sh signing-input/MacSync-v0.18.12-macOS-universal.zip
       - uses: actions/upload-artifact@v6
         with:
           name: MacSync-signed-release-candidate

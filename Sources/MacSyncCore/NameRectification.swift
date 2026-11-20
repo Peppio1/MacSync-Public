@@ -170,7 +170,20 @@ public enum NameRectification {
                     try journal.invalidateNameScan(rootID: item.rootID, side: item.side)
                     report(item, action: "name_rectify_start", level: .info,
                         message: item.side.label + " · Nuovo nome: " + move.newName)
-                    try parent.rectifyName(item.name, as: move.newName, matching: old, shouldContinue: shouldContinue)
+                    if item.side == .destination && binding.volume.fileSystem.lowercased() == "smbfs" {
+                        try parent.checkRectification(old: item.name, new: move.newName, matching: old)
+                        try SMBNameRectification.rename(volume: binding.volume, parent: parentURL,
+                            oldName: item.name, newName: move.newName, original: old, shouldContinue: shouldContinue)
+                        try parent.verify()
+                        let finalNames = try FileManager.default.contentsOfDirectory(atPath: parentURL.path)
+                        guard !finalNames.contains(where: { $0.utf8.elementsEqual(item.name.utf8) }),
+                              finalNames.contains(where: { $0.utf8.elementsEqual(move.newName.utf8) }),
+                              move.matches(try parent.leaf(move.newName), renamed: true) else {
+                            throw MountedCopyError.destinationChanging
+                        }
+                    } else {
+                        try parent.rectifyName(item.name, as: move.newName, matching: old, shouldContinue: shouldContinue)
+                    }
                 } else {
                     guard !oldExists, newExists, move.matches(try parent.leaf(move.newName), renamed: true) else {
                         throw MountedCopyError.destinationConflict
