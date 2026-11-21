@@ -239,15 +239,17 @@ final class MountedCopyController: ObservableObject {
                         lastProgress = now
                         DispatchQueue.main.async { [weak self] in self?.rectificationProgress = (checked, total) }
                     }, shouldContinue:{!token.isCancelled})
-                let outstanding = try NameRectification.pendingProtection(journal: journal)
+                let sides = try NameRectification.pendingSideSummary(journal: journal)
                 pending = try journal.hasPendingNameRectification()
-                let localPending = outstanding.relations.filter { $0.side == .source }.count
-                let remotePending = outstanding.relations.filter { $0.side == .destination }.count
+                let localPending = sides.sourcePending
+                let remotePending = sides.destinationPending
+                let localCompleted = pending ? sides.sourceCompleted : result.sourceRenamed
+                let remoteCompleted = pending ? sides.destinationCompleted : result.destinationRenamed
                 try? log.record(level: pending ? .warning : .info, rootID: "app",
                     action: pending ? "name_rectification_waiting" : "name_rectification_finish",
                     durationSeconds: ProcessInfo.processInfo.systemUptime - started, message: "Esito del lotto")
                 resolved=result.resolvedIDs
-                status="iMac: \(result.sourceRenamed) rinominati, \(localPending) pendenti · SMB: \(result.destinationRenamed) rinominati, \(remotePending) pendenti · \(result.skipped) conflitti · \(result.failed) non verificati"
+                status="iMac: \(localCompleted) rinominati, \(localPending) pendenti · SMB: \(remoteCompleted) rinominati, \(remotePending) pendenti · \(result.skipped) conflitti · \(result.failed) non verificati"
                 if result.cancelled { status+=" · interrotto" }
                 if let reason = result.firstFailure { status += "\n" + reason }
             } catch { status="Rettifica interrotta: "+SyncDiagnostic.describe(error)+"; controllare il registro" }
