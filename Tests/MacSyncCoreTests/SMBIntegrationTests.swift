@@ -222,6 +222,57 @@ final class SMBIntegrationTests: XCTestCase {
         print("MACSYNC_SMB_CAPABILITY directory_open=yes fstatat=yes")
     }
 
+
+    func testRealSMBArchiveQuickAndDeepAuditDoNotMutateDestinationOrQueue() throws {
+        let env = try Environment()
+        let (base, source) = try fixtureSource()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let target = try env.workspace("audit")
+        defer { try? FileManager.default.removeItem(at: target) }
+        let matching = Data("synthetic raw data".utf8)
+        let unmatched = Data("synthetic missing data".utf8)
+        let untouched = Data("synthetic destination extra".utf8)
+        let sourceMatch = source.appendingPathComponent("same.dng")
+        let targetMatch = target.appendingPathComponent("same.dng")
+        let extra = target.appendingPathComponent("extra.jpg")
+        try matching.write(to: sourceMatch)
+        try matching.write(to: targetMatch)
+        try unmatched.write(to: source.appendingPathComponent("missing.psd"))
+        try untouched.write(to: extra)
+        let date = Date(timeIntervalSince1970: 1_780_000_000)
+        try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: sourceMatch.path)
+        try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: targetMatch.path)
+
+        let database = base.appendingPathComponent("audit.sqlite")
+        let inventory = try LocalInventory(path: database.path)
+        _ = try inventory.reconcile(rootID: "smb-audit", root: source)
+        let journal = try ChangeJournal(path: database.path)
+        let queueBefore = try journal.pending().map(\.relativePath).sorted()
+        let mapping = try MountedFolderMapping(rootID: "smb-audit", source: source, target: target)
+        let audit = try ArchiveAudit(journal: journal, mappings: [mapping])
+        let quickStart = ProcessInfo.processInfo.systemUptime
+        let quick = try audit.run(mode: .quick)
+        let quickSeconds = ProcessInfo.processInfo.systemUptime - quickStart
+        XCTAssertEqual(quick.bytesRead, 0, "Quick mode must never hash file contents")
+        XCTAssertEqual(quick.queuedRepairs, 0)
+        XCTAssertEqual(quick.count(.missing), 1)
+        XCTAssertEqual(quick.count(.extra), 1)
+        XCTAssertEqual(try journal.pending().map(\.relativePath).sorted(), queueBefore)
+        let deepStart = ProcessInfo.processInfo.systemUptime
+        let deep = try audit.run(mode: .deep)
+        let deepSeconds = ProcessInfo.processInfo.systemUptime - deepStart
+        XCTAssertEqual(deep.count(.matching), 1)
+        XCTAssertEqual(deep.count(.missing), 1)
+        XCTAssertEqual(deep.count(.extra), 1)
+        XCTAssertEqual(deep.queuedRepairs, 0)
+        XCTAssertGreaterThan(deep.bytesRead, 0, "Deep mode must actually read content")
+        XCTAssertEqual(try journal.pending().map(\.relativePath).sorted(), queueBefore)
+        XCTAssertEqual(try Data(contentsOf: targetMatch), matching)
+        XCTAssertEqual(try Data(contentsOf: extra), untouched)
+        print("MACSYNC_SMB_BENCHMARK audit_quick_seconds=\(quickSeconds) source_scan_seconds=\(quick.sourceMetrics?.scanSeconds ?? -1) destination_scan_seconds=\(quick.destinationMetrics?.scanSeconds ?? -1) compare_seconds=\(quick.comparisonSeconds ?? -1)")
+        print("MACSYNC_SMB_BENCHMARK audit_deep_seconds=\(deepSeconds) source_scan_seconds=\(deep.sourceMetrics?.scanSeconds ?? -1) destination_scan_seconds=\(deep.destinationMetrics?.scanSeconds ?? -1) compare_seconds=\(deep.comparisonSeconds ?? -1)")
+    }
+
     func testRealSMBDirectoryListingBenchmark200() throws {
         let env = try Environment()
         let root = try env.workspace("metadata-benchmark")
