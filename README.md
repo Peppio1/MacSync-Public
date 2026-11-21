@@ -45,7 +45,7 @@ Versione precedente: [v0.15.0 — pre-release convalidata](https://github.com/Pe
 - Copie prudenti con staging, controlli di identità e stabilità, protezione delle sostituzioni e ripresa dalla coda dopo interruzioni.
 - Cancellazioni speculari facoltative, disattivate per impostazione predefinita, con consenso persistente esplicito; recupero opzionale e conservazione da 1 a 30 giorni o illimitata.
 - Controllo della disponibilità delle destinazioni e notifiche facoltative per disconnessioni prolungate.
-- Verifica archivio manuale o programmata: confronto rapido dei metadati oppure approfondito SHA-256; diagnostica non distruttiva e riallineamento facoltativo dei file mancanti/differenti.
+- **Candidata v0.18.15:** verifica archivio manuale o programmata con due scelte: **Rapida** (metadati e tolleranza 2 secondi, senza SHA-256) o **Intelligente** (SHA-256 selettivo sui file dubbi secondo i metadati). La verifica integrale rimane soltanto una diagnostica interna; riallineamento controllato e nessuna eliminazione automatica.
 - Riconoscimento dei file già copiati con verifica SHA-256 e conferma esplicita, utile per un archivio inizializzato in precedenza.
 - Stato delle operazioni, avanzamento, tempi, velocità media di copia, storico per ciclo, dettagli per file e registro esportabile.
 - Interfaccia in italiano, con temi chiaro e scuro e layout adattivo.
@@ -69,7 +69,7 @@ MacSync usa la condivisione già montata e accessibile al Finder. Non gestisce V
 - Le protezioni tecniche sono obbligatorie. Le soglie facoltative contro eliminazioni massive e sorgente vuota sono disattivate per default.
 - Spostamenti e rinomine sono trattati come nuova copia e rimozione del percorso precedente; le cancellazioni attendono il completamento degli upload pendenti.
 - Il trasferimento interrotto riparte dall'inizio del singolo file; non è previsto resume a offset.
-- Le normali copie verificano stabilità, identità e dimensione; non effettuano sempre un hash completo. La verifica approfondita legge i file anche dalla destinazione e può consumare banda VPN.
+- Le normali copie verificano stabilità, identità e dimensione; non effettuano sempre un hash completo. Nella candidata v0.18.15, **Rapida** non legge i contenuti e **Intelligente** usa SHA-256 soltanto quando necessario, riducendo le letture attraverso SMB/VPN rispetto a un controllo integrale.
 - I backup SQLite sono verificati e autonomi, includono i dati WAL confermati e vengono pubblicati senza sovrascritture. Non sostituiscono il backup delle fotografie o dei documenti.
 - Non è garantita l'atomicità su tutte le implementazioni SMB; identità dei file dopo rimontaggio, ACL Windows, guasti reali e sospensione devono essere collaudati.
 
@@ -120,7 +120,7 @@ Per una destinazione di rete, collegarsi prima alla condivisione SMB con Finder,
 
 1. Attendere l'inventario delle sorgenti locali.
 2. Aprire **Verifica archivio** ed eseguire un confronto diagnostico, senza riallineamento.
-3. Se la destinazione contiene già una copia iniziale, usare la verifica approfondita e il riconoscimento dei file identici con conferma esplicita. Il confronto SHA-256 legge anche i dati remoti.
+3. Se la destinazione contiene già una copia iniziale, usare **Verifica intelligente** per il riconoscimento selettivo dei file compatibili e la conferma controllata. Il calcolo SHA-256 sui file dubbi può leggere anche dati remoti; una corrispondenza di soli metadati non dimostra l'identità del contenuto.
 4. Nella **Panoramica**, scegliere **Avvia sincronizzazione**.
 5. Controllare file copiati, coda residua, errori e risultati in **Registro attività**.
 
@@ -145,7 +145,7 @@ L'attivazione del mirror richiede consenso esplicito. Provare questa funzione es
 - **Panoramica:** stato, coda, avanzamento e riepilogo dei cicli.
 - **Cartelle:** configurazione e associazione dei percorsi.
 - **Pianificazione:** frequenza e prossimi cicli.
-- **Verifica archivio:** confronto rapido o SHA-256, programmazione e manutenzione controllata.
+- **Verifica archivio (candidata v0.18.15):** soltanto Rapida e Intelligente (SHA-256 selettivo), programmazione e manutenzione controllata.
 - **Registro attività:** esiti, errori, dettagli e esportazione TSV.
 - **Impostazioni:** avvio, aspetto, recupero, sicurezza e notifiche.
 
