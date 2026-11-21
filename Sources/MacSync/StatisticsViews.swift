@@ -527,15 +527,13 @@ struct ArchiveAuditPanel: View {
         MacSyncPanel("Configurazione verifica", icon: "gearshape", compact: true) {
             Text("Metodo di verifica").font(.subheadline.weight(.semibold))
             Picker("Metodo", selection: $copy.auditSettings.mode) {
-                Text("Rapida (metadati)").tag(ArchiveAuditMode.quick)
-                Text("Intelligente").tag(ArchiveAuditMode.intelligent)
-                Text("Completa (SHA-256)").tag(ArchiveAuditMode.deep)
+                ForEach(ArchiveAuditMode.selectableModes, id: \.rawValue) { mode in
+                    Text(mode == .quick ? "Rapida (metadati)" : "Intelligente").tag(mode)
+                }
             }.pickerStyle(.segmented).labelsHidden()
             Text(copy.auditSettings.mode == .quick
-                ? "Confronta percorsi, dimensioni e date."
-                : copy.auditSettings.mode == .intelligent
-                ? "Metadati e SHA-256 selettivo quando le date differiscono a parità di dimensione."
-                : "Confronta il contenuto dei file tramite SHA-256; può leggere l’intero archivio via VPN.")
+                ? "Confronta percorsi, dimensioni e date (tolleranza 2 secondi), senza leggere i contenuti."
+                : "Confronta i metadati (tolleranza 2 secondi) e usa SHA-256 selettivo per le date discordanti a parità di dimensione.")
                 .font(detailFont).foregroundStyle(.secondary)
             Divider()
             Text("Riconoscimento e accodamento automatici, con backup del database. I metadati non provano l'identità del contenuto. Nessuna modifica al server.")
