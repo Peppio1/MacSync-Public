@@ -12,6 +12,44 @@ final class NameRectificationTests:XCTestCase {
         }
     }
 
+    func testSMBPreflightDoesNotDelayAlreadySettledMetadata() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .resolvingSymlinksInPath()
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let file = root.appendingPathComponent("photo?.jpg")
+        try Data("archive".utf8).write(to: file)
+        try fm.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -120)],
+            ofItemAtPath: file.path)
+        let parent = try AnchoredDirectory(root, expectedVolume: DirectoryBinding.read(root).volume)
+        let started = ProcessInfo.processInfo.systemUptime
+        let snapshot = try NameRectification.stableSMBSnapshot(
+            parent: parent, oldName: file.lastPathComponent, shouldContinue: { true })
+        XCTAssertEqual(snapshot.st_size, 7)
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 2,
+            "Old archive files must not wait for the SMB fresh-write cache")
+    }
+
+    func testSMBPreflightCancellationStopsWithoutRecordingAResult() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .resolvingSymlinksInPath()
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let file = root.appendingPathComponent("recent?.jpg")
+        try Data("recent".utf8).write(to: file)
+        try fm.setAttributes([.modificationDate: Date()], ofItemAtPath: file.path)
+        let parent = try AnchoredDirectory(root, expectedVolume: DirectoryBinding.read(root).volume)
+        XCTAssertThrowsError(try NameRectification.stableSMBSnapshot(
+            parent: parent, oldName: file.lastPathComponent, shouldContinue: { false })) { error in
+                guard case SeedVerificationError.cancelled = error else {
+                    return XCTFail("Cancellation must be propagated, not counted as a skip")
+                }
+            }
+        XCTAssertEqual(try Data(contentsOf: file), Data("recent".utf8))
+    }
+
     func testNestedRenameAndConflictPreserveData() throws {
         let base=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
         let root=base.appendingPathComponent("source")
