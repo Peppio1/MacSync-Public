@@ -72,6 +72,16 @@ if [ "$ready" -ne 1 ]; then
   echo "::error::Temporary Samba did not listen on loopback TCP/445"
   exit 1
 fi
+# Confirm server-side authentication separately from Apple's SMB client.
+authfile="$base/smbclient-auth"
+printf 'username = %s\npassword = %s\n' "$user" "$password" > "$authfile"
+chmod 600 "$authfile"
+if ! "$prefix/bin/smbclient" "//127.0.0.1/MacSyncCI" -A "$authfile" -c "ls" > "$base/smbclient.log" 2>&1; then
+  echo "::error::Samba-side SMB authentication failed before macOS mount"
+  tail -n 8 "$base/smbclient.log" || true
+  exit 1
+fi
+echo "Samba SMB authentication verified"
 mkdir -p "$HOME/Library/Preferences"
 nsmb="$HOME/Library/Preferences/nsmb.conf"
 if [ -e "$nsmb" ]; then
@@ -81,10 +91,15 @@ fi
 printf '[127.0.0.1:%s]\npassword=%s\n' "$user" "$password" > "$nsmb"
 chmod 600 "$nsmb"
 if ! /sbin/mount_smbfs -N "//$user@127.0.0.1/MacSyncCI" "$mountpoint" > "$base/mount.log" 2>&1; then
-  echo "::error::Apple SMB client could not mount the disposable Samba share"
-  # The mount command is passwordless; its concise error contains no secret.
-  tail -n 12 "$base/mount.log" || true
-  exit 1
+  echo "Apple SMB -N did not accept the ephemeral nsmb.conf entry; retrying once with an ephemeral credential"
+  # No shell tracing, stdout or stderr from the command; credential is CI-only,
+  # masked in GitHub logs and never placed in any repository or artifact.
+  if ! /sbin/mount_smbfs "//$user:$password@127.0.0.1/MacSyncCI" "$mountpoint" > "$base/mount2.log" 2>&1; then
+    echo "::error::Apple SMB client could not mount the verified disposable share"
+    tail -n 10 "$base/mount.log" || true
+    tail -n 10 "$base/mount2.log" || true
+    exit 1
+  fi
 fi
 fstype="$(/usr/bin/stat -f '%T' "$mountpoint")"
 if [ "$fstype" != "smbfs" ]; then
