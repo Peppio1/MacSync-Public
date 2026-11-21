@@ -2,7 +2,7 @@ name: macOS SMB Integration - disposable Samba
 
 on:
   push:
-    branches: [develop-smb-integration-harness, develop-smb-diagnostics-precision]
+    branches: [develop-smb-integration-harness, develop-smb-diagnostics-precision, develop-smb-diagnostics-helper]
     paths:
       - '.github/workflows/macos-smb-integration.yml'
       - 'scripts/ci/**'
@@ -46,6 +46,7 @@ jobs:
         run: |
           echo "MACSYNC_TEST_RCLONE=$RUNNER_TEMP/macsync-smb-rclone/rclone" >> "$GITHUB_ENV"
           echo "MACSYNC_TEST_SMB_HELPER=$RUNNER_TEMP/macsync-smb-rclone/rclone-smb-rename" >> "$GITHUB_ENV"
+          echo "MACSYNC_TEST_SMB_DIAGNOSTIC_HELPER=$RUNNER_TEMP/macsync-smb-rclone/rclone-smb-rename-diagnostic" >> "$GITHUB_ENV"
       - name: Install disposable Samba server
         run: python3 scripts/ci/record-duration.py samba-install -- brew install samba
       - name: Start SMB server and mount genuine smbfs
@@ -60,6 +61,8 @@ jobs:
         run: python3 scripts/ci/record-duration.py rclone-direct-smb-probe -- bash scripts/ci/probe-rclone-smb.sh
       - name: Build actual protected SMB rename helper
         run: python3 scripts/ci/record-duration.py helper-build -- bash Packaging/prepare-rclone-smb-rename.sh "$RUNNER_TEMP/macsync-smb-rclone"
+      - name: Build isolated sanitized helper failure-class probe
+        run: python3 scripts/ci/record-duration.py helper-diagnostic-build -- bash scripts/ci/build-smb-diagnostic-helper.sh "$RUNNER_TEMP/macsync-smb-rclone"
       - name: Compare macOS smbfs identity to Go SMB2 server FileId
         run: python3 scripts/ci/record-duration.py smb-file-identity -- bash scripts/ci/probe-smb-identity.sh
       - name: Build Swift test targets separately from runtime measurements
