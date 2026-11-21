@@ -192,6 +192,35 @@ final class SMBIntegrationTests: XCTestCase {
         return process.terminationReason == .exit && process.terminationStatus == 0
     }
 
+    /// Read server-side metadata of only the synthetic test fixture. This
+    /// isolates Finder's cached timestamp from the SMB2 authoritative value.
+    private func serverModifiedNanos(_ env: Environment, file: URL) -> Int64? {
+        let prefix = env.mount.path + "/"
+        guard file.path.hasPrefix(prefix),
+              let fixtureRoot = ProcessInfo.processInfo.environment["MACSYNC_TEST_SMB_ROOT"] else {
+            return nil
+        }
+        let executable = URL(fileURLWithPath: fixtureRoot)
+            .appendingPathComponent("metadata-probe/smb-metadata-probe")
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else { return nil }
+        let p = Process()
+        p.executableURL = executable
+        var vars = ProcessInfo.processInfo.environment
+        vars["MACSYNC_TEST_SMB_OBJECT"] = String(file.path.dropFirst(prefix.count))
+        p.environment = vars
+        p.standardInput = FileHandle.nullDevice
+        let output = Pipe()
+        p.standardOutput = output
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else { return nil }
+        let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let parts = text.split(whereSeparator: \.isWhitespace)
+        guard parts.count == 5 else { return nil }
+        return Int64(parts[2])
+    }
+
     /// The operating case: a just-created file must be renamed safely, not
     /// left pending merely because smbfs metadata publication was delayed.
     func testRealSMBProtectedHelperRenameAndPreserveContents() throws {
@@ -202,10 +231,23 @@ final class SMBIntegrationTests: XCTestCase {
         let new = root.appendingPathComponent("new-name.jpg")
         let bytes = Data("checked rename preserves original".utf8)
         try bytes.write(to: old)
+        var before = stat()
+        XCTAssertEqual(old.path.withCString { Darwin.lstat($0, &before) }, 0)
+        let beforeNs = Int64(before.st_mtimespec.tv_sec) * 1_000_000_000 +
+            Int64(before.st_mtimespec.tv_nsec)
         let (status, duration) = try helperRename(env, old: old, new: new)
         guard status == 0 else {
             XCTAssertEqual(try Data(contentsOf: old), bytes)
             XCTAssertFalse(FileManager.default.fileExists(atPath: new.path))
+            var after = stat()
+            XCTAssertEqual(old.path.withCString { Darwin.lstat($0, &after) }, 0)
+            let afterNs = Int64(after.st_mtimespec.tv_sec) * 1_000_000_000 +
+                Int64(after.st_mtimespec.tv_nsec)
+            if let serverNs = serverModifiedNanos(env, file: old) {
+                print("MACSYNC_SMB_MTIME_DIAGNOSTIC requested_vs_server_ns=\(beforeNs - serverNs) mounted_now_vs_server_ns=\(afterNs - serverNs) requested_vs_mounted_now_ns=\(beforeNs - afterNs)")
+            } else {
+                print("MACSYNC_SMB_MTIME_DIAGNOSTIC server_metadata_unavailable=true")
+            }
             XCTFail("A fresh, unchanged file should be renamed by the protected helper")
             return
         }
