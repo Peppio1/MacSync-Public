@@ -52,7 +52,7 @@ if ! "$prefix/bin/testparm" -s "$conf" > "$base/testparm.log" 2>&1; then
   exit 1
 fi
 echo "Creating ephemeral SMB user (no credential output)"
-if ! printf '%s\n%s\n' "$password" "$password" | "$prefix/bin/smbpasswd" -s -a -c "$conf" "$user" > "$base/smbpasswd.log" 2>&1; then
+if ! printf '%s\n%s\n' "$password" "$password" | sudo "$prefix/bin/smbpasswd" -L -s -a -c "$conf" "$user" > "$base/smbpasswd.log" 2>&1; then
   echo "::error::Could not provision ephemeral Samba user"
   tail -n 15 "$base/smbpasswd.log"
   exit 1
