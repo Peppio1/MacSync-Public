@@ -448,10 +448,23 @@ public final class ArchiveAudit {
                         kind = abs(src!.modifiedAt-dst!.modifiedAt) <= 2 ? .matching : .different
                         if kind == .different { detail = "Data di modifica diversa" }
                         else if collectMetadataMatches && shouldCollectMetadataMatch(mapping.rootID,path) {
-                            let a = try Self.safeURL(path,mapping:mapping,destination:false,listingCache:listingCache)
-                            let b = try Self.safeURL(path,mapping:mapping,destination:true,listingCache:listingCache)
-                            let beforeA = try SeededArchiveVerifier.fingerprint(a)
-                            let beforeB = try SeededArchiveVerifier.fingerprint(b)
+                            let beforeA: SeedFileFingerprint
+                            let beforeB: SeedFileFingerprint
+                            if mode == .quick,
+                               let scannedSource = src!.verificationFingerprint,
+                               let scannedTarget = dst!.verificationFingerprint {
+                                // The scanner already obtained both no-follow stat records.
+                                // Keep the complete fingerprints for live pre-commit validation.
+                                // This removes two redundant SMB metadata requests and exact
+                                // parent listing walks for every pending quick-match candidate.
+                                beforeA = scannedSource
+                                beforeB = scannedTarget
+                            } else {
+                                let a = try Self.safeURL(path,mapping:mapping,destination:false,listingCache:listingCache)
+                                let b = try Self.safeURL(path,mapping:mapping,destination:true,listingCache:listingCache)
+                                beforeA = try SeededArchiveVerifier.fingerprint(a)
+                                beforeB = try SeededArchiveVerifier.fingerprint(b)
+                            }
                             guard beforeA.size == src!.size, beforeB.size == dst!.size,
                                   abs(beforeA.modifiedAt-src!.modifiedAt) < 0.002,
                                   abs(beforeB.modifiedAt-dst!.modifiedAt) < 0.002,
