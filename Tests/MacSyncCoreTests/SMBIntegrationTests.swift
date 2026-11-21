@@ -261,6 +261,14 @@ final class SMBIntegrationTests: XCTestCase {
         let deepStart = ProcessInfo.processInfo.systemUptime
         let deep = try audit.run(mode: .deep)
         let deepSeconds = ProcessInfo.processInfo.systemUptime - deepStart
+        if deep.count(.matching) != 1 {
+            // Emit only sanitized, synthetic finding categories and metadata.
+            // A remote smbfs timestamp/alias mismatch must not be mistaken
+            // for successful recognition or silently removed from the queue.
+            for finding in deep.findings where finding.relativePath == "same.dng" {
+                print("MACSYNC_SMB_DIAGNOSTIC audit_kind=\(finding.kind.label) detail=\(finding.detail) source_mtime=\(finding.sourceModifiedAt ?? -1) target_mtime=\(finding.targetModifiedAt ?? -1)")
+            }
+        }
         XCTAssertEqual(deep.count(.matching), 1)
         XCTAssertEqual(deep.count(.missing), 1)
         XCTAssertEqual(deep.count(.extra), 1)
