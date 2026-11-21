@@ -196,10 +196,19 @@ public enum NameRectification {
             moves = try JSONDecoder().decode([Move].self, from: resume.data)
         } else {
             var seen = Set<String>()
+            var unavailablePreflightDestinations = Set<String>()
             let paired = Dictionary(grouping: items, by: counterpartKey)
             for item in items where seen.insert(item.id).inserted {
                 guard shouldContinue() else { result.cancelled = true; return result }
                 guard let name = proposedName(item.name) else { result.skipped += 1; continue }
+                if item.side == .destination && unavailablePreflightDestinations.contains(item.rootID) {
+                    // No safe fingerprint can be persisted for an unseen file.
+                    // The operator can scan again once the volume is back.
+                    result.failed += 1
+                    report(item, action: "name_rectification_preflight_destination_deferred",
+                        level: .warning, message: "Destinazione non disponibile: verifica da ripetere")
+                    continue
+                }
                 let preflightStarted = ProcessInfo.processInfo.systemUptime
                 do {
                     defer { slowPhase(item, name: "preflight", started: preflightStarted) }
@@ -218,8 +227,17 @@ public enum NameRectification {
                     result.cancelled = true
                     return result
                 } catch {
-                    result.skipped += 1
-                    report(item, action: "name_rectify_skipped", level: .warning, message: SyncDiagnostic.describe(error))
+                    let reason = SyncDiagnostic.describe(error)
+                    if item.side == .destination && isSharedDestinationFailure(error) {
+                        unavailablePreflightDestinations.insert(item.rootID)
+                        result.failed += 1
+                        if result.firstFailure == nil { result.firstFailure = item.side.label + " · " + reason }
+                        report(item, action: "name_rectification_preflight_destination_unavailable",
+                            level: .warning, message: reason)
+                    } else {
+                        result.skipped += 1
+                        report(item, action: "name_rectify_skipped", level: .warning, message: reason)
+                    }
                 }
             }
             let collisions = Dictionary(grouping: moves, by: \.collisionKey).mapValues(\.count)
