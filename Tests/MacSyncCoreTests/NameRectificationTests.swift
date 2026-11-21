@@ -145,7 +145,7 @@ final class NameRectificationTests:XCTestCase {
             journal: journal, log: log, destinations: ["demo": map], onProgress: { done, _ in
                 if done == 0 {
                     do { try occupied.write(to: collision) }
-                    catch { XCTFail("Cannot create synthetic collision: \\(error)") }
+                    catch { XCTFail("Cannot create synthetic collision: \(error)") }
                 }
             })
         XCTAssertEqual(first.renamed, 1)
@@ -171,12 +171,12 @@ final class NameRectificationTests:XCTestCase {
         let count = 200
         for number in 0..<count {
             try Data([UInt8(number % 251)]).write(
-                to: base.appendingPathComponent("photo\\(number)?.jpg"))
+                to: base.appendingPathComponent("photo\(number)?.jpg"))
         }
         let parent = try AnchoredDirectory(base, expectedVolume: DirectoryBinding.read(base).volume)
         let cache = AuditDirectoryListingCache()
         for number in 0..<count {
-            let old = "photo\\(number)?.jpg", new = "photo\\(number)-.jpg"
+            let old = "photo\(number)?.jpg", new = "photo\(number)-.jpg"
             try parent.checkRectification(old: old, new: new, matching: parent.leaf(old),
                 preflightCache: cache)
         }
@@ -214,7 +214,7 @@ final class NameRectificationTests:XCTestCase {
         let result = try NameRectification.execute(items: items, roots: ["demo": source.path],
             journal: ChangeJournal(path: db), log: SyncActivityLog(path: db))
         let elapsed = ProcessInfo.processInfo.systemUptime - started
-        print("MACSYNC_LOCAL_NAME_BATCH count=\\(count) elapsed_seconds=\\(elapsed)")
+        print("MACSYNC_LOCAL_NAME_BATCH count=\(count) elapsed_seconds=\(elapsed)")
         XCTAssertEqual(result.renamed, count)
         XCTAssertEqual(result.skipped, 0)
         XCTAssertEqual(result.failed, 0)
