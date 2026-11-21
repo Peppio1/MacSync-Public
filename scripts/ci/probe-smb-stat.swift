@@ -10,4 +10,5 @@ guard CommandLine.arguments[1].withCString({ Darwin.lstat($0, &info) }) == 0 els
 let billion: Int64 = 1_000_000_000
 let birth = Int64(info.st_birthtimespec.tv_sec) * billion + Int64(info.st_birthtimespec.tv_nsec)
 let modified = Int64(info.st_mtimespec.tv_sec) * billion + Int64(info.st_mtimespec.tv_nsec)
-print("\(UInt64(info.st_ino)) \(birth) \(modified) \(Int64(info.st_size))")
+let changed = Int64(info.st_ctimespec.tv_sec) * billion + Int64(info.st_ctimespec.tv_nsec)
+print("\(UInt64(info.st_ino)) \(birth) \(modified) \(changed) \(Int64(info.st_size))")
