@@ -142,7 +142,11 @@ final class NameRectificationTests:XCTestCase {
         let reopened = try ChangeJournal(path: db)
         XCTAssertTrue(try reopened.hasPendingNameRectification())
         let worker = try MountedFolderCopyWorker(journal: reopened, log: log, mappings: [mapping])
-        XCTAssertTrue(try worker.runCycle(enabled: true).interrupted)
+        let held = try worker.runCycle(enabled: true)
+        XCTAssertFalse(held.interrupted, "Pending renames must not block unrelated jobs")
+        XCTAssertEqual(held.copied, 0)
+        XCTAssertGreaterThanOrEqual(held.deferred, 1)
+        XCTAssertTrue(try reopened.hasPendingNameRectification())
         let second = try NameRectification.execute(items: [], roots: ["demo": source.path], journal: reopened,
             log: log, destinations: ["demo": mapping])
         XCTAssertEqual(second.renamed, 1)
