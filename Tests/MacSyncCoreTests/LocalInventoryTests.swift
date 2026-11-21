@@ -12,6 +12,36 @@ final class LocalInventoryTests: XCTestCase {
         return (base, source, database)
     }
 
+    func testAuditFingerprintDoesNotChangePersistedInventoryEquality() throws {
+        let (base, root, _) = try temporaryFixture()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let folder = root.appendingPathComponent("photos", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("unchanged".utf8).write(to: folder.appendingPathComponent("a.jpg"))
+
+        let scanned = try LocalScanner.scan(root: root, ignoreDSStore: true)
+        for item in scanned where item.kind == "file" || item.kind == "directory" {
+            XCTAssertNotNil(item.verificationFingerprint)
+            // Reconstruct the fields actually persisted by file_inventory.
+            let stored = TrackedItem(
+                relativePath: item.relativePath, kind: item.kind,
+                size: item.size, modifiedAt: item.modifiedAt,
+                changeStamp: item.changeStamp
+            )
+            XCTAssertEqual(item, stored)
+            XCTAssertEqual(stored, item)
+            XCTAssertNotEqual(
+                item,
+                TrackedItem(
+                    relativePath: item.relativePath, kind: item.kind,
+                    size: item.size + 1, modifiedAt: item.modifiedAt,
+                    changeStamp: item.changeStamp
+                )
+            )
+        }
+        XCTAssertEqual(scanned.count, 2)
+    }
+
     func testRemotePOSIXMetadataScanPreservesFileIdentityAndExclusions() throws {
         let (base,root,_) = try temporaryFixture()
         defer { try? FileManager.default.removeItem(at:base) }
