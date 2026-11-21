@@ -2,17 +2,25 @@
 
 **Sincronizzazione unidirezionale nativa per macOS, verso cartelle locali o condivisioni SMB.**
 
-![Versione](https://img.shields.io/badge/version-0.17.0--pre--release-blue)
+![Ultima release](https://img.shields.io/badge/release-0.18.13-blue)
 ![Piattaforma](https://img.shields.io/badge/platform-macOS-lightgrey)
 [![macOS CI](https://github.com/Peppio1/MacSync-Public/actions/workflows/macos-ci.yml/badge.svg?branch=main)](https://github.com/Peppio1/MacSync-Public/actions/workflows/macos-ci.yml)
 
 MacSync è un'applicazione desktop sviluppata in Swift e SwiftUI per replicare cartelle di lavoro del Mac su una destinazione locale o di rete, senza installare componenti sul server. La sorgente rimane l'unica fonte di verità: nessuna sincronizzazione inversa.
 
-> **Stato: v0.17.0 pubblicata — pre-release di collaudo.** Validazione automatizzata e firma Ed25519 completate; DMG e ZIP universali disponibili. Collaudo su Mac fisico, Gatekeeper e rete SMB/VPN ancora necessario. Non utilizzare con dati aziendali prima della validazione operativa.
+> **Stato al 21 novembre 2026:** ultima release pubblicata **[v0.18.13](https://github.com/Peppio1/MacSync-Public/releases/tag/v0.18.13)** (aggiornamento di collaudo). La **v0.18.14** è un [candidato di sviluppo](docs/DEVELOPMENT_v0.18.14.md) con CI e benchmark locali sintetici superati, **non pubblicato** e ancora da validare su SMB/VPN reale. Per il collaudo usare soltanto dati di prova; non considerare il risultato CI una garanzia di sicurezza operativa.
 
 ## Download
 
-### MacSync v0.17.0 — pre-release di collaudo (17 novembre 2026)
+### Ultima release pubblicata: MacSync v0.18.13 (20 novembre 2026)
+
+- [DMG universale](https://github.com/Peppio1/MacSync-Public/releases/download/v0.18.13/MacSync-v0.18.13-macOS-universal.dmg) · [SHA-256 del DMG](https://github.com/Peppio1/MacSync-Public/releases/download/v0.18.13/MacSync-v0.18.13-macOS-universal.dmg.sha256)
+- [ZIP universale](https://github.com/Peppio1/MacSync-Public/releases/download/v0.18.13/MacSync-v0.18.13-macOS-universal.zip) · [SHA-256 dello ZIP](https://github.com/Peppio1/MacSync-Public/releases/download/v0.18.13/MacSync-v0.18.13-macOS-universal.zip.sha256) · [firma Ed25519](https://github.com/Peppio1/MacSync-Public/releases/download/v0.18.13/MacSync-v0.18.13-macOS-universal.zip.edsignature)
+- [Note ufficiali della release](https://github.com/Peppio1/MacSync-Public/releases/tag/v0.18.13)
+
+La v0.18.14 **non** è disponibile tra le release: gli artefatti prodotti dal [workflow di sviluppo](https://github.com/Peppio1/MacSync-Public/actions/runs/44905111203) servono solo ai test e non costituiscono una distribuzione firmata per la produzione.
+
+### Archivio storico: MacSync v0.17.0 — pre-release di collaudo (17 novembre 2026)
 
 [![Scarica MacSync per macOS](https://img.shields.io/badge/Scarica_MacSync_v0.17.0-DMG-2563eb?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/Peppio1/MacSync-Public/releases/download/v0.17.0/MacSync-v0.17.0-macOS-universal.dmg)
 
@@ -82,12 +90,12 @@ La CI assembla anche un bundle MacSync.app con firma ad hoc, non notarizzato. I 
 
 ### 1. Installazione su macOS
 
-Scaricare il [DMG v0.17.0](https://github.com/Peppio1/MacSync-Public/releases/download/v0.17.0/MacSync-v0.17.0-macOS-universal.dmg) e il relativo [SHA-256](https://github.com/Peppio1/MacSync-Public/releases/download/v0.17.0/MacSync-v0.17.0-macOS-universal.dmg.sha256). Aprire il DMG, trascinare MacSync.app su Applicazioni, leggere la guida illustrata inclusa, espellere il volume e avviare MacSync da Applicazioni. In alternativa estrarre lo ZIP e spostare MacSync.app in Applicazioni.
+Scaricare il [DMG v0.18.13](https://github.com/Peppio1/MacSync-Public/releases/download/v0.18.13/MacSync-v0.18.13-macOS-universal.dmg) e il relativo [SHA-256](https://github.com/Peppio1/MacSync-Public/releases/download/v0.18.13/MacSync-v0.18.13-macOS-universal.dmg.sha256). Aprire il DMG, trascinare MacSync.app su Applicazioni, leggere la guida illustrata inclusa, espellere il volume e avviare MacSync da Applicazioni. In alternativa estrarre lo ZIP e spostare MacSync.app in Applicazioni.
 
 Controllo facoltativo nel Terminale (dalla cartella che contiene DMG e checksum):
 
 ```bash
-shasum -a 256 -c MacSync-v0.17.0-macOS-universal.dmg.sha256
+shasum -a 256 -c MacSync-v0.18.13-macOS-universal.dmg.sha256
 ```
 
 Proseguire soltanto se la verifica restituisce OK. MacSync è un'applicazione della barra dei menu: da lì si apre la finestra di configurazione.
@@ -150,6 +158,12 @@ In **Impostazioni → Aggiornamenti software**, usa Controlla o attiva il contro
 Se MacSync non si avvia e l’installatore è terminato, apri nel Finder la cartella `~/Library/Application Support/MacSync/update-backups`, individua il backup della transazione pendente e apri **Ripristina MacSync.command**. Conferma con RIPRISTINA. Il recupero è offline, senza sudo; rifiuta database modificati o destinazioni/identità non verificabili, preserva l’app sostituita e non sovrascrive SQLite né preferenze. Non avviare il recupero mentre Sparkle sta ancora installando. La guida tecnica è in [Aggiornamenti e recupero](docs/UPDATES.md). Non eliminare manualmente il marcatore o i file di lock.
 
 ## Stato della validazione
+
+**Versione pubblicata più recente:** [v0.18.13](https://github.com/Peppio1/MacSync-Public/releases/tag/v0.18.13). **Candidato v0.18.14:** [documentazione tecnica, regressioni e benchmark](docs/DEVELOPMENT_v0.18.14.md).
+
+Per la v0.18.14 la [CI del 21 novembre 2026](https://github.com/Peppio1/MacSync-Public/actions/runs/44905111203) ha verificato 248 test Swift (4 saltati, 0 falliti), benchmark sintetici con 200.000 file per lato e 50.000 differenze reali, build universale e pacchetti temporanei. La scansione rapida non ha letto il contenuto dei file nel benchmark. **Non sono ancora disponibili misure su SMB/VPN reale** e non è stata eseguita la firma definitiva di produzione.
+
+### Storico dei test della v0.17.0
 
 Versione pubblicata: [v0.17.0](https://github.com/Peppio1/MacSync-Public/releases/tag/v0.17.0), commit del pacchetto [2fe7037](https://github.com/Peppio1/MacSync-Public/commit/2fe7037cf135f2cbd0051343885875a50aa6c015). [CI e firma](https://github.com/Peppio1/MacSync-Public/actions/runs/44072456998) e [pubblicazione dell'artefatto esatto](https://github.com/Peppio1/MacSync-Public/actions/runs/44074982577) completate con successo. Nessuna ricompilazione in fase di pubblicazione.
 
