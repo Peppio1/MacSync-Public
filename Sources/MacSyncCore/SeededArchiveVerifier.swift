@@ -114,6 +114,18 @@ public struct SeedVerificationReport: Sendable {
 /// Read-only directory descriptor pinned to an actual directory inode.
 /// A symlink substituted into a parent path cannot redirect fstatat() outside
 /// the selected archive. The parent is re-opened by name before committing.
+private enum ApprovalReadError: Error { case unsupported }
+
+private func approvalReadError(_ code: Int32) -> Error {
+    // Some Finder-mounted SMB implementations reject directory descriptors.
+    // Only unsupported read-only calls may fall back to the PREEXISTING
+    // exact-path validation; never fall back on I/O, identity or access errors.
+    if code == ENOTSUP || code == EOPNOTSUPP || code == ENOSYS || code == EINVAL {
+        return ApprovalReadError.unsupported
+    }
+    return SeedVerificationError.unsafeEntry
+}
+
 private final class ApprovalParentReader {
     private let rootPath: String
     private let parentPath: String
@@ -127,7 +139,7 @@ private final class ApprovalParentReader {
         var descriptor = rootPath.withCString {
             Darwin.open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         }
-        guard descriptor >= 0 else { throw SeedVerificationError.unsafeEntry }
+        guard descriptor >= 0 else { throw approvalReadError(errno) }
         do {
             if !relativeParent.isEmpty {
                 for component in relativeParent.split(separator: "/", omittingEmptySubsequences: false) {
@@ -137,14 +149,14 @@ private final class ApprovalParentReader {
                     let next = String(component).withCString {
                         openat(descriptor, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
                     }
-                    guard next >= 0 else { throw SeedVerificationError.unsafeEntry }
+                    guard next >= 0 else { throw approvalReadError(errno) }
                     _ = Darwin.close(descriptor)
                     descriptor = next
                 }
             }
             var info = stat()
-            guard fstat(descriptor, &info) == 0,
-                  info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
+            guard fstat(descriptor, &info) == 0 else { throw approvalReadError(errno) }
+            guard info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
                 throw SeedVerificationError.unsafeEntry
             }
             self.device = UInt64(bitPattern: Int64(info.st_dev))
@@ -164,8 +176,10 @@ private final class ApprovalParentReader {
             throw SeedVerificationError.unsafeEntry
         }
         var info = stat()
-        guard leaf.withCString({ fstatat(directoryDescriptor, $0, &info, AT_SYMLINK_NOFOLLOW) }) == 0,
-              info.st_mode & mode_t(S_IFMT) == mode_t(directory ? S_IFDIR : S_IFREG) else {
+        guard leaf.withCString({ fstatat(directoryDescriptor, $0, &info, AT_SYMLINK_NOFOLLOW) }) == 0 else {
+            throw approvalReadError(errno)
+        }
+        guard info.st_mode & mode_t(S_IFMT) == mode_t(directory ? S_IFDIR : S_IFREG) else {
             throw SeedVerificationError.unsafeEntry
         }
         return SeedFileFingerprint(fileStat: info)
@@ -278,6 +292,7 @@ public final class SeededArchiveVerifier {
     ) throws -> Int {
         var stillValid: [SeedVerifiedMatch] = []
         var lastProgress = ProcessInfo.processInfo.systemUptime
+        var unsupportedReadOnlyRoots = Set<String>()
         progress?(0,report.matches.count)
         // Bounded groups avoid hundreds of thousands of repeated SMB root and
         // parent checks. Parent directories remain anchored by file descriptor,
@@ -306,25 +321,32 @@ public final class SeededArchiveVerifier {
                         try mapping.verify()
                         roots[match.rootID] = mapping
                     }
-                    let sourceFingerprint: SeedFileFingerprint
-                    let targetFingerprint: SeedFileFingerprint
-                    if WindowsPathSafety.validRelativePath(match.relativePath) {
-                        let components = match.relativePath.split(separator: "/").map(String.init)
-                        guard let leaf = components.last else { continue }
-                        let parent = components.dropLast().joined(separator: "/")
-                        let sourceKey = match.rootID + "\\0s\\0" + parent
-                        let targetKey = match.rootID + "\\0t\\0" + parent
-                        if parents[sourceKey] == nil {
-                            parents[sourceKey] = try ApprovalParentReader(rootPath: mapping.source.path, relativeParent: parent)
+                    var sourceFingerprint: SeedFileFingerprint?
+                    var targetFingerprint: SeedFileFingerprint?
+                    if WindowsPathSafety.validRelativePath(match.relativePath),
+                       !unsupportedReadOnlyRoots.contains(match.rootID) {
+                        do {
+                            let components = match.relativePath.split(separator: "/").map(String.init)
+                            guard let leaf = components.last else { continue }
+                            let parent = components.dropLast().joined(separator: "/")
+                            let sourceKey = match.rootID + "\\0s\\0" + parent
+                            let targetKey = match.rootID + "\\0t\\0" + parent
+                            if parents[sourceKey] == nil {
+                                parents[sourceKey] = try ApprovalParentReader(rootPath: mapping.source.path, relativeParent: parent)
+                            }
+                            if parents[targetKey] == nil {
+                                parents[targetKey] = try ApprovalParentReader(rootPath: mapping.target.path, relativeParent: parent)
+                            }
+                            sourceFingerprint = try parents[sourceKey]!.fingerprint(leaf: leaf, directory: match.objectKind == "directory")
+                            targetFingerprint = try parents[targetKey]!.fingerprint(leaf: leaf, directory: match.objectKind == "directory")
+                        } catch ApprovalReadError.unsupported {
+                            unsupportedReadOnlyRoots.insert(match.rootID)
                         }
-                        if parents[targetKey] == nil {
-                            parents[targetKey] = try ApprovalParentReader(rootPath: mapping.target.path, relativeParent: parent)
-                        }
-                        sourceFingerprint = try parents[sourceKey]!.fingerprint(leaf: leaf, directory: match.objectKind == "directory")
-                        targetFingerprint = try parents[targetKey]!.fingerprint(leaf: leaf, directory: match.objectKind == "directory")
-                    } else {
-                        // Preserve exact-spelling and alias checks for names
-                        // that cannot use the ordinary Windows-safe fast path.
+                    }
+                    if sourceFingerprint == nil || targetFingerprint == nil {
+                        // Read-only compatibility fallback ONLY when openat or
+                        // fstatat is unavailable; this is not a transfer-engine
+                        // fallback and retains all original path checks.
                         let src = try safePath(match.relativePath, mapping: mapping, destination: false)
                         let dst = try safePath(match.relativePath, mapping: mapping, destination: true)
                         sourceFingerprint = try Self.fingerprint(src,directory:match.objectKind == "directory")
