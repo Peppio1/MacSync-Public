@@ -239,12 +239,15 @@ final class MountedCopyController: ObservableObject {
                         lastProgress = now
                         DispatchQueue.main.async { [weak self] in self?.rectificationProgress = (checked, total) }
                     }, shouldContinue:{!token.isCancelled})
+                let outstanding = try NameRectification.pendingProtection(journal: journal)
                 pending = try journal.hasPendingNameRectification()
+                let localPending = outstanding.relations.filter { $0.side == .source }.count
+                let remotePending = outstanding.relations.filter { $0.side == .destination }.count
                 try? log.record(level: pending ? .warning : .info, rootID: "app",
                     action: pending ? "name_rectification_waiting" : "name_rectification_finish",
                     durationSeconds: ProcessInfo.processInfo.systemUptime - started, message: "Esito del lotto")
                 resolved=result.resolvedIDs
-                status="\(result.renamed) rettificati · \(result.skipped) da correggere manualmente · \(result.failed) non verificati"
+                status="iMac: \(result.sourceRenamed) rinominati, \(localPending) pendenti · SMB: \(result.destinationRenamed) rinominati, \(remotePending) pendenti · \(result.skipped) conflitti · \(result.failed) non verificati"
                 if result.cancelled { status+=" · interrotto" }
                 if let reason = result.firstFailure { status += "\n" + reason }
             } catch { status="Rettifica interrotta: "+SyncDiagnostic.describe(error)+"; controllare il registro" }
@@ -252,7 +255,7 @@ final class MountedCopyController: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { completion(needsRetry);return }
                 self.incompatibleNames.removeAll{completedIDs.contains($0.id)}
-                self.rectificationStatus=finalStatus + (needsRetry ? " · Rettifica in attesa di verifica" : " · Copie e cancellazioni sospese")
+                self.rectificationStatus=finalStatus + (needsRetry ? " · Percorsi pendenti protetti; le copie indipendenti possono procedere" : " · Verificare i nomi eventualmente irrisolti")
                 self.rectifyingNames=false
                 self.rectificationProgress=nil
                 self.refresh()
