@@ -165,6 +165,15 @@ public enum LocalScanner {
                     }
                     changeStamp = "\(actual.st_ino):\(actual.st_ctimespec.tv_sec):\(actual.st_ctimespec.tv_nsec)"
                     verificationFingerprint = SeedFileFingerprint(fileStat: actual)
+                } else if kind == "directory" {
+                    // This additional stat is local, not SMB. It avoids remote
+                    // directory re-reads when the audit later recognizes it.
+                    var actual = stat()
+                    guard file.path.withCString({ lstat($0,&actual) }) == 0,
+                          actual.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
+                        throw JournalError.database("Directory changed during inventory scan")
+                    }
+                    verificationFingerprint = SeedFileFingerprint(fileStat: actual)
                 }
             }
             let prefix = root.path + "/"
