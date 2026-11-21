@@ -292,6 +292,9 @@ public final class ArchiveAudit {
                     diagnostic: (ArchiveAuditProgress) -> Void = { _ in },
                     progress: (ArchiveAuditProgress) -> Void = { _ in }) throws -> ArchiveAuditReport {
         var state = ArchiveAuditProgress()
+        // One indexed read of the already-approved SQLite rename plan.
+        // Its relationships are NOT inferred from equal size or timestamps.
+        let pendingRenames = try NameRectification.pendingProtection(journal: journal)
         state.deletionCandidates = deletionCandidates
         let startTick = ProcessInfo.processInfo.systemUptime
         var published: Double = 0
@@ -434,7 +437,13 @@ public final class ArchiveAudit {
                             pair.source[name]?.kind != pair.target[name]?.kind) ||
                         pair.source[name]?.kind == "symlink" || pair.target[name]?.kind == "symlink"
                     }
-                    if collision || item.kind == "symlink" {
+                    if pendingRenames.protects(rootID: mapping.rootID, path: path) {
+                        // A known outstanding rename can present as a missing
+                        // source-name and an extra old destination-name. Do
+                        // not hash, enqueue repairs or authorize deletion.
+                        kind = .uncertain
+                        detail = "Rettifica nomi registrata e ancora pendente: copia e cancellazione sospese"
+                    } else if collision || item.kind == "symlink" {
                         detail = "Percorso ambiguo, tipo incompatibile o collegamento simbolico"
                     } else if src == nil { kind = .extra }
                     else if dst == nil {
@@ -613,6 +622,10 @@ public final class ArchiveAudit {
                     if let fingerprint {
                         guard try SeededArchiveVerifier.fingerprint(url) == fingerprint else { continue }
                     } else { _ = try Self.rootStamp(url) }
+                    // Recheck the durable plan before any audit UPSERT: a
+                    // recently recorded rename must win over a stale finding.
+                    guard !NameRectification.pendingProtection(journal: journal)
+                        .protects(rootID: map.rootID, path: item.relativePath) else { continue }
                     repairs.append((map.rootID,map.source.path,item))
                 } catch { continue }
             }
