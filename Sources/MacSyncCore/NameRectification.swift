@@ -104,6 +104,16 @@ public enum NameRectification {
         }
         func counterpartKey(_ item: IncompatibleName) -> String { item.rootID + "\0" + item.relativePath }
         let resume = try journal.pendingNameRectification()
+        // Reused only for the non-mutating preflight. Every actual rename
+        // retains a fresh directory listing and the exclusive syscall.
+        let preflightListingCache = AuditDirectoryListingCache()
+        func slowPhase(_ item: IncompatibleName, name: String, started: Double) {
+            let elapsed = ProcessInfo.processInfo.systemUptime - started
+            guard elapsed >= 0.5 else { return }
+            try? log.record(level: .info, rootID: item.rootID, action: "metric_name_rectification_phase",
+                relativePath: SyncDiagnostic.clean(item.relativePath), durationSeconds: elapsed,
+                message: item.side.label + " · " + name)
+        }
         var moves: [Move] = []
         if let resume {
             guard items.isEmpty else { throw JournalError.database("Rettifica precedente in attesa") }
@@ -114,12 +124,15 @@ public enum NameRectification {
             for item in items where seen.insert(item.id).inserted {
                 guard shouldContinue() else { result.cancelled = true; return result }
                 guard let name = proposedName(item.name) else { result.skipped += 1; continue }
+                let preflightStarted = ProcessInfo.processInfo.systemUptime
                 do {
+                    defer { slowPhase(item, name: "preflight", started: preflightStarted) }
                     let (root, binding) = try verifiedRoot(item)
                     let url = try item.revealURL(expectedRoot: root.path)
                     let parent = try AnchoredDirectory(url.deletingLastPathComponent(), expectedVolume: binding.volume)
                     let snapshot = try parent.leaf(item.name)
-                    try parent.checkRectification(old: item.name, new: name, matching: snapshot)
+                    try parent.checkRectification(old: item.name, new: name, matching: snapshot,
+                        preflightCache: preflightListingCache)
                     moves.append(Move(item: item, binding: binding, snapshot: snapshot, newName: name))
                 } catch {
                     result.skipped += 1
@@ -147,6 +160,21 @@ public enum NameRectification {
         }
 
         var deferred: [Move] = []
+        // Index only *actual* path dependencies on the same side. A failed
+        // SMB destination must not suppress the source operation at the same
+        // path; the persisted unfinished batch still blocks ordinary sync.
+        var blockedAncestors = Set<String>()
+        func blockKey(_ item: IncompatibleName, path: String) -> String {
+            item.rootID + "\0" + item.side.rawValue + "\0" + path
+        }
+        func deferMove(_ move: Move) {
+            deferred.append(move)
+            var prefix = ""
+            for segment in move.item.relativePath.split(separator: "/") {
+                prefix = prefix.isEmpty ? String(segment) : prefix + "/" + segment
+                blockedAncestors.insert(blockKey(move.item, path: prefix))
+            }
+        }
         let offset = resume?.offset ?? 0
         guard (0...moves.count).contains(offset) else { throw JournalError.database("Rettifica non leggibile") }
         onProgress(offset, moves.count)
@@ -154,15 +182,13 @@ public enum NameRectification {
             guard shouldContinue() else { result.cancelled = true; break }
             defer { onProgress(index + 1, moves.count) }
             let item = move.item
-            if deferred.contains(where: { pending in
-                pending.item.rootID == item.rootID &&
-                    (pending.item.relativePath == item.relativePath ||
-                     pending.item.relativePath.hasPrefix(item.relativePath + "/"))
-            }) {
-                deferred.append(move)
+            if blockedAncestors.contains(blockKey(item, path: item.relativePath)) {
+                deferMove(move)
                 continue
             }
+            let executionStarted = ProcessInfo.processInfo.systemUptime
             do {
+                defer { slowPhase(item, name: "execute-total", started: executionStarted) }
                 let (root, binding) = try verifiedRoot(item)
                 guard root.path == item.rootPath, binding == move.binding else { throw MountedCopyError.volumeChanged }
                 let parentURL: URL
@@ -174,7 +200,9 @@ public enum NameRectification {
                     parentURL = try parentItem.revealURL(expectedRoot: root.path)
                 }
                 let parent = try AnchoredDirectory(parentURL, expectedVolume: binding.volume)
+                let listingStarted = ProcessInfo.processInfo.systemUptime
                 let names = try FileManager.default.contentsOfDirectory(atPath: parentURL.path)
+                slowPhase(item, name: "live-directory-listing", started: listingStarted)
                 let oldExists = names.contains { $0.utf8.elementsEqual(item.name.utf8) }
                 let newExists = names.contains { $0.utf8.elementsEqual(move.newName.utf8) }
                 if oldExists && !newExists {
@@ -183,6 +211,10 @@ public enum NameRectification {
                     try journal.invalidateNameScan(rootID: item.rootID, side: item.side)
                     report(item, action: "name_rectify_start", level: .info,
                         message: item.side.label + " · Nuovo nome: " + move.newName)
+                    let renameStarted = ProcessInfo.processInfo.systemUptime
+                    defer { slowPhase(item, name: item.side == .destination &&
+                        binding.volume.fileSystem.lowercased() == "smbfs" ? "smb-helper-and-verify" : "local-rename-and-verify",
+                        started: renameStarted) }
                     if item.side == .destination && binding.volume.fileSystem.lowercased() == "smbfs" {
                         try parent.checkRectification(old: item.name, new: move.newName, matching: old)
                         try SMBNameRectification.rename(volume: binding.volume, parent: parentURL,
@@ -207,9 +239,11 @@ public enum NameRectification {
                 // ahead of any dependent rename when the batch is reopened.
                 let remaining = deferred.isEmpty ? nil
                     : try JSONEncoder().encode(deferred + Array(moves.dropFirst(index + 1)))
+                let journalStarted = ProcessInfo.processInfo.systemUptime
                 try journal.advanceNameRectification(to: index + 1, finished: index + 1 == moves.count && deferred.isEmpty,
                     rootID: item.side == .destination ? item.rootID : nil,
                     path: item.side == .destination ? path : nil, remainingPlan: remaining)
+                slowPhase(item, name: "sqlite-commit", started: journalStarted)
                 result.renamed += 1
                 result.resolvedIDs.insert(item.id)
                 let action = resume == nil ? "name_rectified_" : "name_rectification_resumed_"
@@ -222,7 +256,7 @@ public enum NameRectification {
                 let reason = SyncDiagnostic.describe(error)
                 if result.firstFailure == nil { result.firstFailure = item.side.label + " · " + reason }
                 report(item, action: "name_rectification_pending_" + item.side.rawValue, level: .warning, message: reason)
-                deferred.append(move)
+                deferMove(move)
             }
         }
         return result
