@@ -2,7 +2,7 @@ name: macOS SMB Integration - disposable Samba
 
 on:
   push:
-    branches: [develop-smb-integration-harness, develop-smb-diagnostics-precision, develop-smb-diagnostics-helper, develop-smb-diagnostics-source-metadata, develop-smb-diagnostics-stability]
+    branches: [develop-smb-integration-harness, develop-smb-diagnostics-precision, develop-smb-diagnostics-helper, develop-smb-diagnostics-source-metadata, develop-smb-diagnostics-stability, develop-v0.18.15-audit-two-modes-smb]
     paths:
       - '.github/workflows/macos-smb-integration.yml'
       - 'scripts/ci/**'
@@ -69,7 +69,11 @@ jobs:
         run: python3 scripts/ci/record-duration.py swift-test-build -- swift build --build-tests -Xswiftc -warnings-as-errors
       - name: Local Rclone baseline on the same ARM64 runner
         run: python3 scripts/ci/record-duration.py rclone-local-control -- swift test --skip-build -Xswiftc -warnings-as-errors --filter StageTransferEngineTests/testDirectRcloneEndToEnd
-      - name: Real SMB-mounted MacSync integration tests
+      - name: QUICK and INTELLIGENT real SMB audit regressions
+        if: github.ref == 'refs/heads/develop-v0.18.15-audit-two-modes-smb'
+        run: python3 scripts/ci/record-duration.py smb-operator-audit -- swift test -Xswiftc -warnings-as-errors --skip-build --filter 'SMBIntegrationTests/testRealSMB(ArchiveQuickAndIntelligent|QuickAndIntelligent)'
+      - name: Real SMB-mounted MacSync integration tests (including existing helper tests)
+        if: always() && success()
         run: python3 scripts/ci/record-duration.py smb-real-integration -- swift test -Xswiftc -warnings-as-errors --skip-build --filter SMBIntegrationTests
       - name: Report measured timings and historical comparison
         if: always()
