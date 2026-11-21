@@ -388,6 +388,39 @@ final class SMBIntegrationTests: XCTestCase {
         print("MACSYNC_SMB_BENCHMARK audit_intelligent_seconds=\(intelligentSeconds) cache_seconds=\(cachedSeconds) source_scan_seconds=\(intelligent.sourceMetrics?.scanSeconds ?? -1) destination_scan_seconds=\(intelligent.destinationMetrics?.scanSeconds ?? -1) compare_seconds=\(intelligent.comparisonSeconds ?? -1)")
     }
 
+    func testRealSMBQuickAndIntelligentRespectTwoSecondMetadataWindow() throws {
+        let env = try Environment()
+        let (base, source) = try fixtureSource()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let target = try env.workspace("two-second-window")
+        defer { try? FileManager.default.removeItem(at: target) }
+        let local = source.appendingPathComponent("photo.jpg")
+        let remote = target.appendingPathComponent("photo.jpg")
+        try Data("ABCD".utf8).write(to: local)
+        try Data("WXYZ".utf8).write(to: remote)
+        let firstDate = Date(timeIntervalSince1970: 1_780_000_000)
+        try FileManager.default.setAttributes([.modificationDate: firstDate], ofItemAtPath: local.path)
+        try FileManager.default.setAttributes([.modificationDate: firstDate.addingTimeInterval(1.5)],
+            ofItemAtPath: remote.path)
+        XCTAssertEqual(try Data(contentsOf: remote), Data("WXYZ".utf8))
+        Thread.sleep(forTimeInterval: 0.7)
+        let db = base.appendingPathComponent("window.sqlite").path
+        _ = try LocalInventory(path: db).reconcile(rootID: "smb-audit-window", root: source)
+        let journal = try ChangeJournal(path: db)
+        let queueBefore = try journal.pending().map(\.relativePath).sorted()
+        let mapping = try MountedFolderMapping(rootID: "smb-audit-window", source: source, target: target)
+        let audit = try ArchiveAudit(journal: journal, mappings: [mapping])
+        let quick = try audit.run(mode: .quick)
+        let intelligent = try audit.run(mode: .intelligent)
+        XCTAssertEqual(quick.count(.matching), 1)
+        XCTAssertEqual(intelligent.count(.matching), 1)
+        XCTAssertEqual(quick.bytesRead, 0)
+        XCTAssertEqual(intelligent.bytesRead, 0,
+            "The current intelligent policy hashes only when dates differ beyond 2 seconds")
+        XCTAssertEqual(try journal.pending().map(\.relativePath).sorted(), queueBefore)
+        XCTAssertEqual(try Data(contentsOf: remote), Data("WXYZ".utf8))
+    }
+
     func testRealSMBDirectoryListingBenchmark200() throws {
         let env = try Environment()
         let root = try env.workspace("metadata-benchmark")
