@@ -56,6 +56,8 @@ jobs:
           cache: false
       - name: Download verified, pinned universal Rclone
         run: python3 scripts/ci/record-duration.py rclone-prepare -- bash Packaging/prepare-rclone.sh "$RUNNER_TEMP/macsync-smb-rclone"
+      - name: Verify pinned Rclone can authenticate directly via SMB
+        run: python3 scripts/ci/record-duration.py rclone-direct-smb-probe -- bash scripts/ci/probe-rclone-smb.sh
       - name: Build actual protected SMB rename helper
         run: python3 scripts/ci/record-duration.py helper-build -- bash Packaging/prepare-rclone-smb-rename.sh "$RUNNER_TEMP/macsync-smb-rclone"
       - name: Build Swift test targets separately from runtime measurements
