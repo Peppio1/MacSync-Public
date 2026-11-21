@@ -98,11 +98,11 @@ if [ -e "$nsmb" ]; then
 fi
 printf '[127.0.0.1:%s]\npassword=%s\n' "$user" "$password" > "$nsmb"
 chmod 600 "$nsmb"
-if ! /sbin/mount_smbfs -N "//$user@127.0.0.1/MacSyncCI" "$mountpoint" > "$base/mount.log" 2>&1; then
+if ! /sbin/mount_smbfs -f 0666 -d 0777 -N "//$user@127.0.0.1/MacSyncCI" "$mountpoint" > "$base/mount.log" 2>&1; then
   echo "Apple SMB -N did not accept the ephemeral nsmb.conf entry; retrying once with an ephemeral credential"
   # No shell tracing, stdout or stderr from the command; credential is CI-only,
   # masked in GitHub logs and never placed in any repository or artifact.
-  if ! /sbin/mount_smbfs "//$user:$password@127.0.0.1/MacSyncCI" "$mountpoint" > "$base/mount2.log" 2>&1; then
+  if ! /sbin/mount_smbfs -f 0666 -d 0777 "//$user:$password@127.0.0.1/MacSyncCI" "$mountpoint" > "$base/mount2.log" 2>&1; then
     echo "::error::Apple SMB client could not mount the verified disposable share"
     tail -n 10 "$base/mount.log" || true
     tail -n 10 "$base/mount2.log" || true
