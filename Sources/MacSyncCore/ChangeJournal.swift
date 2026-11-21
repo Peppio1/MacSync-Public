@@ -26,6 +26,15 @@ public enum JournalError: Error, LocalizedError {
 
 /// Persistent local event queue. The first prototype stores events but never
 /// executes file transfers or deletions.
+struct NameRectificationProgressRecord: Codable, Equatable {
+    let rootID: String
+    let relativePath: String
+    var sourceRequired: Bool
+    var destinationRequired: Bool
+    var sourceCompleted: Bool
+    var destinationCompleted: Bool
+}
+
 public final class ChangeJournal {
     private var connection: OpaquePointer?
     private let databasePath: String
@@ -55,7 +64,18 @@ public final class ChangeJournal {
                     completed INTEGER NOT NULL DEFAULT 0
                 );
                 """)
-            try execute("CREATE TABLE IF NOT EXISTS name_rectification_batch(singleton INTEGER PRIMARY KEY CHECK(singleton=1), plan TEXT NOT NULL, next_move INTEGER NOT NULL DEFAULT 0);")
+            try execute("CREATE TABLE IF NOT EXISTS name_rectification_batch(singleton INTEGER PRIMARY KEY CHECK(singleton=1), plan TEXT NOT NULL, next_move INTEGER NOT NULL DEFAULT 0, progress TEXT NOT NULL DEFAULT '[]');")
+            // Existing profiles retain their approved plan, next_move and
+            // exact fingerprints. Adding a column never rewrites the plan.
+            let columns = try prepare("PRAGMA table_info(name_rectification_batch);")
+            var hasProgress = false
+            while sqlite3_step(columns) == SQLITE_ROW {
+                if columnText(columns, at: 1) == "progress" { hasProgress = true }
+            }
+            sqlite3_finalize(columns)
+            if !hasProgress {
+                try execute("ALTER TABLE name_rectification_batch ADD COLUMN progress TEXT NOT NULL DEFAULT '[]';")
+            }
             try execute("CREATE TABLE IF NOT EXISTS name_rectification_scopes(root_id TEXT NOT NULL, path TEXT NOT NULL, expires REAL NOT NULL, PRIMARY KEY(root_id,path));")
             try execute("CREATE TABLE IF NOT EXISTS name_scan_cache(root_id TEXT NOT NULL, side TEXT NOT NULL, snapshot TEXT NOT NULL, PRIMARY KEY(root_id, side));")
             try execute("CREATE TABLE IF NOT EXISTS publication_intents(job_id INTEGER PRIMARY KEY, root_id TEXT NOT NULL, relative_path TEXT NOT NULL);")
@@ -473,11 +493,11 @@ public final class ChangeJournal {
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseFailure() }
     }
 
-    func pendingNameRectification() throws -> (data: Data, offset: Int)? {
-        let statement = try prepare("SELECT plan,next_move FROM name_rectification_batch WHERE singleton=1;")
+    func pendingNameRectification() throws -> (data: Data, offset: Int, progress: Data)? {
+        let statement = try prepare("SELECT plan,next_move,progress FROM name_rectification_batch WHERE singleton=1;")
         defer { sqlite3_finalize(statement) }
         switch sqlite3_step(statement) {
-        case SQLITE_ROW: return (Data(columnText(statement, at: 0).utf8), Int(sqlite3_column_int64(statement, 1)))
+        case SQLITE_ROW: return (Data(columnText(statement, at: 0).utf8), Int(sqlite3_column_int64(statement, 1)), Data(columnText(statement, at: 2).utf8))
         case SQLITE_DONE: return nil
         default: throw databaseFailure()
         }
@@ -487,20 +507,51 @@ public final class ChangeJournal {
         try pendingNameRectification() != nil
     }
 
-    func saveNameRectification(_ data: Data?) throws {
+    func saveNameRectification(_ data: Data?, progress: [NameRectificationProgressRecord]? = nil) throws {
         guard let data else {
             try execute("DELETE FROM name_rectification_batch WHERE singleton=1;")
             return
         }
-        let statement = try prepare("INSERT OR REPLACE INTO name_rectification_batch(singleton,plan) VALUES(1,?);")
+        let statement = try prepare("""
+            INSERT OR REPLACE INTO name_rectification_batch(singleton,plan,progress)
+            VALUES(1,?,?);
+            """)
         defer { sqlite3_finalize(statement) }
         try bind(String(decoding: data, as: UTF8.self), at: 1, in: statement)
+        let existing = try pendingNameRectification()
+        let statusBytes = try progress.map { try JSONEncoder().encode($0) } ?? existing?.progress ?? Data("[]".utf8)
+        try bind(String(decoding: statusBytes, as: UTF8.self), at: 2, in: statement)
         guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseFailure() }
     }
 
-    func advanceNameRectification(to offset: Int, finished: Bool, rootID: String?, path: String?, remainingPlan: Data?) throws {
+    func advanceNameRectification(to offset: Int, finished: Bool, rootID: String?, path: String?,
+                                  remainingPlan: Data?, completed: (rootID: String, path: String, side: String)? = nil) throws {
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
+            if let completed {
+                let previous = try pendingNameRectification()
+                guard let previous else { throw JournalError.database("Registro rettifiche mancante") }
+                var progress = try JSONDecoder().decode([NameRectificationProgressRecord].self, from: previous.progress)
+                if let index = progress.firstIndex(where: {
+                    $0.rootID == completed.rootID && $0.relativePath == completed.path
+                }) {
+                    if completed.side == "source" { progress[index].sourceCompleted = true }
+                    else if completed.side == "destination" { progress[index].destinationCompleted = true }
+                    else { throw JournalError.database("Lato rettifica sconosciuto") }
+                } else {
+                    // Old pre-migration batches did not record side state.
+                    // Never invent a confirmed result for the other side.
+                    progress.append(.init(rootID: completed.rootID, relativePath: completed.path,
+                        sourceRequired: completed.side == "source",
+                        destinationRequired: completed.side == "destination",
+                        sourceCompleted: completed.side == "source",
+                        destinationCompleted: completed.side == "destination"))
+                }
+                let record = try prepare("UPDATE name_rectification_batch SET progress=? WHERE singleton=1;")
+                defer { sqlite3_finalize(record) }
+                try bind(String(decoding: JSONEncoder().encode(progress), as: UTF8.self), at: 1, in: record)
+                guard sqlite3_step(record) == SQLITE_DONE else { throw databaseFailure() }
+            }
             if let rootID, let path {
                 try execute("DELETE FROM name_rectification_scopes WHERE expires<=CAST(strftime('%s','now') AS INTEGER);")
                 let add = try prepare("""
