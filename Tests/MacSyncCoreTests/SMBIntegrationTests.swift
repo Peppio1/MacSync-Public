@@ -155,6 +155,7 @@ final class SMBIntegrationTests: XCTestCase {
             // Print only an enumerated test-only category. The raw helper
             // stderr may contain paths and must never reach CI logs.
             let categories: Set<String> = ["source-identity", "source-metadata",
+                "source-size", "source-mtime",
                 "destination-exists", "access-denied", "source-not-found",
                 "request-invalid", "not-supported", "rename-io", "other", "success"]
             let observed = raw.split(whereSeparator: \.isNewline).compactMap { line -> String? in
@@ -195,6 +196,22 @@ final class SMBIntegrationTests: XCTestCase {
                 XCTAssertEqual(try Data(contentsOf: probeOld), bytes)
                 XCTAssertFalse(FileManager.default.fileExists(atPath: probeNew.path))
             }
+            // A separate, aged synthetic file distinguishes a freshly
+            // written mount cache from an intrinsic helper failure.
+            let agedOld = root.appendingPathComponent("settled-old.jpg")
+            let agedNew = root.appendingPathComponent("settled-new.jpg")
+            try bytes.write(to: agedOld)
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -120)],
+                ofItemAtPath: agedOld.path)
+            Thread.sleep(forTimeInterval: 1.25)
+            let (agedStatus, _) = try helperRename(env, old: agedOld, new: agedNew, diagnostic: true)
+            if agedStatus == 0 {
+                XCTAssertEqual(try Data(contentsOf: agedNew), bytes)
+            } else {
+                XCTAssertEqual(try Data(contentsOf: agedOld), bytes)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: agedNew.path))
+            }
+            print("MACSYNC_SMB_HELPER_DIAGNOSTIC aged_fixture_success=\(agedStatus == 0)")
             XCTFail("Protected helper rejected the real SMB rename (status \(status)); source preserved")
             return
         }
