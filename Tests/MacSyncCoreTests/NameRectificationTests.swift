@@ -431,6 +431,32 @@ final class NameRectificationTests:XCTestCase {
             MountedCopyError.destinationChanging))
     }
 
+    func testIndexedPendingProtectionScalesAndGuardsNestedNames() {
+        let relations = (0..<5_000).map { n in
+            NameRectification.PendingProtection.Relation(
+                rootID: "photos", oldPath: "batch-\(n)/folder?/raw?.dng",
+                newPath: "batch-\(n)/folder?/raw-.dng",
+                isDirectory: false, side: .destination)
+        } + [NameRectification.PendingProtection.Relation(
+                rootID: "photos", oldPath: "nested?/subfolder",
+                newPath: "nested-/subfolder", isDirectory: true, side: .destination)]
+        let start = ProcessInfo.processInfo.systemUptime
+        let pending = NameRectification.PendingProtection(relations: relations)
+        XCTAssertEqual(pending.relations.count, 5_001)
+        XCTAssertTrue(pending.protects(rootID: "photos", path: "batch-2500/folder?/raw?.dng"))
+        XCTAssertTrue(pending.protects(rootID: "photos", path: "batch-2500/folder?/raw-.dng"))
+        XCTAssertTrue(pending.protects(rootID: "photos", path: "batch-2500/folder?"))
+        XCTAssertFalse(pending.protects(rootID: "photos", path: "batch-2500/unrelated.dng"))
+        XCTAssertTrue(pending.protects(rootID: "photos", path: "nested-/subfolder/dir/other.jpg"))
+        XCTAssertTrue(pending.protects(rootID: "photos", path: "nested?"))
+        XCTAssertFalse(pending.protects(rootID: "other-root", path: "nested-/subfolder/file.dng"))
+        for i in 0..<20_000 {
+            XCTAssertFalse(pending.protects(rootID: "photos",
+                path: "batch-\(i % 5_000)/separate.dng"))
+        }
+        print("MACSYNC_PENDING_NAME_INDEX relations=5001 queries=20000 elapsed_seconds=\(ProcessInfo.processInfo.systemUptime - start)")
+    }
+
     func testPreflightCacheKeepsSiblingListingAndInvalidatesOnCollision() throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             .resolvingSymlinksInPath()
