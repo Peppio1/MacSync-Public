@@ -117,7 +117,8 @@ final class SMBIntegrationTests: XCTestCase {
     }
 
 
-    private func helperRename(_ env: Environment, old: URL, new: URL, diagnostic: Bool = false) throws -> (Int32, Double) {
+    private func helperRename(_ env: Environment, old: URL, new: URL,
+                              diagnostic: Bool = false, modifiedSecondsOverride: Int64? = nil) throws -> (Int32, Double) {
         var source = stat()
         guard old.path.withCString({ Darwin.lstat($0, &source) }) == 0 else {
             throw CocoaError(.fileNoSuchFile)
@@ -131,9 +132,9 @@ final class SMBIntegrationTests: XCTestCase {
             "createdSeconds": Int64(source.st_birthtimespec.tv_sec),
             "createdNanos": Int64(source.st_birthtimespec.tv_nsec),
             "size": Int64(source.st_size),
-            "modifiedSeconds": Int64(source.st_mtimespec.tv_sec),
+            "modifiedSeconds": modifiedSecondsOverride ?? Int64(source.st_mtimespec.tv_sec),
             "modifiedNanos": Int64(source.st_mtimespec.tv_nsec),
-            "isDirectory": false
+            "isDirectory": source.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
         ]
         let input = Pipe()
         let process = Process()
@@ -191,6 +192,8 @@ final class SMBIntegrationTests: XCTestCase {
         return process.terminationReason == .exit && process.terminationStatus == 0
     }
 
+    /// The operating case: a just-created file must be renamed safely, not
+    /// left pending merely because smbfs metadata publication was delayed.
     func testRealSMBProtectedHelperRenameAndPreserveContents() throws {
         let env = try Environment()
         let root = try env.workspace("helper-success")
@@ -199,60 +202,75 @@ final class SMBIntegrationTests: XCTestCase {
         let new = root.appendingPathComponent("new-name.jpg")
         let bytes = Data("checked rename preserves original".utf8)
         try bytes.write(to: old)
-        let (status, _) = try helperRename(env, old: old, new: new)
+        let (status, duration) = try helperRename(env, old: old, new: new)
         guard status == 0 else {
-            // A rejected rename must fail CLOSED. Never cascade into
-            // file-not-found assertions that conceal the original problem.
             XCTAssertEqual(try Data(contentsOf: old), bytes)
             XCTAssertFalse(FileManager.default.fileExists(atPath: new.path))
-            // Repeat with a DIFFERENT disposable file and the same production
-            // implementation, instrumented by a test-only main entrypoint.
-            let probeOld = root.appendingPathComponent("diagnostic-old.jpg")
-            let probeNew = root.appendingPathComponent("diagnostic-new.jpg")
-            try bytes.write(to: probeOld)
-            let (diagnosticStatus, _) = try helperRename(env, old: probeOld, new: probeNew,
-                diagnostic: true)
-            if diagnosticStatus == 0 {
-                XCTAssertEqual(try Data(contentsOf: probeNew), bytes)
-            } else {
-                XCTAssertEqual(try Data(contentsOf: probeOld), bytes)
-                XCTAssertFalse(FileManager.default.fileExists(atPath: probeNew.path))
-            }
-            // A separate, aged synthetic file distinguishes a freshly
-            // written mount cache from an intrinsic helper failure.
-            let agedOld = root.appendingPathComponent("settled-old.jpg")
-            let agedNew = root.appendingPathComponent("settled-new.jpg")
-            try bytes.write(to: agedOld)
-            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -120)],
-                ofItemAtPath: agedOld.path)
-            Thread.sleep(forTimeInterval: 1.25)
-            let (agedStatus, _) = try helperRename(env, old: agedOld, new: agedNew, diagnostic: true)
-            let serverOldVisible = serverSees(env, file: agedOld)
-            let serverNewVisible = serverSees(env, file: agedNew)
-            let clientOldVisible = FileManager.default.fileExists(atPath: agedOld.path)
-            var clientNewVisible = FileManager.default.fileExists(atPath: agedNew.path)
-            if agedStatus == 0 {
-                // Do not perform another rename. Merely wait for Finder's
-                // mounted view of a successful direct SMB operation.
-                for _ in 0..<25 where !clientNewVisible {
-                    Thread.sleep(forTimeInterval: 0.1)
-                    clientNewVisible = FileManager.default.fileExists(atPath: agedNew.path)
-                }
-                if clientNewVisible {
-                    XCTAssertEqual(try Data(contentsOf: agedNew), bytes)
-                }
-            } else {
-                XCTAssertEqual(try Data(contentsOf: agedOld), bytes)
-                XCTAssertFalse(clientNewVisible)
-            }
-            print("MACSYNC_SMB_RENAME_LOCATION helper_success=\(agedStatus == 0) smb_old=\(serverOldVisible) smb_new=\(serverNewVisible) mounted_old_initial=\(clientOldVisible) mounted_new_after_wait=\(clientNewVisible)")
-            XCTAssertTrue(agedStatus != 0 || serverNewVisible,
-                "A claimed successful rename must be visible at its exact SMB path")
-            XCTFail("Protected helper rejected the real SMB rename (status \(status)); source preserved")
+            XCTFail("A fresh, unchanged file should be renamed by the protected helper")
             return
         }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: old.path))
-        XCTAssertEqual(try Data(contentsOf: new), bytes)
+        XCTAssertFalse(serverSees(env, file: old), "Server must no longer expose old path")
+        XCTAssertTrue(serverSees(env, file: new), "Server must expose exact new path")
+        let started = ProcessInfo.processInfo.systemUptime
+        var visible = false
+        repeat {
+            let names = try FileManager.default.contentsOfDirectory(atPath: root.path)
+            visible = !names.contains("old-name.jpg") && names.contains("new-name.jpg")
+            if visible { break }
+            Thread.sleep(forTimeInterval: 0.125)
+        } while ProcessInfo.processInfo.systemUptime - started < 3.5
+        XCTAssertTrue(visible, "Mounted smbfs must eventually reflect the checked server rename")
+        if visible { XCTAssertEqual(try Data(contentsOf: new), bytes) }
+        print("MACSYNC_SMB_RENAME_REGRESSION fresh_helper_seconds=\(duration) local_visibility_seconds=\(ProcessInfo.processInfo.systemUptime - started)")
+    }
+
+    /// A forged source timestamp is never a reason to rename. This regression
+    /// explicitly tests the timeout path without changing bytes or paths.
+    func testRealSMBProtectedHelperRejectsStaleTimestampWithoutWriting() throws {
+        let env = try Environment()
+        let root = try env.workspace("wrong-timestamp")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let old = root.appendingPathComponent("old.jpg")
+        let new = root.appendingPathComponent("new.jpg")
+        let bytes = Data("stale metadata must not authorize rename".utf8)
+        try bytes.write(to: old)
+        var snapshot = stat()
+        XCTAssertEqual(old.path.withCString { Darwin.lstat($0, &snapshot) }, 0)
+        let (status, seconds) = try helperRename(env, old: old, new: new,
+            modifiedSecondsOverride: Int64(snapshot.st_mtimespec.tv_sec) - 20)
+        XCTAssertNotEqual(status, 0)
+        XCTAssertEqual(try Data(contentsOf: old), bytes)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: new.path))
+        XCTAssertLessThan(seconds, 12, "Pre-rename metadata waits must be bounded")
+        print("MACSYNC_SMB_RENAME_REGRESSION rejected_wrong_timestamp_seconds=\(seconds)")
+    }
+
+    /// Direct server-side directory rename must preserve its children.
+    func testRealSMBProtectedHelperRenamesDirectoryWithoutRecopy() throws {
+        let env = try Environment()
+        let root = try env.workspace("directory")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let old = root.appendingPathComponent("old folder")
+        let new = root.appendingPathComponent("new folder")
+        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: false)
+        let content = Data("keep nested data".utf8)
+        try content.write(to: old.appendingPathComponent("photo.dng"))
+        let (status, _) = try helperRename(env, old: old, new: new)
+        XCTAssertEqual(status, 0)
+        guard status == 0 else { return }
+        let started = ProcessInfo.processInfo.systemUptime
+        var moved = false
+        repeat {
+            let names = try FileManager.default.contentsOfDirectory(atPath: root.path)
+            moved = !names.contains("old folder") && names.contains("new folder")
+            if moved { break }
+            Thread.sleep(forTimeInterval: 0.125)
+        } while ProcessInfo.processInfo.systemUptime - started < 3.5
+        XCTAssertTrue(moved)
+        if moved {
+            XCTAssertEqual(try Data(contentsOf: new.appendingPathComponent("photo.dng")), content)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: old.path))
+        }
     }
 
     func testRealSMBProtectedHelperNeverReplacesOccupiedDestination() throws {
@@ -265,6 +283,11 @@ final class SMBIntegrationTests: XCTestCase {
         let targetBytes = Data("existing destination must remain".utf8)
         try oldBytes.write(to: old)
         try targetBytes.write(to: occupied)
+        // Force stable source metadata, so a nonzero status cannot be
+        // explained away by the unrelated fresh-file timestamp issue.
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -120)], ofItemAtPath: old.path)
+        Thread.sleep(forTimeInterval: 1.25)
         let (status, _) = try helperRename(env, old: old, new: occupied)
         XCTAssertNotEqual(status, 0, "An occupied SMB destination may never be replaced")
         XCTAssertEqual(try Data(contentsOf: old), oldBytes)
