@@ -510,15 +510,25 @@ final class MountedCopyController: ObservableObject {
                 recognitionProgress.currentPath = ""
                 diagnostic(recognitionProgress); progress(recognitionProgress)
                 var recognizedFiles = 0, recognizedDirectories = 0
-                let acknowledged = try local.approve(report:recognition,cancellation:cancel,progress:{ processed,total in
-                    recognitionProgress.compared = processed
-                    recognitionProgress.total = total
-                    diagnostic(recognitionProgress); progress(recognitionProgress)
-                },onCommit:{
-                    recognitionProgress.phase = "Finalizzazione database"
-                    recognitionProgress.comparisonStarted = nil
-                    diagnostic(recognitionProgress); progress(recognitionProgress)
-                },onCounts:{ files,directories in recognizedFiles = files; recognizedDirectories = directories })
+                let approvalStarted = ProcessInfo.processInfo.systemUptime
+                let acknowledged: Int
+                do {
+                    // Record this phase even when approval is cancelled or fails.
+                    defer {
+                        try? auditLog?.record(level:.info,rootID:"app",action:"metric_audit_recognition",
+                                              durationSeconds:ProcessInfo.processInfo.systemUptime-approvalStarted,
+                                              message:"Durata riconoscimento automatico")
+                    }
+                    acknowledged = try local.approve(report:recognition,cancellation:cancel,progress:{ processed,total in
+                        recognitionProgress.compared = processed
+                        recognitionProgress.total = total
+                        diagnostic(recognitionProgress); progress(recognitionProgress)
+                    },onCommit:{
+                        recognitionProgress.phase = "Finalizzazione database"
+                        recognitionProgress.comparisonStarted = nil
+                        diagnostic(recognitionProgress); progress(recognitionProgress)
+                    },onCounts:{ files,directories in recognizedFiles = files; recognizedDirectories = directories })
+                }
                 report.recognizedFiles = recognizedFiles
                 report.recognizedDirectories = recognizedDirectories
                 if let rebuildToken {
