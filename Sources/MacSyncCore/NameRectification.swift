@@ -167,7 +167,7 @@ public enum NameRectification {
             let item = move.item
             let parts = item.relativePath.split(separator: "/", omittingEmptySubsequences: false)
             guard !item.rootID.isEmpty, !parts.isEmpty,
-                  parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("\\") && !$0.contains("\0") }),
+                  parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("\0") }),
                   item.name == parts.last.map(String.init),
                   WindowsPathSafety.validComponent(move.newName),
                   proposedName(item.name) == move.newName else {
