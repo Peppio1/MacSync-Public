@@ -401,6 +401,34 @@ public final class MirrorDeletionWorker {
     private let armedAt: Date
     private let cancellation: MirrorDeletionCancellation
     private var appliedDuringSession = 0
+    private var pendingNameProtection = NameRectification.PendingProtection(relations: [])
+    private var uploadUpperBoundAtStart: Int64 = 0
+
+    /// Upload-first remains mandatory for every unprotected upload. An
+    /// approved pending rename may leave guarded uploads in the queue;
+    /// those alone must not stop independent deletions elsewhere.
+    private func prepareUploadPriorityGate() throws -> Bool {
+        pendingNameProtection = try NameRectification.pendingProtection(journal: journal)
+        let upper = try journal.pendingUploadUpperBound() ?? 0
+        uploadUpperBoundAtStart = upper
+        guard upper > 0 else { return true }
+        guard !pendingNameProtection.isEmpty else { return false }
+        var cursor: Int64 = 0
+        while true {
+            let page = try journal.pendingUploads(limit: 256, afterID: cursor)
+            guard let last = page.last else { return true }
+            if page.contains(where: { !pendingNameProtection.protects(rootID: $0.rootID, path: $0.relativePath) }) {
+                return false
+            }
+            cursor = last.id
+        }
+    }
+
+    /// A newly queued upload (ID above the monotonic snapshot) immediately
+    /// reactivates the upload-first safety gate during a mirror cycle.
+    private func newUploadSinceGate() throws -> Bool {
+        (try journal.pendingUploadUpperBound() ?? 0) > uploadUpperBoundAtStart
+    }
     public var operationAllowed: () -> Bool = { true }
     public var onEvent: ((SyncCycleEvent) -> Void)?
     public var onJobStarted: ((QueuedChange) -> Void)?
@@ -492,9 +520,9 @@ public final class MirrorDeletionWorker {
         guard total > 0 else { return result }
         // A rename may produce an upload for the new path and a deletion
         // for the old path. Keep the old server copy until uploads drain.
-        guard try journal.pendingUploads(limit: 1).isEmpty else {
+        guard try prepareUploadPriorityGate() else {
             result.blocked = true
-            result.detail = "Cancellazioni sospese: copie o aggiornamenti ancora in coda"
+            result.detail = "Cancellazioni sospese: copie indipendenti ancora in coda"
             return result
         }
         // Check mass-delete thresholds for ALL candidate jobs, not only the
@@ -593,9 +621,9 @@ public final class MirrorDeletionWorker {
         guard !cancellation.isCancelled,operationAllowed() else { return result }
         try verifyBeforeSynchronization()
         guard !cancellation.isCancelled else { return result }
-        guard try journal.pendingUploads(limit: 1).isEmpty else {
+        guard try prepareUploadPriorityGate() else {
             result.blocked = true
-            result.detail = "Cancellazioni sospese: copie o aggiornamenti ancora in coda"
+            result.detail = "Cancellazioni sospese: copie indipendenti ancora in coda"
             return result
         }
         guard let pendingUpper = try journal.pendingDeleteUpperBound(afterID: authorization.cutoff) else { onPlan?(0); return result }
@@ -624,10 +652,16 @@ public final class MirrorDeletionWorker {
                          availableRoots: inout Set<String>) throws {
         for job in jobs {
             if cancellation.isCancelled || !operationAllowed() { break }
-            if !(try journal.pendingUploads(limit: 1).isEmpty) {
+            if try newUploadSinceGate() {
                 result.blocked = true
                 result.detail = "Nuove copie in coda: cancellazioni sospese"
                 break
+            }
+            if pendingNameProtection.protects(rootID: job.rootID, path: job.relativePath) {
+                result.deferred += 1
+                emit(.deferred, job: job, mapping: mappings[job.rootID],
+                     detail: "Rettifica nomi pendente: cancellazione sospesa")
+                continue
             }
             if let authorization {
                 // Recheck local counters before each action, so new events
@@ -666,6 +700,15 @@ public final class MirrorDeletionWorker {
                 ) else { throw MirrorDeletionFailure.pendingTransfer }
 
                 guard WindowsPathSafety.validRelativePath(job.relativePath) else { throw MirrorDeletionFailure.unsafePath }
+                // Fresh SQLite protection check immediately before any mirror
+                // mutation. It cannot be bypassed by stale plan snapshots.
+                guard !NameRectification.pendingProtection(journal: journal)
+                    .protects(rootID: job.rootID, path: job.relativePath) else {
+                    result.deferred += 1
+                    emit(.deferred, job: job, mapping: mapping,
+                         detail: "Rettifica nomi pendente: cancellazione sospesa")
+                    continue
+                }
                 try WindowsPathSafety.checkNames(relativePath:job.relativePath,under:mapping.source)
                 try WindowsPathSafety.checkNames(relativePath:job.relativePath,under:mapping.target)
                 let source = try validatedPath(job.relativePath, under: mapping.source, allowMissingParents: true)
