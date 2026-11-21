@@ -78,6 +78,44 @@ public enum NameRectification {
         }
     }
 
+    /// SMB metadata from a just-closed Finder write can still be cached.
+    /// Capture the persistent plan only after a fresh file has had time to
+    /// settle. This is read-only: no timestamp is synthesized and no
+    /// mismatch is tolerated. Older files pay no additional delay.
+    static func stableSMBSnapshot(parent: AnchoredDirectory, oldName: String,
+                                  shouldContinue: () -> Bool) throws -> stat {
+        let initial = try parent.leaf(oldName)
+        guard (initial.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG) else { return initial }
+        let lastModified = Double(initial.st_mtimespec.tv_sec) +
+            Double(initial.st_mtimespec.tv_nsec) / 1_000_000_000
+        let age = Date().timeIntervalSince1970 - lastModified
+        if age >= 0 && age < 4 {
+            // The deadline is monotonic even if the system clock changes.
+            let deadline = ProcessInfo.processInfo.systemUptime + (4 - age)
+            while ProcessInfo.processInfo.systemUptime < deadline {
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                Thread.sleep(forTimeInterval: 0.125)
+            }
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            let a = try parent.leaf(oldName)
+            Thread.sleep(forTimeInterval: 0.125)
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            let b = try parent.leaf(oldName)
+            guard a.st_ino == b.st_ino, a.st_mode == b.st_mode,
+                  a.st_birthtimespec.tv_sec == b.st_birthtimespec.tv_sec,
+                  a.st_birthtimespec.tv_nsec == b.st_birthtimespec.tv_nsec,
+                  a.st_size == b.st_size,
+                  a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec,
+                  a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec,
+                  a.st_ctimespec.tv_sec == b.st_ctimespec.tv_sec,
+                  a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec else {
+                throw MountedCopyError.sourceChanging
+            }
+            return b
+        }
+        return initial
+    }
+
     /// A confirmed batch persists before its first mutation. Resume checks
     /// exact paths and identities again, including after a lost SMB response.
     public static func execute(items: [IncompatibleName], roots: [String: String],
@@ -130,7 +168,11 @@ public enum NameRectification {
                     let (root, binding) = try verifiedRoot(item)
                     let url = try item.revealURL(expectedRoot: root.path)
                     let parent = try AnchoredDirectory(url.deletingLastPathComponent(), expectedVolume: binding.volume)
-                    let snapshot = try parent.leaf(item.name)
+                    let snapshot = item.side == .destination &&
+                        binding.volume.fileSystem.lowercased() == "smbfs"
+                        ? try stableSMBSnapshot(parent: parent, oldName: item.name,
+                            shouldContinue: shouldContinue)
+                        : try parent.leaf(item.name)
                     try parent.checkRectification(old: item.name, new: name, matching: snapshot,
                         preflightCache: preflightListingCache)
                     moves.append(Move(item: item, binding: binding, snapshot: snapshot, newName: name))
