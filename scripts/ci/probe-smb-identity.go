@@ -7,6 +7,7 @@ import (
     "context"
     "fmt"
     "os"
+    "strings"
     "time"
 
     smb2 "github.com/cloudsoda/go-smb2"
@@ -16,9 +17,16 @@ func fail(phase string) {
     os.Exit(1)
 }
 func main() {
+    objectName := os.Getenv("MACSYNC_TEST_SMB_OBJECT")
+    expectedFixture := objectName == "macsync-ci-metadata-probe.bin"
+    // An integration test may inspect only its own synthetic helper fixture.
+    helperFixture := strings.HasPrefix(objectName, "macsync-test-helper-success-") &&
+        strings.Count(objectName, "/") == 1 && !strings.Contains(objectName, "..") &&
+        (strings.HasSuffix(objectName, "/settled-new.jpg") ||
+            strings.HasSuffix(objectName, "/settled-old.jpg"))
     if os.Getenv("MACSYNC_TEST_SMB_HOST") != "127.0.0.1" ||
        os.Getenv("MACSYNC_TEST_SMB_SHARE") != "MacSyncCI" ||
-       os.Getenv("MACSYNC_TEST_SMB_OBJECT") != "macsync-ci-metadata-probe.bin" {
+       (!expectedFixture && !helperFixture) {
         fail("fixture-validation")
     }
     ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -33,7 +41,7 @@ func main() {
     share, err := session.Mount("MacSyncCI")
     if err != nil { fail("share") }
     defer share.Umount()
-    object, err := share.Open("macsync-ci-metadata-probe.bin")
+    object, err := share.Open(objectName)
     if err != nil { fail("open") }
     defer object.Close()
     info, err := object.Stat()
