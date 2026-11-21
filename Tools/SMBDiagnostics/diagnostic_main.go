@@ -23,6 +23,10 @@ func category(err error) string {
     switch {
     case strings.Contains(message, "source identity could not be confirmed"):
         return "source-identity"
+    case strings.Contains(message, "source size mismatch"):
+        return "source-size"
+    case strings.Contains(message, "source modified timestamp mismatch"):
+        return "source-mtime"
     case strings.Contains(message, "source metadata changed"):
         return "source-metadata"
     case errors.Is(err, os.ErrExist), strings.Contains(message, "object_name_collision"):
