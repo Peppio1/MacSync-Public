@@ -40,6 +40,9 @@ func main() {
     if err != nil { fail("stat") }
     server, ok := info.Sys().(*smb2.FileStat)
     if !ok { fail("file-stat-type") }
-    fmt.Printf("%d %d %d %d\n",
-        server.FileId, server.CreationTime.Unix(), info.ModTime().Unix(), info.Size())
+    // Nanosecond precision is essential: the production helper compares
+    // time.Time.Equal, while audit fingerprints also track ctime.
+    fmt.Printf("%d %d %d %d %d\n",
+        server.FileId, server.CreationTime.UnixNano(), info.ModTime().UnixNano(),
+        server.ChangeTime.UnixNano(), info.Size())
 }
