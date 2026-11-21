@@ -247,6 +247,7 @@ public final class MountedFolderCopyWorker {
     private let availableCapacity: (URL) throws -> Int64?
     private var nextAfterID: Int64 = 0
     private var rectificationScopes: [String: [String]] = [:]
+    private var pendingNameProtection = NameRectification.PendingProtection(relations: [])
     private var transferDiagnostics: [String: Double] = [:]
 
     private func recordDuration(_ action: String, since started: Double) {
@@ -345,7 +346,11 @@ public final class MountedFolderCopyWorker {
     }
 
     private func prepareCycle() throws -> Bool {
-        guard try journal.queueRebuildToken() == nil, try !journal.hasPendingNameRectification() else { return false }
+        guard try journal.queueRebuildToken() == nil else { return false }
+        // Read the approved, durable plan; only its exact old/new paths and
+        // dependent ancestors/descendants are held. All unrelated uploads
+        // continue. Bad journal data throws and still stops the entire cycle.
+        pendingNameProtection = try NameRectification.pendingProtection(journal: journal)
         rectificationScopes = try journal.nameRectificationScopes()
         transferDiagnostics = [:]
         return true
@@ -376,6 +381,12 @@ public final class MountedFolderCopyWorker {
                 continue
             }
             do {
+                if pendingNameProtection.protects(rootID: job.rootID, path: job.relativePath) {
+                    summary.deferred += 1
+                    emit(.deferred, job: job, mapping: mapping,
+                         detail: "Rettifica nomi pendente: percorso protetto, nessuna copia")
+                    continue
+                }
                 if !WindowsPathSafety.validRelativePath(job.relativePath) {
                     summary.deferred += 1
                     emit(.deferred,job:job,mapping:mapping,detail:"Nome incompatibile: correggere in Finder")
