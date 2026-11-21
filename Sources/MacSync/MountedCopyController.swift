@@ -838,6 +838,15 @@ final class MountedCopyController: ObservableObject {
         if !enabled && automaticSession { stop() }
     }
 
+    /// Reinstates an opt-in captured BEFORE a name-maintenance drain. This
+    /// must never be called for a new automatic enablement: the regular
+    /// setAutomaticCopiesEnabled(true) requires the operator's alert.
+    /// Mirror authorization stays revoked until explicitly renewed.
+    func restorePreviouslyAuthorizedAutomaticCopies() {
+        guard !previewOnly, !active, !rectifyingNames else { return }
+        automaticCopiesEnabled = true
+    }
+
     /// Called solely by the app-level coordinator after explicit opt-in.
     /// Mirror work is allowed only with a validated persisted authorization.
     func startAutomaticSafeCopies(
