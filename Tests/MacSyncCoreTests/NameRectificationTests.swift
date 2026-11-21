@@ -116,6 +116,128 @@ final class NameRectificationTests:XCTestCase {
         XCTAssertEqual(try log.technicalPage().first { $0.entry.action == "name_rectification_copy_avoided" }?.entry.bytes,
             Int64(content.count))
     }
+    func testDeferredDestinationAtSamePathDoesNotBlockLocalSourceAndCanResume() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .resolvingSymlinksInPath()
+        let fm = FileManager.default
+        let source = base.appendingPathComponent("source"), target = base.appendingPathComponent("target")
+        try fm.createDirectory(at: source, withIntermediateDirectories: true)
+        try fm.createDirectory(at: target, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+        let original = "same?.jpg", corrected = "same-.jpg"
+        let bytes = Data("original content".utf8)
+        try bytes.write(to: source.appendingPathComponent(original))
+        try bytes.write(to: target.appendingPathComponent(original))
+        let db = base.appendingPathComponent("fixture.sqlite").path
+        _ = try LocalInventory(path: db).reconcile(rootID: "demo", root: source)
+        let map = try MountedFolderMapping(rootID: "demo", source: source, target: target)
+        if !map.targetVolume.isStrongIdentity { throw XCTSkip("Volume identity unavailable") }
+        let journal = try ChangeJournal(path: db)
+        try journal.verifyDirectoryBindings([map], allowNewTarget: true)
+        let log = try SyncActivityLog(path: db)
+        let rows = IncompatibleName.Side.allCases.map { side in
+            IncompatibleName(rootID: "demo", rootPath: side == .source ? source.path : target.path,
+                relativePath: original, objectKind: "file", side: side, reason: "Carattere incompatibile")
+        }
+        let occupied = Data("existing collision".utf8)
+        let collision = target.appendingPathComponent(corrected)
+        let first = try NameRectification.execute(items: rows, roots: ["demo": source.path],
+            journal: journal, log: log, destinations: ["demo": map], onProgress: { done, _ in
+                if done == 0 {
+                    do { try occupied.write(to: collision) }
+                    catch { XCTFail("Cannot create synthetic collision: \\(error)") }
+                }
+            })
+        XCTAssertEqual(first.renamed, 1)
+        XCTAssertEqual(first.failed, 1)
+        XCTAssertTrue(try journal.hasPendingNameRectification())
+        XCTAssertEqual(try Data(contentsOf: source.appendingPathComponent(corrected)), bytes)
+        XCTAssertEqual(try Data(contentsOf: target.appendingPathComponent(original)), bytes)
+        XCTAssertEqual(try Data(contentsOf: collision), occupied)
+        try fm.removeItem(at: collision)
+        let reopened = try ChangeJournal(path: db)
+        let resumed = try NameRectification.execute(items: [], roots: ["demo": source.path],
+            journal: reopened, log: log, destinations: ["demo": map])
+        XCTAssertEqual(resumed.renamed, 1)
+        XCTAssertFalse(try reopened.hasPendingNameRectification())
+        XCTAssertEqual(try Data(contentsOf: target.appendingPathComponent(corrected)), bytes)
+    }
+
+    func testPreflightCacheKeepsSiblingListingAndInvalidatesOnCollision() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .resolvingSymlinksInPath()
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let count = 200
+        for number in 0..<count {
+            try Data([UInt8(number % 251)]).write(
+                to: base.appendingPathComponent("photo\\(number)?.jpg"))
+        }
+        let parent = try AnchoredDirectory(base, expectedVolume: DirectoryBinding.read(base).volume)
+        let cache = AuditDirectoryListingCache()
+        for number in 0..<count {
+            let old = "photo\\(number)?.jpg", new = "photo\\(number)-.jpg"
+            try parent.checkRectification(old: old, new: new, matching: parent.leaf(old),
+                preflightCache: cache)
+        }
+        XCTAssertEqual(cache.enumerations, 1, "Unchanged directory must be enumerated once")
+        try Data("occupied".utf8).write(to: base.appendingPathComponent("photo100-.jpg"))
+        XCTAssertThrowsError(try parent.checkRectification(old: "photo100?.jpg", new: "photo100-.jpg",
+            matching: parent.leaf("photo100?.jpg"), preflightCache: cache))
+        XCTAssertEqual(cache.enumerations, 2, "A modified directory must invalidate its cache")
+        XCTAssertEqual(try Data(contentsOf: base.appendingPathComponent("photo100-.jpg")),
+            Data("occupied".utf8))
+    }
+
+    private func benchmarkLocalNameBatch(_ count: Int) throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .resolvingSymlinksInPath()
+        let source = base.appendingPathComponent("source")
+        try fm.createDirectory(at: source, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+        let filesPerDirectory = 40
+        for index in 0..<count {
+            let folder = source.appendingPathComponent(String(format: "batch-%04d", index / filesPerDirectory))
+            if index % filesPerDirectory == 0 {
+                try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            }
+            try Data([UInt8(index % 251)]).write(
+                to: folder.appendingPathComponent(String(format: "photo-%05d?.jpg", index)))
+        }
+        let db = base.appendingPathComponent("fixture.sqlite").path
+        let inventory = try LocalInventory(path: db)
+        _ = try inventory.reconcile(rootID: "demo", root: source)
+        let items = try inventory.incompatibleNames(rootID: "demo", sourcePath: source.path)
+        XCTAssertEqual(items.count, count)
+        let started = ProcessInfo.processInfo.systemUptime
+        let result = try NameRectification.execute(items: items, roots: ["demo": source.path],
+            journal: ChangeJournal(path: db), log: SyncActivityLog(path: db))
+        let elapsed = ProcessInfo.processInfo.systemUptime - started
+        print("MACSYNC_LOCAL_NAME_BATCH count=\\(count) elapsed_seconds=\\(elapsed)")
+        XCTAssertEqual(result.renamed, count)
+        XCTAssertEqual(result.skipped, 0)
+        XCTAssertEqual(result.failed, 0)
+    }
+
+    func testLocalNameRectificationBenchmark100() throws {
+        try benchmarkLocalNameBatch(100)
+    }
+
+    func testLocalNameRectificationBenchmark1000OptIn() throws {
+        guard ProcessInfo.processInfo.environment["MACSYNC_LARGE_NAME_RENAMES"] == "1" else {
+            throw XCTSkip("Enable MACSYNC_LARGE_NAME_RENAMES for 1000 file benchmark")
+        }
+        try benchmarkLocalNameBatch(1_000)
+    }
+
+    func testLocalNameRectificationBenchmark10000OptIn() throws {
+        guard ProcessInfo.processInfo.environment["MACSYNC_STRESS_NAME_RENAMES"] == "1" else {
+            throw XCTSkip("Enable MACSYNC_STRESS_NAME_RENAMES for 10000 file benchmark")
+        }
+        try benchmarkLocalNameBatch(10_000)
+    }
+
     func testPendingDestinationCollisionDoesNotBlockAnIndependentLocalRename() throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             .resolvingSymlinksInPath()
