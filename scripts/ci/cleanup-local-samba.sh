@@ -12,7 +12,14 @@ fi
 if [ -f "$HOME/Library/Preferences/nsmb.conf" ] && [ -d "$base" ]; then
   rm -f "$HOME/Library/Preferences/nsmb.conf"
 fi
+# Remove only the path that this isolated job created, never arbitrary paths.
+if [ -f "$base/share-path" ]; then
+  share="$(cat "$base/share-path")"
+  case "$share" in
+    /private/tmp/macsync-ci-share.??????) rm -rf -- "$share";;
+  esac
+fi
 case "$base" in
-  "$RUNNER_TEMP"/macsync-smb-fixture) rm -rf "$base";;
+  "$RUNNER_TEMP"/macsync-smb-fixture) rm -rf -- "$base";;
 esac
 echo "Disposable Samba fixture cleanup finished"
