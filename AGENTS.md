@@ -1,5 +1,14 @@
 # AGENTS.md — MacSync
 
+## Stato aggiornato — 21 novembre 2026
+
+- Ultima release pubblicata verificata: [v0.18.13](https://github.com/Peppio1/MacSync-Public/releases/tag/v0.18.13), riferimento codice/rollback `79f71d07216baf3de0f5d3e1bc0c3e8ea26d86dc`.
+- Candidato successivo **NON pubblicato**: ramo `develop-v0.18.14-audit-performance`, ultimo commit funzionale verificato `bfc6aee97f56390f7044225562301857968686ff`; documentazione tecnica in [`docs/DEVELOPMENT_v0.18.14.md`](docs/DEVELOPMENT_v0.18.14.md).
+- [macOS CI 44905111203](https://github.com/Peppio1/MacSync-Public/actions/runs/44905111203): 248 test Swift, 4 saltati, 0 falliti; benchmark locali sintetici 200k file per lato e 50k differenze superati; bundle Intel/Apple Silicon, DMG/ZIP, controlli UI e Sparkle di prova superati. **Firma definitiva e pubblicazione non eseguite.**
+- Le misure sintetiche non dimostrano l'obiettivo di durata inferiore a un'ora su Finder SMB/VPN: occorrono collaudo fisico, misurazioni delle fasi, verifica di sicurezza/annullamento e approvazione esplicita prima di merge, firma o release. Nessun dataset aziendale nei test pubblici.
+- Nel ramo v0.18.14 `TrackedItem.verificationFingerprint` è **solo un dato transitorio per l'audit**: il confronto con l'inventario persistito usa esclusivamente i campi storici. Non reintrodurre la regressione che accodava file invariati.
+- Questo paragrafo è il riferimento **attuale**. Le sezioni v0.17.0 e precedenti sotto sono conservate a fini storici, non rappresentano lo stato delle release odierne.
+
 ## v0.18.5 — candidato Rclone
 
 Ramo develop-v0.18.5, rollback rollback-before-v0.18.5-rclone (release v0.18.4).
