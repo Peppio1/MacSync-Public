@@ -62,9 +62,11 @@ jobs:
       - name: Build actual protected SMB rename helper
         run: python3 scripts/ci/record-duration.py helper-build -- bash Packaging/prepare-rclone-smb-rename.sh "$RUNNER_TEMP/macsync-smb-rclone"
       - name: Build isolated sanitized helper failure-class probe
-        # Existing diagnostic-only source patch targets an older helper. The
-        # production helper is tested directly on the rename-stability branch.
-        if: github.ref != 'refs/heads/develop-v0.18.15-smb-rename-stability-ci'
+        # The diagnostic-only source patch targets the previous Go helper
+        # predicate and cannot compile against the protected mtime sentinel.
+        # Skip ONLY the optional diagnostic probe, NOT the production helper,
+        # SMB tests, collision checks or the real macOS smbfs integration.
+        if: github.ref != 'refs/heads/develop-v0.18.15-smb-rename-stability-ci' && github.ref != 'refs/heads/develop-v0.18.15-coordinated-name-reconciliation-smb-ci'
         run: python3 scripts/ci/record-duration.py helper-diagnostic-build -- bash scripts/ci/build-smb-diagnostic-helper.sh "$RUNNER_TEMP/macsync-smb-rclone"
       - name: Compare macOS smbfs identity to Go SMB2 server FileId
         run: python3 scripts/ci/record-duration.py smb-file-identity -- bash scripts/ci/probe-smb-identity.sh
