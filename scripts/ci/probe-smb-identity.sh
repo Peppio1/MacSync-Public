@@ -20,7 +20,12 @@ require github.com/cloudsoda/go-smb2 v0.0.0-20260918041005-0c5d69b69701
 EOF
 cp "$GITHUB_WORKSPACE/scripts/ci/probe-smb-identity.go" "$base/metadata-probe/main.go"
 client_stats="$(/usr/bin/stat -f '%i %B %m %z' "$path")"
-if ! server_stats="$(cd "$base/metadata-probe" && go run . 2>"$base/metadata-probe/build.stderr")"; then
+if ! (cd "$base/metadata-probe" && go mod tidy && go build -o "$base/metadata-probe/smb-metadata-probe" .) \
+    >"$base/metadata-probe/build.stdout" 2>"$base/metadata-probe/build.stderr"; then
+  echo "::error::Synthetic SMB2 metadata probe could not compile (test-only Go module)"
+  exit 1
+fi
+if ! server_stats="$("$base/metadata-probe/smb-metadata-probe" 2>"$base/metadata-probe/probe.stderr")"; then
   echo "::error::Synthetic SMB2 metadata probe could not connect or inspect the file"
   exit 1
 fi
