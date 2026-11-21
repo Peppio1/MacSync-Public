@@ -186,6 +186,56 @@ final class MirrorDeletionTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: newTarget, encoding: .utf8), "simulated image 0")
     }
 
+    func testPendingNameCannotBeMirroredAwayWhileIndependentDeletionProceeds() throws {
+        let f = try fixture(fileCount: 20)
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let fm = FileManager.default
+        let old = "pending?.dng", new = "pending-.dng"
+        let originalBytes = Data("outstanding name repair".utf8)
+        let occupiedBytes = Data("independent destination collision".utf8)
+        try originalBytes.write(to: f.source.appendingPathComponent(old))
+        try originalBytes.write(to: f.destination.appendingPathComponent(old))
+        _ = try LocalInventory(path: f.database).reconcile(rootID: "photos", root: f.source)
+        for job in try f.journal.pendingUploads(limit: 100) {
+            try f.journal.markCompleted(id: job.id)
+        }
+        try f.journal.verifyDirectoryBindings([f.mapping], allowNewTarget: true)
+        let rows = IncompatibleName.Side.allCases.map { side in
+            IncompatibleName(rootID: "photos",
+                rootPath: (side == .source ? f.source : f.destination).path,
+                relativePath: old, objectKind: "file", side: side, reason: "Incompatible")
+        }
+        let collision = f.destination.appendingPathComponent(new)
+        let first = try NameRectification.execute(items: rows,
+            roots: ["photos": f.source.path], journal: f.journal, log: f.log,
+            destinations: ["photos": f.mapping],
+            onProgress: { checked, _ in
+                if checked == 0 {
+                    do { try occupiedBytes.write(to: collision) }
+                    catch { XCTFail("Fixture collision failed: \(error)") }
+                }
+            })
+        XCTAssertEqual(first.renamed, 1)
+        XCTAssertEqual(first.failed, 1)
+        XCTAssertTrue(try f.journal.hasPendingNameRectification())
+        _ = try LocalInventory(path: f.database).reconcile(rootID: "photos", root: f.source)
+        let mirror = try worker(f, recover: false)
+        // Source disappearance queues a valid DELETE for the renamed path;
+        // the known outstanding remote rename must protect it.
+        try deleteSource(f, name: new)
+        try deleteSource(f, name: "photo0.dng")
+        let result = try mirror.runOnce(maxFiles: 25)
+        XCTAssertFalse(result.blocked)
+        XCTAssertEqual(result.removed, 1)
+        XCTAssertFalse(fm.fileExists(atPath: f.destination.appendingPathComponent("photo0.dng").path))
+        XCTAssertEqual(try Data(contentsOf: f.destination.appendingPathComponent(old)), originalBytes)
+        XCTAssertEqual(try Data(contentsOf: collision), occupiedBytes)
+        XCTAssertTrue(try f.journal.hasPendingNameRectification())
+        XCTAssertTrue(try f.journal.pending().contains {
+            $0.kind == .delete && $0.relativePath == new
+        })
+    }
+
     func testOldDeletionBeforeArmingIsNeverExecuted() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }
