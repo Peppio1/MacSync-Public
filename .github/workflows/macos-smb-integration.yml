@@ -1,0 +1,92 @@
+name: macOS SMB Integration - disposable Samba
+
+on:
+  push:
+    branches: [develop-smb-integration-harness, develop-smb-diagnostics-precision, develop-smb-diagnostics-helper, develop-smb-diagnostics-source-metadata, develop-smb-diagnostics-stability, develop-v0.18.15-smb-rename-stability-ci, develop-v0.18.15-coordinated-name-reconciliation-smb-ci]
+    paths:
+      - '.github/workflows/macos-smb-integration.yml'
+      - 'scripts/ci/**'
+      - 'Tests/**'
+      - 'Sources/**'
+      - 'Packaging/prepare-rclone.sh'
+      - 'Packaging/prepare-rclone-smb-rename.sh'
+      - 'Packaging/RcloneSMBRename/**'
+      - 'Package.swift'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Separate from ordinary macOS CI and any protected signing environment.
+concurrency:
+  group: macsync-smb-lab-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smb-macos-arm64:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Check runner architecture and local SMB prerequisites
+        run: |
+          set -euo pipefail
+          uname -a
+          test "$(uname -m)" = arm64
+          test -x /sbin/mount_smbfs
+          command -v brew
+          command -v python3
+          echo "MacSync SMB sandbox uses loopback only; no external addresses"
+      - name: Configure test binary paths in runner environment
+        run: |
+          echo "MACSYNC_TEST_RCLONE=$RUNNER_TEMP/macsync-smb-rclone/rclone" >> "$GITHUB_ENV"
+          echo "MACSYNC_TEST_SMB_HELPER=$RUNNER_TEMP/macsync-smb-rclone/rclone-smb-rename" >> "$GITHUB_ENV"
+          echo "MACSYNC_TEST_SMB_DIAGNOSTIC_HELPER=$RUNNER_TEMP/macsync-smb-rclone/rclone-smb-rename-diagnostic" >> "$GITHUB_ENV"
+      - name: Install disposable Samba server
+        run: python3 scripts/ci/record-duration.py samba-install -- brew install samba
+      - name: Start SMB server and mount genuine smbfs
+        run: python3 scripts/ci/record-duration.py samba-mount -- bash scripts/ci/prepare-local-samba.sh
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Download verified, pinned universal Rclone
+        run: python3 scripts/ci/record-duration.py rclone-prepare -- bash Packaging/prepare-rclone.sh "$RUNNER_TEMP/macsync-smb-rclone"
+      - name: Verify pinned Rclone can authenticate directly via SMB
+        run: python3 scripts/ci/record-duration.py rclone-direct-smb-probe -- bash scripts/ci/probe-rclone-smb.sh
+      - name: Build actual protected SMB rename helper
+        run: python3 scripts/ci/record-duration.py helper-build -- bash Packaging/prepare-rclone-smb-rename.sh "$RUNNER_TEMP/macsync-smb-rclone"
+      - name: Build isolated sanitized helper failure-class probe
+        # Existing diagnostic-only source patch targets an older helper. The
+        # production helper is tested directly on the rename-stability branch.
+        if: github.ref != 'refs/heads/develop-v0.18.15-smb-rename-stability-ci'
+        run: python3 scripts/ci/record-duration.py helper-diagnostic-build -- bash scripts/ci/build-smb-diagnostic-helper.sh "$RUNNER_TEMP/macsync-smb-rclone"
+      - name: Compare macOS smbfs identity to Go SMB2 server FileId
+        run: python3 scripts/ci/record-duration.py smb-file-identity -- bash scripts/ci/probe-smb-identity.sh
+      - name: Build Swift test targets separately from runtime measurements
+        run: python3 scripts/ci/record-duration.py swift-test-build -- swift build --build-tests -Xswiftc -warnings-as-errors
+      - name: Local Rclone baseline on the same ARM64 runner
+        run: python3 scripts/ci/record-duration.py rclone-local-control -- swift test --skip-build -Xswiftc -warnings-as-errors --filter StageTransferEngineTests/testDirectRcloneEndToEnd
+      - name: Real SMB-mounted MacSync integration tests
+        run: python3 scripts/ci/record-duration.py smb-real-integration -- swift test -Xswiftc -warnings-as-errors --skip-build --filter SMBIntegrationTests
+      - name: Report measured timings and historical comparison
+        if: always()
+        run: python3 scripts/ci/report-smb-benchmarks.py
+      - name: Clean temporary SMB mount and local server
+        if: always()
+        run: bash scripts/ci/cleanup-local-samba.sh
+      - name: Upload sanitized timing report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: macsync-smb-performance
+          path: |
+            ${{ runner.temp }}/macsync-smb-metrics.jsonl
+            ${{ runner.temp }}/macsync-smb-report.md
+          retention-days: 7
+          if-no-files-found: warn
