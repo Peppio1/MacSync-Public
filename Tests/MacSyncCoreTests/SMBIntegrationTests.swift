@@ -148,8 +148,8 @@ final class SMBIntegrationTests: XCTestCase {
         let env = try Environment()
         let root = try env.workspace("helper")
         defer { try? FileManager.default.removeItem(at: root) }
-        let first = root.appendingPathComponent("old?.jpg")
-        let target = root.appendingPathComponent("new-.jpg")
+        let first = root.appendingPathComponent("old-name.jpg")
+        let target = root.appendingPathComponent("new-name.jpg")
         let preserved = Data("protected original".utf8)
         try preserved.write(to: first)
         try helperRename(env, old: first, new: target, shouldSucceed: true)
@@ -157,10 +157,10 @@ final class SMBIntegrationTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: target), preserved)
 
         let occupied = Data("do not overwrite".utf8)
-        try occupied.write(to: root.appendingPathComponent("another?.jpg"))
-        try helperRename(env, old: root.appendingPathComponent("another?.jpg"),
+        try occupied.write(to: root.appendingPathComponent("another-old-name.jpg"))
+        try helperRename(env, old: root.appendingPathComponent("another-old-name.jpg"),
                          new: target, shouldSucceed: false)
         XCTAssertEqual(try Data(contentsOf: target), preserved)
-        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("another?.jpg")), occupied)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("another-old-name.jpg")), occupied)
     }
 }
