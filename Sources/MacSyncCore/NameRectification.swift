@@ -20,6 +20,8 @@ public enum NameRectification {
 
     public struct Result: Sendable {
         public var renamed=0
+        public var sourceRenamed=0
+        public var destinationRenamed=0
         public var skipped=0
         public var failed=0
         public var firstFailure: String?
@@ -157,7 +159,7 @@ public enum NameRectification {
             return PendingProtection(relations: [])
         }
         let moves = try JSONDecoder().decode([Move].self, from: batch.data)
-        guard !moves.isEmpty, (0...moves.count).contains(batch.offset) else {
+        guard !moves.isEmpty, (0..<moves.count).contains(batch.offset) else {
             throw JournalError.database("Stato rettifiche pendenti non valido")
         }
         var relations: [PendingProtection.Relation] = []
@@ -167,7 +169,8 @@ public enum NameRectification {
             guard !item.rootID.isEmpty, !parts.isEmpty,
                   parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("\\") && !$0.contains("\0") }),
                   item.name == parts.last.map(String.init),
-                  WindowsPathSafety.validComponent(move.newName) else {
+                  WindowsPathSafety.validComponent(move.newName),
+                  proposedName(item.name) == move.newName else {
                 throw JournalError.database("Percorso rettifica pendente non valido")
             }
             let newPath = move.parentPath.isEmpty ? move.newName : move.parentPath + "/" + move.newName
@@ -479,6 +482,8 @@ public enum NameRectification {
                     path: item.side == .destination ? path : nil, remainingPlan: remaining)
                 slowPhase(item, name: "sqlite-commit", started: journalStarted)
                 result.renamed += 1
+                if item.side == .source { result.sourceRenamed += 1 }
+                else { result.destinationRenamed += 1 }
                 result.resolvedIDs.insert(item.id)
                 let action = resume == nil ? "name_rectified_" : "name_rectification_resumed_"
                 report(item, action: action + item.side.rawValue, level: .success, message: item.side.label + " · Rettificato in: " + move.newName)
