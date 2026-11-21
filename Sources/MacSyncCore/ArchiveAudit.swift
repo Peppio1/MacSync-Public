@@ -416,13 +416,25 @@ public final class ArchiveAudit {
                     else if item.kind == "directory" {
                         kind = .matching
                         if collectMetadataMatches && shouldCollectMetadataMatch(mapping.rootID,path) {
-                            let a = try Self.safeURL(path,mapping:mapping,destination:false,listingCache:listingCache)
-                            let b = try Self.safeURL(path,mapping:mapping,destination:true,listingCache:listingCache)
-                            let beforeA = try SeededArchiveVerifier.fingerprint(a,directory:true)
-                            let beforeB = try SeededArchiveVerifier.fingerprint(b,directory:true)
-                            guard try SeededArchiveVerifier.fingerprint(a,directory:true) == beforeA,
-                                  try SeededArchiveVerifier.fingerprint(b,directory:true) == beforeB else {
-                                throw SeedVerificationError.changedDuringRead
+                            let beforeA: SeedFileFingerprint
+                            let beforeB: SeedFileFingerprint
+                            if mode == .quick,
+                               let scannedSource = src!.verificationFingerprint,
+                               let scannedTarget = dst!.verificationFingerprint {
+                                // Directory metadata was already collected as
+                                // part of the two complete inventories. Live
+                                // validation is required before SQLite ACK.
+                                beforeA = scannedSource
+                                beforeB = scannedTarget
+                            } else {
+                                let a = try Self.safeURL(path,mapping:mapping,destination:false,listingCache:listingCache)
+                                let b = try Self.safeURL(path,mapping:mapping,destination:true,listingCache:listingCache)
+                                beforeA = try SeededArchiveVerifier.fingerprint(a,directory:true)
+                                beforeB = try SeededArchiveVerifier.fingerprint(b,directory:true)
+                                guard try SeededArchiveVerifier.fingerprint(a,directory:true) == beforeA,
+                                      try SeededArchiveVerifier.fingerprint(b,directory:true) == beforeB else {
+                                    throw SeedVerificationError.changedDuringRead
+                                }
                             }
                             onVerifiedDirectory(mapping.rootID,path,beforeA,beforeB)
                         }
