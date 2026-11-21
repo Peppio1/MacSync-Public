@@ -28,7 +28,7 @@ cat > "$conf" <<EOF
     bind interfaces only = yes
     smb ports = 445
     server string = MacSync Disposable CI
-    log level = 0
+    log level = 2
     log file = $base/logs/samba.%m.log
     pid directory = $base/pid
     lock directory = $base/lock
@@ -120,6 +120,9 @@ if ! mkdir "$mountpoint/macsync-ci-macos-write-probe" > "$base/client-write.log"
   tail -n 5 "$base/client-write.log" || true
   ls -ld "$share" "$mountpoint" || true
   /sbin/mount | grep -F " on $mountpoint (" || true
+  /usr/bin/smbutil statshares -m "$mountpoint" 2>/dev/null | grep -E "SMB_VERSION|SMB_SHARE_TYPE|USER_ID|AUTH|SMB_NEGOTIATE" | head -n 12 || true
+  # Filter server diagnostics to server-denial keywords; never upload raw logs.
+  grep -Eih "NT_STATUS_ACCESS_DENIED|access denied|Permission denied|mkdir.*failed|create.*failed|denied" "$base"/logs/* 2>/dev/null | tail -n 16 || true
   exit 1
 fi
 rmdir "$mountpoint/macsync-ci-macos-write-probe"
