@@ -78,6 +78,75 @@ public enum NameRectification {
         }
     }
 
+    /// Read-only projection of the existing durable name_rectification_batch.
+    /// No second registry, no content reads and no authorization to rename.
+    /// Both names and every descendant of a pending directory are protected,
+    /// even if only one side of the logical rename has been completed.
+    public struct PendingProtection: Sendable {
+        public struct Relation: Sendable {
+            public let rootID: String
+            public let oldPath: String
+            public let newPath: String
+            public let isDirectory: Bool
+            public let side: IncompatibleName.Side
+        }
+        public let relations: [Relation]
+        public var isEmpty: Bool { relations.isEmpty }
+
+        private func folded(_ path: String) -> String {
+            path.split(separator: "/", omittingEmptySubsequences: false)
+                .map { WindowsPathSafety.comparisonFold(String($0)) }.joined(separator: "/")
+        }
+
+        /// An ancestor cannot be deleted/replaced while an unresolved child
+        /// exists. An unrelated sibling is always eligible to proceed.
+        public func protects(rootID: String, path: String) -> Bool {
+            guard !path.isEmpty else { return false }
+            let key = folded(path)
+            return relations.contains { relation in
+                guard relation.rootID == rootID else { return false }
+                return [relation.oldPath, relation.newPath].contains { raw in
+                    let scope = folded(raw)
+                    return key == scope || key.hasPrefix(scope + "/") ||
+                        scope.hasPrefix(key + "/")
+                }
+            }
+        }
+        public func exactRelation(rootID: String, path: String) -> Relation? {
+            let key = folded(path)
+            return relations.first {
+                $0.rootID == rootID && (folded($0.oldPath) == key || folded($0.newPath) == key)
+            }
+        }
+    }
+
+    /// Decoding failure is a global database-integrity fault: never downgrade
+    /// a missing/invalid plan into "no protection".
+    public static func pendingProtection(journal: ChangeJournal) throws -> PendingProtection {
+        guard let batch = try journal.pendingNameRectification() else {
+            return PendingProtection(relations: [])
+        }
+        let moves = try JSONDecoder().decode([Move].self, from: batch.data)
+        guard (0...moves.count).contains(batch.offset) else {
+            throw JournalError.database("Stato rettifiche pendenti non valido")
+        }
+        var relations: [PendingProtection.Relation] = []
+        for move in moves.dropFirst(batch.offset) {
+            let item = move.item
+            let parts = item.relativePath.split(separator: "/", omittingEmptySubsequences: false)
+            guard !item.rootID.isEmpty, !parts.isEmpty,
+                  parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("\\") && !$0.contains("\0") }),
+                  item.name == parts.last.map(String.init),
+                  WindowsPathSafety.validComponent(move.newName) else {
+                throw JournalError.database("Percorso rettifica pendente non valido")
+            }
+            let newPath = move.parentPath.isEmpty ? move.newName : move.parentPath + "/" + move.newName
+            relations.append(.init(rootID: item.rootID, oldPath: item.relativePath,
+                                   newPath: newPath, isDirectory: item.isDirectory, side: item.side))
+        }
+        return PendingProtection(relations: relations)
+    }
+
     /// SMB metadata from a just-closed Finder write can still be cached.
     /// Capture the persistent plan only after a fresh file has had time to
     /// settle. This is read-only: no timestamp is synthesized and no
