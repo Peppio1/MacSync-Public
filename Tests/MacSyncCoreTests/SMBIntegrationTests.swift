@@ -306,7 +306,7 @@ final class SMBIntegrationTests: XCTestCase {
     }
 
 
-    func testRealSMBArchiveQuickAndDeepAuditDoNotMutateDestinationOrQueue() throws {
+    func testRealSMBArchiveQuickAndIntelligentAuditDoNotMutateDestinationOrQueue() throws {
         let env = try Environment()
         let (base, source) = try fixtureSource()
         defer { try? FileManager.default.removeItem(at: base) }
@@ -324,7 +324,7 @@ final class SMBIntegrationTests: XCTestCase {
         try untouched.write(to: extra)
         let date = Date(timeIntervalSince1970: 1_780_000_000)
         try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: sourceMatch.path)
-        try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: targetMatch.path)
+        try FileManager.default.setAttributes([.modificationDate: date.addingTimeInterval(4)], ofItemAtPath: targetMatch.path)
         // Test a settled archive rather than a file modified milliseconds
         // before its first SMB read; fresh-file safety is tested separately.
         XCTAssertEqual(try Data(contentsOf: targetMatch), matching)
@@ -358,29 +358,34 @@ final class SMBIntegrationTests: XCTestCase {
         XCTAssertEqual(quick.queuedRepairs, 0)
         XCTAssertEqual(quick.count(.missing), 1)
         XCTAssertEqual(quick.count(.extra), 1)
+        XCTAssertEqual(quick.count(.different), 1, "QUICK must detect timestamps outside 2-second tolerance")
         XCTAssertEqual(try journal.pending().map(\.relativePath).sorted(), queueBefore)
-        let deepStart = ProcessInfo.processInfo.systemUptime
-        let deep = try audit.run(mode: .deep)
-        let deepSeconds = ProcessInfo.processInfo.systemUptime - deepStart
-        logFingerprintState("after-deep")
-        if deep.count(.matching) != 1 {
-            // Emit only sanitized, synthetic finding categories and metadata.
-            // A remote smbfs timestamp/alias mismatch must not be mistaken
-            // for successful recognition or silently removed from the queue.
-            for finding in deep.findings where finding.relativePath == "same.dng" {
+        let intelligentStart = ProcessInfo.processInfo.systemUptime
+        let intelligent = try audit.run(mode: .intelligent)
+        let intelligentSeconds = ProcessInfo.processInfo.systemUptime - intelligentStart
+        logFingerprintState("after-intelligent")
+        if intelligent.count(.matching) != 1 {
+            for finding in intelligent.findings where finding.relativePath == "same.dng" {
                 print("MACSYNC_SMB_DIAGNOSTIC audit_kind=\(finding.kind.label) detail=\(finding.detail) source_mtime=\(finding.sourceModifiedAt ?? -1) target_mtime=\(finding.targetModifiedAt ?? -1)")
             }
         }
-        XCTAssertEqual(deep.count(.matching), 1)
-        XCTAssertEqual(deep.count(.missing), 1)
-        XCTAssertEqual(deep.count(.extra), 1)
-        XCTAssertEqual(deep.queuedRepairs, 0)
-        XCTAssertGreaterThan(deep.bytesRead, 0, "Deep mode must actually read content")
+        XCTAssertEqual(intelligent.count(.matching), 1)
+        XCTAssertEqual(intelligent.count(.missing), 1)
+        XCTAssertEqual(intelligent.count(.extra), 1)
+        XCTAssertEqual(intelligent.queuedRepairs, 0)
+        XCTAssertGreaterThan(intelligent.bytesRead, 0,
+            "INTELLIGENT must hash mismatched timestamps with equal sizes")
+        XCTAssertEqual(try journal.pending().map(\.relativePath).sorted(), queueBefore)
+        let cachedStart = ProcessInfo.processInfo.systemUptime
+        let cached = try audit.run(mode: .intelligent)
+        let cachedSeconds = ProcessInfo.processInfo.systemUptime - cachedStart
+        XCTAssertEqual(cached.count(.matching), 1)
+        XCTAssertEqual(cached.bytesRead, 0, "Validated SMB hash cache should avoid re-reading content")
         XCTAssertEqual(try journal.pending().map(\.relativePath).sorted(), queueBefore)
         XCTAssertEqual(try Data(contentsOf: targetMatch), matching)
         XCTAssertEqual(try Data(contentsOf: extra), untouched)
         print("MACSYNC_SMB_BENCHMARK audit_quick_seconds=\(quickSeconds) source_scan_seconds=\(quick.sourceMetrics?.scanSeconds ?? -1) destination_scan_seconds=\(quick.destinationMetrics?.scanSeconds ?? -1) compare_seconds=\(quick.comparisonSeconds ?? -1)")
-        print("MACSYNC_SMB_BENCHMARK audit_deep_seconds=\(deepSeconds) source_scan_seconds=\(deep.sourceMetrics?.scanSeconds ?? -1) destination_scan_seconds=\(deep.destinationMetrics?.scanSeconds ?? -1) compare_seconds=\(deep.comparisonSeconds ?? -1)")
+        print("MACSYNC_SMB_BENCHMARK audit_intelligent_seconds=\(intelligentSeconds) cache_seconds=\(cachedSeconds) source_scan_seconds=\(intelligent.sourceMetrics?.scanSeconds ?? -1) destination_scan_seconds=\(intelligent.destinationMetrics?.scanSeconds ?? -1) compare_seconds=\(intelligent.comparisonSeconds ?? -1)")
     }
 
     func testRealSMBDirectoryListingBenchmark200() throws {
