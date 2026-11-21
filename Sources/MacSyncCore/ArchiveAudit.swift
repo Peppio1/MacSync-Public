@@ -612,6 +612,9 @@ public final class ArchiveAudit {
         state.phase = "Finalizzazione"; state.currentPath = ""; report(force:true)
         var repairs: [(rootID:String, sourcePath:String, item:TrackedItem)] = []
         if repair {
+            // A malformed or newly recorded plan is an integrity fault, not
+            // a reason to silently schedule a conflicting UPSERT.
+            let latestProtection = try NameRectification.pendingProtection(journal: journal)
             // Revalidate local candidates just before one atomic enqueuing.
             // No network copy occurs until the normal sync engine runs.
             for (map,item,stamp,fingerprint) in candidates {
@@ -624,8 +627,7 @@ public final class ArchiveAudit {
                     } else { _ = try Self.rootStamp(url) }
                     // Recheck the durable plan before any audit UPSERT: a
                     // recently recorded rename must win over a stale finding.
-                    guard !NameRectification.pendingProtection(journal: journal)
-                        .protects(rootID: map.rootID, path: item.relativePath) else { continue }
+                    guard !latestProtection.protects(rootID: map.rootID, path: item.relativePath) else { continue }
                     repairs.append((map.rootID,map.source.path,item))
                 } catch { continue }
             }
