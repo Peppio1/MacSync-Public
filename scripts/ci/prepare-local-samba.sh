@@ -99,6 +99,20 @@ if ! "$prefix/bin/smbclient" "//127.0.0.1/MacSyncCI" -A "$authfile" -c "mkdir ma
   exit 1
 fi
 echo "Server-side SMB write and removal verified"
+# Confirm that a direct SMB client can perform a non-destructive same-share
+# rename independently of MacSync's checked helper. This distinguishes a
+# server/protocol rename failure from a helper identity mismatch.
+probe_old="macsync-ci-rename-old.txt"
+probe_new="macsync-ci-rename-new.txt"
+printf 'synthetic-smb-rename-check' > "$share/$probe_old"
+if ! "$prefix/bin/smbclient" "//127.0.0.1/MacSyncCI" -A "$authfile" \
+    -c "rename $probe_old $probe_new" > "$base/server-rename.log" 2>&1 ||
+    [ -e "$share/$probe_old" ] || [ ! -f "$share/$probe_new" ]; then
+  echo "::error::Disposable Samba server refused a basic SMB rename"
+  exit 1
+fi
+rm -f "$share/$probe_new"
+echo "Server-side SMB rename verified with a disposable test object"
 mkdir -p "$HOME/Library/Preferences"
 nsmb="$HOME/Library/Preferences/nsmb.conf"
 if [ -e "$nsmb" ]; then
