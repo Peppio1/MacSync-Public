@@ -197,9 +197,20 @@ public enum NameRectification {
                                       sourcePending: 0, destinationPending: 0)
         }
         let records = try JSONDecoder().decode([NameRectificationProgressRecord].self, from: batch.progress)
+        var completed = try journal.nameRectificationCompleted()
+        // Accept historical in-JSON completions from an older candidate,
+        // but never rewrite the complete array for each new successful move.
+        for record in records {
+            if record.sourceCompleted {
+                completed.insert(record.rootID + "\0" + record.relativePath + "\0source")
+            }
+            if record.destinationCompleted {
+                completed.insert(record.rootID + "\0" + record.relativePath + "\0destination")
+            }
+        }
         return PendingSideSummary(
-            sourceCompleted: records.filter(\.sourceCompleted).count,
-            destinationCompleted: records.filter(\.destinationCompleted).count,
+            sourceCompleted: completed.filter { $0.hasSuffix("\0source") }.count,
+            destinationCompleted: completed.filter { $0.hasSuffix("\0destination") }.count,
             sourcePending: pending.relations.filter { $0.side == .source }.count,
             destinationPending: pending.relations.filter { $0.side == .destination }.count)
     }
