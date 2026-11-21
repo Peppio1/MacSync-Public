@@ -163,6 +163,46 @@ final class NameRectificationTests:XCTestCase {
         XCTAssertEqual(try Data(contentsOf: target.appendingPathComponent(corrected)), bytes)
     }
 
+    func testFailedChildKeepsAncestorDeferredOnSameSide() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .resolvingSymlinksInPath()
+        let source = base.appendingPathComponent("source")
+        let folder = source.appendingPathComponent("folder?")
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+        let content = Data("do not overwrite".utf8)
+        try content.write(to: folder.appendingPathComponent("child?.jpg"))
+        let db = base.appendingPathComponent("fixture.sqlite").path
+        let inventory = try LocalInventory(path: db)
+        _ = try inventory.reconcile(rootID: "demo", root: source)
+        let rows = try inventory.incompatibleNames(rootID: "demo", sourcePath: source.path)
+        XCTAssertEqual(rows.count, 2)
+        let occupied = Data("collision".utf8)
+        let collision = folder.appendingPathComponent("child-.jpg")
+        let journal = try ChangeJournal(path: db)
+        let log = try SyncActivityLog(path: db)
+        let first = try NameRectification.execute(items: rows, roots: ["demo": source.path],
+            journal: journal, log: log, onProgress: { done, _ in
+                if done == 0 {
+                    do { try occupied.write(to: collision) }
+                    catch { XCTFail("Cannot create synthetic collision: \(error)") }
+                }
+            })
+        XCTAssertEqual(first.renamed, 0)
+        XCTAssertEqual(first.failed, 1)
+        XCTAssertTrue(try journal.hasPendingNameRectification())
+        XCTAssertTrue(fm.fileExists(atPath: folder.appendingPathComponent("child?.jpg").path))
+        XCTAssertEqual(try Data(contentsOf: collision), occupied)
+        try fm.removeItem(at: collision)
+        let resumed = try NameRectification.execute(items: [], roots: ["demo": source.path],
+            journal: try ChangeJournal(path: db), log: log)
+        XCTAssertEqual(resumed.renamed, 2)
+        XCTAssertFalse(try journal.hasPendingNameRectification())
+        XCTAssertEqual(try Data(contentsOf:
+            source.appendingPathComponent("folder-/child-.jpg")), content)
+    }
+
     func testPreflightCacheKeepsSiblingListingAndInvalidatesOnCollision() throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             .resolvingSymlinksInPath()
