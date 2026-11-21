@@ -58,8 +58,10 @@ jobs:
         run: python3 scripts/ci/record-duration.py rclone-prepare -- bash Packaging/prepare-rclone.sh "$RUNNER_TEMP/macsync-smb-rclone"
       - name: Build actual protected SMB rename helper
         run: python3 scripts/ci/record-duration.py helper-build -- bash Packaging/prepare-rclone-smb-rename.sh "$RUNNER_TEMP/macsync-smb-rclone"
+      - name: Build Swift test targets separately from runtime measurements
+        run: python3 scripts/ci/record-duration.py swift-test-build -- swift build --build-tests -Xswiftc -warnings-as-errors
       - name: Local Rclone baseline on the same ARM64 runner
-        run: python3 scripts/ci/record-duration.py rclone-local-control -- swift test -Xswiftc -warnings-as-errors --filter StageTransferEngineTests/testDirectRcloneEndToEnd
+        run: python3 scripts/ci/record-duration.py rclone-local-control -- swift test --skip-build -Xswiftc -warnings-as-errors --filter StageTransferEngineTests/testDirectRcloneEndToEnd
       - name: Real SMB-mounted MacSync integration tests
         run: python3 scripts/ci/record-duration.py smb-real-integration -- swift test -Xswiftc -warnings-as-errors --skip-build --filter SMBIntegrationTests
       - name: Report measured timings and historical comparison
