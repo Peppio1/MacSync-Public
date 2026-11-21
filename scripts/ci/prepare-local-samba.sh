@@ -41,6 +41,7 @@ cat > "$conf" <<EOF
     browseable = yes
     read only = no
     valid users = $user
+    write list = $user
     force user = $user
     create mask = 0660
     directory mask = 0770
@@ -82,6 +83,13 @@ if ! "$prefix/bin/smbclient" "//127.0.0.1/MacSyncCI" -A "$authfile" -c "ls" > "$
   exit 1
 fi
 echo "Samba SMB authentication verified"
+if ! "$prefix/bin/smbclient" "//127.0.0.1/MacSyncCI" -A "$authfile" -c "mkdir macsync-ci-probe; rmdir macsync-ci-probe" > "$base/server-write.log" 2>&1; then
+  echo "::error::Samba server refuses writes even for its ephemeral SMB account"
+  tail -n 10 "$base/server-write.log" || true
+  ls -ld "$base" "$share" || true
+  exit 1
+fi
+echo "Server-side SMB write and removal verified"
 mkdir -p "$HOME/Library/Preferences"
 nsmb="$HOME/Library/Preferences/nsmb.conf"
 if [ -e "$nsmb" ]; then
@@ -107,6 +115,15 @@ if ! /sbin/mount | grep -F " on $mountpoint (smbfs," >/dev/null; then
   echo "::error::Expected a genuine smbfs entry for the disposable mount in the kernel mount table"
   exit 1
 fi
+if ! mkdir "$mountpoint/macsync-ci-macos-write-probe" > "$base/client-write.log" 2>&1; then
+  echo "::error::Genuine macOS smbfs mount has no write permission"
+  tail -n 5 "$base/client-write.log" || true
+  ls -ld "$share" "$mountpoint" || true
+  /sbin/mount | grep -F " on $mountpoint (" || true
+  exit 1
+fi
+rmdir "$mountpoint/macsync-ci-macos-write-probe"
+echo "Client-side macOS smbfs write and removal verified"
 printf '%s\n' "MacSync SMB CI connected (macOS smbfs, Samba over loopback)"
 echo "MACSYNC_TEST_SMB_MOUNT=$mountpoint" >> "$GITHUB_ENV"
 echo "MACSYNC_TEST_SMB_HOST=127.0.0.1" >> "$GITHUB_ENV"
