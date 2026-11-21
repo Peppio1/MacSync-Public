@@ -169,6 +169,28 @@ final class SMBIntegrationTests: XCTestCase {
         return (process.terminationStatus, elapsed)
     }
 
+    private func serverSees(_ env: Environment, file: URL) -> Bool {
+        let prefix = env.mount.path + "/"
+        guard file.path.hasPrefix(prefix),
+              let root = ProcessInfo.processInfo.environment["MACSYNC_TEST_SMB_ROOT"] else {
+            return false
+        }
+        let executable = URL(fileURLWithPath: root)
+            .appendingPathComponent("metadata-probe/smb-metadata-probe")
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else { return false }
+        let process = Process()
+        process.executableURL = executable
+        var variables = ProcessInfo.processInfo.environment
+        variables["MACSYNC_TEST_SMB_OBJECT"] = String(file.path.dropFirst(prefix.count))
+        process.environment = variables
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return false }
+        process.waitUntilExit()
+        return process.terminationReason == .exit && process.terminationStatus == 0
+    }
+
     func testRealSMBProtectedHelperRenameAndPreserveContents() throws {
         let env = try Environment()
         let root = try env.workspace("helper-success")
@@ -205,13 +227,27 @@ final class SMBIntegrationTests: XCTestCase {
                 ofItemAtPath: agedOld.path)
             Thread.sleep(forTimeInterval: 1.25)
             let (agedStatus, _) = try helperRename(env, old: agedOld, new: agedNew, diagnostic: true)
+            let serverOldVisible = serverSees(env, file: agedOld)
+            let serverNewVisible = serverSees(env, file: agedNew)
+            let clientOldVisible = FileManager.default.fileExists(atPath: agedOld.path)
+            var clientNewVisible = FileManager.default.fileExists(atPath: agedNew.path)
             if agedStatus == 0 {
-                XCTAssertEqual(try Data(contentsOf: agedNew), bytes)
+                // Do not perform another rename. Merely wait for Finder's
+                // mounted view of a successful direct SMB operation.
+                for _ in 0..<25 where !clientNewVisible {
+                    Thread.sleep(forTimeInterval: 0.1)
+                    clientNewVisible = FileManager.default.fileExists(atPath: agedNew.path)
+                }
+                if clientNewVisible {
+                    XCTAssertEqual(try Data(contentsOf: agedNew), bytes)
+                }
             } else {
                 XCTAssertEqual(try Data(contentsOf: agedOld), bytes)
-                XCTAssertFalse(FileManager.default.fileExists(atPath: agedNew.path))
+                XCTAssertFalse(clientNewVisible)
             }
-            print("MACSYNC_SMB_HELPER_DIAGNOSTIC aged_fixture_success=\(agedStatus == 0)")
+            print("MACSYNC_SMB_RENAME_LOCATION helper_success=\(agedStatus == 0) smb_old=\(serverOldVisible) smb_new=\(serverNewVisible) mounted_old_initial=\(clientOldVisible) mounted_new_after_wait=\(clientNewVisible)")
+            XCTAssertTrue(agedStatus != 0 || serverNewVisible,
+                "A claimed successful rename must be visible at its exact SMB path")
             XCTFail("Protected helper rejected the real SMB rename (status \(status)); source preserved")
             return
         }
@@ -289,6 +325,10 @@ final class SMBIntegrationTests: XCTestCase {
         let date = Date(timeIntervalSince1970: 1_780_000_000)
         try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: sourceMatch.path)
         try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: targetMatch.path)
+        // Test a settled archive rather than a file modified milliseconds
+        // before its first SMB read; fresh-file safety is tested separately.
+        XCTAssertEqual(try Data(contentsOf: targetMatch), matching)
+        Thread.sleep(forTimeInterval: 0.7)
 
         let database = base.appendingPathComponent("audit.sqlite")
         let inventory = try LocalInventory(path: database.path)
