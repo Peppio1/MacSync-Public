@@ -8,6 +8,7 @@ Durante un lotto già confermato, la perdita del mount SMB, della credenziale o 
 
 ## Intervento conservativo
 
+- Anche il **preflight** ha un breaker per singola destinazione: quando un guasto condiviso impedisce di verificare la prima voce, le successive non interrogano ripetutamente lo stesso volume. Sono registrate come non verificate, non come collisioni. Non vengono salvati fingerprint o job remoti senza verifica; dopo il ritorno del server occorre nuova scansione/conferma esplicita.
 - `NameRectification.execute` introduce un **circuit breaker in memoria, limitato alla singola esecuzione e alla coppia destinazione**. Un primo guasto infrastrutturale riconosciuto sospende i tentativi sulle altre voci di quella stessa destinazione per il resto del lotto, mantenendole tutte pendenti. Le rettifiche della sorgente locale e delle altre coppie procedono quando sono indipendenti.
 - Classificazione volutamente ristretta: mount/credenziale non disponibili, helper mancante/non avviabile, root o volume non validi, timeout oppure errori POSIX di rete noti. Non sospendere in blocco la coppia per collisione, divergenza di fingerprint, `helperFailed` generico o risposta ambigua: questi rimangono casi puntuali da verificare.
 - Ogni elemento differito resta nel piano già approvato di SQLite; il primo guasto viene registrato e gli elementi successivi producono l'evento sanitizzato `name_rectification_shared_destination_deferred`. I contatori includono i nomi non verificati, anche se non si rilancia un'operazione su di essi.
@@ -17,6 +18,8 @@ Durante un lotto già confermato, la perdita del mount SMB, della credenziale o 
 ## Prove aggiunte
 
 `NameRectificationTests.testDestinationOutageDefersSiblingsButLocalMoveContinuesAndResumes`: sposta fuori dal percorso una destinazione **sintetica locale** dopo il preflight persistito, verifica un solo tentativo fallito sull'intera coppia, due elementi differiti senza operazioni, rettifica della sorgente indipendente, conservazione dei dati e ripresa con un nuovo `ChangeJournal` dopo il ritorno della destinazione.
+
+`testPreflightDestinationOutageAvoidsRepeatedRemoteChecks`: tre file sintetici su destinazione rimossa prima del preflight, un primo errore e due voci differite, file locale indipendente completato, nessun piano remoto non verificato persistito e nuova richiesta dopo il ripristino completata senza danni.
 
 `testSharedDestinationFailureClassificationIsStrict`: tipologie infrastrutturali distinte da collisione, file in modifica e risultati ambigui.
 
