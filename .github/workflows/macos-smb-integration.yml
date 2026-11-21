@@ -2,7 +2,7 @@ name: macOS SMB Integration - disposable Samba
 
 on:
   push:
-    branches: [develop-smb-integration-harness, develop-smb-diagnostics-precision, develop-smb-diagnostics-helper, develop-smb-diagnostics-source-metadata]
+    branches: [develop-smb-integration-harness, develop-smb-diagnostics-precision, develop-smb-diagnostics-helper, develop-smb-diagnostics-source-metadata, develop-smb-diagnostics-stability]
     paths:
       - '.github/workflows/macos-smb-integration.yml'
       - 'scripts/ci/**'
