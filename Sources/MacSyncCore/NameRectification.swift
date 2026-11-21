@@ -219,12 +219,32 @@ public enum NameRectification {
                         try parent.checkRectification(old: item.name, new: move.newName, matching: old)
                         try SMBNameRectification.rename(volume: binding.volume, parent: parentURL,
                             oldName: item.name, newName: move.newName, original: old, shouldContinue: shouldContinue)
-                        try parent.verify()
-                        let finalNames = try FileManager.default.contentsOfDirectory(atPath: parentURL.path)
-                        guard !finalNames.contains(where: { $0.utf8.elementsEqual(item.name.utf8) }),
-                              finalNames.contains(where: { $0.utf8.elementsEqual(move.newName.utf8) }),
-                              move.matches(try parent.leaf(move.newName), renamed: true) else {
-                            throw MountedCopyError.destinationChanging
+                        // A direct SMB rename can be committed server-side
+                        // before Finder's smbfs directory cache reflects it.
+                        // Never issue another rename after helper success:
+                        // wait read-only for the exact old/new names and
+                        // original file identity to become visible locally.
+                        let visibilityDeadline = ProcessInfo.processInfo.systemUptime + 3.5
+                        while true {
+                            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                            try parent.verify()
+                            let finalNames = try FileManager.default.contentsOfDirectory(atPath: parentURL.path)
+                            let oldVisible = finalNames.contains { $0.utf8.elementsEqual(item.name.utf8) }
+                            let newVisible = finalNames.contains { $0.utf8.elementsEqual(move.newName.utf8) }
+                            if !oldVisible && newVisible {
+                                guard move.matches(try parent.leaf(move.newName), renamed: true) else {
+                                    throw MountedCopyError.destinationChanging
+                                }
+                                break
+                            }
+                            guard ProcessInfo.processInfo.systemUptime < visibilityDeadline else {
+                                // The remote result was positive, but local
+                                // visibility is still uncertain. Preserve the
+                                // journal plan for recovery; never re-copy or
+                                // delete the old path to force convergence.
+                                throw MountedCopyError.destinationChanging
+                            }
+                            Thread.sleep(forTimeInterval: 0.125)
                         }
                     } else {
                         try parent.rectifyName(item.name, as: move.newName, matching: old, shouldContinue: shouldContinue)
