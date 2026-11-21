@@ -79,8 +79,8 @@ final class SMBIntegrationTests: XCTestCase {
         try FileManager.default.createDirectory(
             at: source.appendingPathComponent("nested"), withIntermediateDirectories: true)
         let file = source.appendingPathComponent(name)
-        let first = Data(repeating: 0x24, count: 256 * 1024)
-        let second = Data(repeating: 0x51, count: 512 * 1024)
+        let first = Data(repeating: 0x24, count: 2_000_000)
+        let second = Data(repeating: 0x51, count: 3_000_000)
         try first.write(to: file)
         // Respect production stability delay; a fresh source is intentionally deferred.
         try FileManager.default.setAttributes(
