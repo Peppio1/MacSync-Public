@@ -170,6 +170,97 @@ final class ArchiveAuditAndHistoryTests:XCTestCase {
         XCTAssertEqual(report.queuedRepairs,0)
         XCTAssertEqual(try f.journal.pending().map(\.id),[id])
     }
+    func testOnlyQuickAndIntelligentAreUserSelectableAndDeepReportsStillDecode() throws {
+        XCTAssertEqual(ArchiveAuditMode.selectableModes, [.quick, .intelligent])
+        XCTAssertFalse(ArchiveAuditMode.selectableModes.contains(.deep))
+        // DEEP remains a valid historical report/diagnostic mode, but cannot
+        // be selected for a new operator-triggered audit.
+        let legacyReportMode = try JSONEncoder().encode(ArchiveAuditMode.deep)
+        XCTAssertEqual(try JSONDecoder().decode(ArchiveAuditMode.self, from: legacyReportMode), .deep)
+    }
+
+    func testSavedDeepSelectionMigratesWithoutDiscardingScheduleOrOtherPreferences() throws {
+        let suiteName = "MacSync-audit-settings-test-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let key = "MacSync.archiveAuditSettings"
+        defaults.set("unrelated-value", forKey: "other.macsync.preference")
+        var old = ArchiveAuditSettings()
+        old.enabled = true
+        old.mode = .deep
+        old.repair = true
+        old.frequency = "monthly"
+        old.weekday = 5
+        old.monthDay = 19
+        old.hour = 18
+        old.minute = 37
+        defaults.set(try JSONEncoder().encode(old), forKey: key)
+
+        let migrated = ArchiveAuditSettings.loadMigratingLegacyDeep(
+            from: defaults, key: key, at: Date(timeIntervalSince1970: 1_780_000_000))
+        XCTAssertEqual(migrated.mode, .intelligent)
+        XCTAssertTrue(migrated.enabled)
+        XCTAssertTrue(migrated.repair)
+        XCTAssertEqual(migrated.frequency, "monthly")
+        XCTAssertEqual(migrated.weekday, 5)
+        XCTAssertEqual(migrated.monthDay, 19)
+        XCTAssertEqual(migrated.hour, 18)
+        XCTAssertEqual(migrated.minute, 37)
+        XCTAssertEqual(defaults.string(forKey: "other.macsync.preference"), "unrelated-value")
+        XCTAssertEqual(try JSONDecoder().decode(ArchiveAuditSettings.self,
+            from: XCTUnwrap(defaults.data(forKey: key))), migrated)
+        var loadedAgain = ArchiveAuditSettings.loadMigratingLegacyDeep(from: defaults, key: key)
+        XCTAssertFalse(loadedAgain.migrateLegacyDeepSelection())
+    }
+
+    func testQuickToleranceOfTwoSecondsDoesNotReadAnyFileContent() throws {
+        let f = try setup(); defer { try? FileManager.default.removeItem(at: f.base) }
+        try put(f.source, "preview.jpg", "ABCD")
+        try put(f.target, "preview.jpg", "WXYZ")
+        let sourceDate = Date(timeIntervalSince1970: 1_700_000_000)
+        try FileManager.default.setAttributes([.modificationDate: sourceDate.addingTimeInterval(1.5)],
+            ofItemAtPath: f.target.appendingPathComponent("preview.jpg").path)
+        try baseline(f)
+        let audit = try ArchiveAudit(journal: f.journal, mappings: [f.mapping])
+        let within = try audit.run(mode: .quick)
+        XCTAssertEqual(within.count(.matching), 1)
+        XCTAssertEqual(within.bytesRead, 0)
+        XCTAssertTrue(try f.journal.pending().isEmpty)
+        try FileManager.default.setAttributes([.modificationDate: sourceDate.addingTimeInterval(2.5)],
+            ofItemAtPath: f.target.appendingPathComponent("preview.jpg").path)
+        let outside = try audit.run(mode: .quick)
+        XCTAssertEqual(outside.count(.different), 1)
+        XCTAssertEqual(outside.bytesRead, 0)
+        XCTAssertTrue(try f.journal.pending().isEmpty)
+    }
+
+    func testIntelligentHashesDifferentTimestampsAndReusesValidatedCache() throws {
+        let f = try setup(); defer { try? FileManager.default.removeItem(at: f.base) }
+        try put(f.source, "raw.dng", "ABCD")
+        try put(f.target, "raw.dng", "ABCD")
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_700_000_004)],
+            ofItemAtPath: f.target.appendingPathComponent("raw.dng").path)
+        try baseline(f)
+        let audit = try ArchiveAudit(journal: f.journal, mappings: [f.mapping])
+        let first = try audit.run(mode: .intelligent)
+        XCTAssertEqual(first.count(.matching), 1)
+        XCTAssertEqual(first.bytesRead, 8, "Two four-byte files must be hashed once")
+        XCTAssertEqual(first.hashMatches, 1)
+        XCTAssertTrue(try f.journal.pending().isEmpty)
+        let second = try audit.run(mode: .intelligent)
+        XCTAssertEqual(second.count(.matching), 1)
+        XCTAssertEqual(second.bytesRead, 0, "Cache must avoid re-hashing unchanged content")
+        XCTAssertTrue(try f.journal.pending().isEmpty)
+
+        try Data("WXYZ".utf8).write(to: f.target.appendingPathComponent("raw.dng"))
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_700_000_004)],
+            ofItemAtPath: f.target.appendingPathComponent("raw.dng").path)
+        let changed = try audit.run(mode: .intelligent)
+        XCTAssertEqual(changed.count(.different), 1)
+        XCTAssertGreaterThan(changed.bytesRead, 0, "A changed fingerprint must invalidate cached hash")
+        XCTAssertTrue(try f.journal.pending().isEmpty)
+    }
+
     func testAuditScheduleDefaultsDiagnosticAndDisabled() throws {
         var settings=ArchiveAuditSettings()
         XCTAssertFalse(settings.enabled)
