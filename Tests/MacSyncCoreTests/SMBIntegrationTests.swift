@@ -117,7 +117,7 @@ final class SMBIntegrationTests: XCTestCase {
     }
 
 
-    private func helperRename(_ env: Environment, old: URL, new: URL) throws -> (Int32, Double) {
+    private func helperRename(_ env: Environment, old: URL, new: URL, diagnostic: Bool = false) throws -> (Int32, Double) {
         var source = stat()
         guard old.path.withCString({ Darwin.lstat($0, &source) }) == 0 else {
             throw CocoaError(.fileNoSuchFile)
@@ -137,17 +137,34 @@ final class SMBIntegrationTests: XCTestCase {
         ]
         let input = Pipe()
         let process = Process()
-        process.executableURL = env.helper
+        let diagnosticTool = ProcessInfo.processInfo.environment["MACSYNC_TEST_SMB_DIAGNOSTIC_HELPER"]
+        process.executableURL = diagnostic && diagnosticTool != nil ?
+            URL(fileURLWithPath: diagnosticTool!) : env.helper
         process.standardInput = input
         process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+        let diagnosticOutput = Pipe()
+        process.standardError = diagnostic ? diagnosticOutput : FileHandle.nullDevice
         let started = ProcessInfo.processInfo.systemUptime
         try process.run()
         try input.fileHandleForWriting.write(contentsOf: JSONSerialization.data(withJSONObject: request))
         try input.fileHandleForWriting.close()
         process.waitUntilExit()
         let elapsed = ProcessInfo.processInfo.systemUptime - started
-        print("MACSYNC_SMB_INTEGRATION helper_rename_seconds=\(elapsed) status=\(process.terminationStatus)")
+        if diagnostic {
+            let raw = String(decoding: diagnosticOutput.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            // Print only an enumerated test-only category. The raw helper
+            // stderr may contain paths and must never reach CI logs.
+            let categories: Set<String> = ["source-identity", "source-metadata",
+                "destination-exists", "access-denied", "source-not-found",
+                "request-invalid", "not-supported", "rename-io", "other", "success"]
+            let observed = raw.split(whereSeparator: \.isNewline).compactMap { line -> String? in
+                let prefix = "MACSYNC_SMB_HELPER_DIAGNOSTIC category="
+                guard line.hasPrefix(prefix) else { return nil }
+                return String(line.dropFirst(prefix.count))
+            }.first
+            print("MACSYNC_SMB_HELPER_DIAGNOSTIC category=\(observed.flatMap { categories.contains($0) ? $0 : nil } ?? "unavailable")")
+        }
+        print("MACSYNC_SMB_INTEGRATION helper_rename_seconds=\(elapsed) status=\(process.terminationStatus) diagnostic=\(diagnostic)")
         return (process.terminationStatus, elapsed)
     }
 
@@ -165,6 +182,19 @@ final class SMBIntegrationTests: XCTestCase {
             // file-not-found assertions that conceal the original problem.
             XCTAssertEqual(try Data(contentsOf: old), bytes)
             XCTAssertFalse(FileManager.default.fileExists(atPath: new.path))
+            // Repeat with a DIFFERENT disposable file and the same production
+            // implementation, instrumented by a test-only main entrypoint.
+            let probeOld = root.appendingPathComponent("diagnostic-old.jpg")
+            let probeNew = root.appendingPathComponent("diagnostic-new.jpg")
+            try bytes.write(to: probeOld)
+            let (diagnosticStatus, _) = try helperRename(env, old: probeOld, new: probeNew,
+                diagnostic: true)
+            if diagnosticStatus == 0 {
+                XCTAssertEqual(try Data(contentsOf: probeNew), bytes)
+            } else {
+                XCTAssertEqual(try Data(contentsOf: probeOld), bytes)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: probeNew.path))
+            }
             XCTFail("Protected helper rejected the real SMB rename (status \(status)); source preserved")
             return
         }
