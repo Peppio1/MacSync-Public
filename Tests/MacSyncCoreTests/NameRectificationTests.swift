@@ -192,6 +192,41 @@ final class NameRectificationTests:XCTestCase {
         XCTAssertEqual(try Data(contentsOf: source.appendingPathComponent(corrected)), bytes)
         XCTAssertEqual(try Data(contentsOf: target.appendingPathComponent(original)), bytes)
         XCTAssertEqual(try Data(contentsOf: collision), occupied)
+
+        // The durable plan links both sides by old/new name. New paths,
+        // old paths and their parent dependencies are guarded; siblings aren't.
+        let protected = try NameRectification.pendingProtection(journal: journal)
+        XCTAssertFalse(protected.isEmpty)
+        XCTAssertTrue(protected.protects(rootID: "demo", path: original))
+        XCTAssertTrue(protected.protects(rootID: "demo", path: corrected))
+        XCTAssertFalse(protected.protects(rootID: "demo", path: "unrelated.jpg"))
+
+        // Audit must report a pending rename, not a missing/extra file or a
+        // reason to read SHA-256. QUICK and INTELLIGENT are both read-only.
+        for mode: ArchiveAuditMode in [.quick, .intelligent] {
+            let audit = try ArchiveAudit(journal: journal, mappings: [map]).run(mode: mode)
+            let known = audit.findings.filter {
+                $0.relativePath == original || $0.relativePath == corrected
+            }
+            XCTAssertFalse(known.isEmpty)
+            XCTAssertTrue(known.allSatisfy { $0.kind == .uncertain && !$0.detail.isEmpty })
+            XCTAssertEqual(audit.bytesRead, 0)
+            XCTAssertEqual(audit.queuedRepairs, 0)
+        }
+
+        // The unprotected sibling still copies while a local success and
+        // remote error hold only the two affected names.
+        let unrelated = Data("independent archive content".utf8)
+        try unrelated.write(to: source.appendingPathComponent("unrelated.jpg"))
+        _ = try LocalInventory(path: db).reconcile(rootID: "demo", root: source)
+        let worker = try MountedFolderCopyWorker(journal: journal, log: log,
+            mappings: [map], minimumStableAge: 0)
+        _ = try worker.runCycle(enabled: true)
+        XCTAssertEqual(try Data(contentsOf: target.appendingPathComponent("unrelated.jpg")), unrelated)
+        XCTAssertTrue(try journal.hasPendingNameRectification())
+        XCTAssertEqual(try Data(contentsOf: target.appendingPathComponent(original)), bytes)
+        XCTAssertEqual(try Data(contentsOf: collision), occupied)
+
         try fm.removeItem(at: collision)
         let reopened = try ChangeJournal(path: db)
         let resumed = try NameRectification.execute(items: [], roots: ["demo": source.path],
