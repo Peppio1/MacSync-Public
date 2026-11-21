@@ -91,32 +91,62 @@ public enum NameRectification {
             public let side: IncompatibleName.Side
         }
         public let relations: [Relation]
+        private let scopesByRoot: [String: Set<String>]
+        private let ancestorsByRoot: [String: Set<String>]
+        private let exactRelations: [String: Relation]
         public var isEmpty: Bool { relations.isEmpty }
 
-        private func folded(_ path: String) -> String {
+        private static func folded(_ path: String) -> String {
             path.split(separator: "/", omittingEmptySubsequences: false)
                 .map { WindowsPathSafety.comparisonFold(String($0)) }.joined(separator: "/")
         }
 
-        /// An ancestor cannot be deleted/replaced while an unresolved child
-        /// exists. An unrelated sibling is always eligible to proceed.
-        public func protects(rootID: String, path: String) -> Bool {
-            guard !path.isEmpty else { return false }
-            let key = folded(path)
-            return relations.contains { relation in
-                guard relation.rootID == rootID else { return false }
-                return [relation.oldPath, relation.newPath].contains { raw in
-                    let scope = folded(raw)
-                    return key == scope || key.hasPrefix(scope + "/") ||
-                        scope.hasPrefix(key + "/")
+        /// One-time O(plan size × depth) preparation. Audit and sync may
+        /// inspect hundreds of thousands of paths: never linearly scan the
+        /// persisted rename plan for each file or directory.
+        init(relations: [Relation]) {
+            self.relations = relations
+            var scopes: [String: Set<String>] = [:]
+            var ancestors: [String: Set<String>] = [:]
+            var exact: [String: Relation] = [:]
+            for relation in relations {
+                for raw in [relation.oldPath, relation.newPath] {
+                    let key = Self.folded(raw)
+                    scopes[relation.rootID, default: []].insert(key)
+                    exact[relation.rootID + "\0" + key] = relation
+                    let parts = key.split(separator: "/")
+                    if parts.count > 1 {
+                        for depth in 1..<parts.count {
+                            ancestors[relation.rootID, default: []].insert(
+                                parts.prefix(depth).joined(separator: "/"))
+                        }
+                    }
                 }
             }
+            scopesByRoot = scopes
+            ancestorsByRoot = ancestors
+            exactRelations = exact
         }
-        public func exactRelation(rootID: String, path: String) -> Relation? {
-            let key = folded(path)
-            return relations.first {
-                $0.rootID == rootID && (folded($0.oldPath) == key || folded($0.newPath) == key)
+
+        /// Protect the old/new leaf, descendants of pending directory renames
+        /// and ancestors whose mutation might invalidate the pending plan.
+        /// Unrelated sibling paths never pay a remote metadata or SHA read.
+        public func protects(rootID: String, path: String) -> Bool {
+            guard !path.isEmpty, let scopes = scopesByRoot[rootID] else { return false }
+            let key = Self.folded(path)
+            if scopes.contains(key) || ancestorsByRoot[rootID]?.contains(key) == true {
+                return true
             }
+            let parts = key.split(separator: "/")
+            guard parts.count > 1 else { return false }
+            for depth in 1..<parts.count where scopes.contains(parts.prefix(depth).joined(separator: "/")) {
+                return true
+            }
+            return false
+        }
+
+        public func exactRelation(rootID: String, path: String) -> Relation? {
+            exactRelations[rootID + "\0" + Self.folded(path)]
         }
     }
 
@@ -127,7 +157,7 @@ public enum NameRectification {
             return PendingProtection(relations: [])
         }
         let moves = try JSONDecoder().decode([Move].self, from: batch.data)
-        guard (0...moves.count).contains(batch.offset) else {
+        guard !moves.isEmpty, (0...moves.count).contains(batch.offset) else {
             throw JournalError.database("Stato rettifiche pendenti non valido")
         }
         var relations: [PendingProtection.Relation] = []
