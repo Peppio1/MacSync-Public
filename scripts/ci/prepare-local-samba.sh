@@ -5,11 +5,15 @@ umask 077
 : "$RUNNER_TEMP" "$GITHUB_ENV"
 base="$RUNNER_TEMP/macsync-smb-fixture"
 mountpoint="$base/mounted"
-share="$base/shared"
+# Use a Darwin world-traversable temporary path for the Samba data root.
+# macOS runners may deny SMB file access when a share resides under their
+# protected GitHub runner work directory despite smbclient access.
+share="$(mktemp -d /private/tmp/macsync-ci-share.XXXXXX)"
+mkdir -p "$base"/{private,state,cache,lock,pid,logs} "$mountpoint"
+printf '%s\n' "$share" > "$base/share-path"
 user="$(id -un)"
 password="MacSyncCI$(openssl rand -hex 14)"
 printf '::add-mask::%s\n' "$password"
-mkdir -p "$base"/{private,state,cache,lock,pid,logs} "$share" "$mountpoint"
 chmod 700 "$base" "$base/private"
 chmod 770 "$share"
 prefix="$(brew --prefix)"
