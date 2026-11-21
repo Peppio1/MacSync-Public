@@ -55,7 +55,7 @@ La chiusura controllata annulla nuovi lavori e attende il drenaggio di worker e 
 
 - Sincronizzazione: minuti 1–59, ore 1–23, quotidiana/settimanale. Slot ancorati al calendario/cadenza, nessuna esecuzione simultanea o recupero in massa degli slot persi.
 - Notifiche: soglia 1–168 ore, opzionale; misurazione dal primo controllo offline e invio al successivo controllo utile. Nessun polling autonomo della connessione.
-- Audit: manuale o giornaliero/settimanale/mensile (giorni 1–28), confronto rapido dimensione/mtime o SHA-256 approfondito. Riallineamento solo tramite UPSERT verificati e facoltativi, mai DELETE; riconoscimento dei file preesistenti con conferma separata.
+- Audit, candidata v0.18.15: manuale o giornaliero/settimanale/mensile (giorni 1–28). L'interfaccia espone solo QUICK (dimensione/mtime con tolleranza di 2 secondi, senza SHA-256) e INTELLIGENT (hash selettivo quando serve secondo i metadati); DEEP resta un motore diagnostico interno per report storici e test di sicurezza. Le vecchie preferenze DEEP vengono convertite e ri-salvate in INTELLIGENT mantenendo gli altri campi. Riallineamento solo tramite UPSERT verificati e facoltativi, mai DELETE; riconoscimento dei file preesistenti con conferma separata.
 - Statistiche: nuovi/aggiornati dopo conferma, cancellati reali e recuperati come sottoinsieme, esclusione del housekeeping. Velocità media pesata dei byte di staging; non è throughput fisico VPN. Log tecnico con esportazione TSV; storico delle sincronizzazioni separato.
 
 ## Evidenze e criteri di rilascio
