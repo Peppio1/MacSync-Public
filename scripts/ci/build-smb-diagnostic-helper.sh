@@ -26,6 +26,26 @@ go mod edit -replace "github.com/cloudsoda/go-smb2=$work/go-smb2"
 mkdir -p cmd/macsync-smb-rename-diagnostic
 cp "$diagnostics/diagnostic_main.go" cmd/macsync-smb-rename-diagnostic/main.go
 cp "$assets/macsync_rename.go" backend/smb/macsync_rename.go
+# Test-only: split a single generic rejection into two diagnostic categories.
+# The actual predicates, SMB calls and fail-closed behavior are unchanged.
+python3 - backend/smb/macsync_rename.go <<'PY'
+from pathlib import Path
+import sys
+file = Path(sys.argv[1])
+data = file.read_text()
+old = '''if !request.IsDirectory && (info.Size() != request.Size ||
+\t\t\t!info.ModTime().Equal(time.Unix(request.ModifiedSeconds, request.ModifiedNanos))) {
+\t\t\treturn errors.New("source metadata changed")
+\t\t}'''
+new = '''if !request.IsDirectory && info.Size() != request.Size {
+\t\t\treturn errors.New("source size mismatch")
+\t\t}
+\t\tif !request.IsDirectory && !info.ModTime().Equal(time.Unix(request.ModifiedSeconds, request.ModifiedNanos)) {
+\t\t\treturn errors.New("source modified timestamp mismatch")
+\t\t}'''
+assert data.count(old) == 1, "Only the pinned helper comparison may be instrumented"
+file.write_text(data.replace(old, new))
+PY
 CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -tags macsync_ci -trimpath -buildvcs=false \
     -o "$out/rclone-smb-rename-diagnostic" ./cmd/macsync-smb-rename-diagnostic
 codesign --force --sign - "$out/rclone-smb-rename-diagnostic"
