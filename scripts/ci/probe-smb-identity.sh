@@ -19,7 +19,9 @@ go 1.26.0
 require github.com/cloudsoda/go-smb2 v0.0.0-20260918041005-0c5d69b69701
 EOF
 cp "$GITHUB_WORKSPACE/scripts/ci/probe-smb-identity.go" "$base/metadata-probe/main.go"
-client_stats="$(/usr/bin/stat -f '%i %B %m %z' "$path")"
+# The two clients must inspect the same disposable file, including nanos.
+# Deliberately emit only boolean comparisons and never raw metadata or secrets.
+client_stats="$(swift "$GITHUB_WORKSPACE/scripts/ci/probe-smb-stat.swift" "$path" 2>"$base/metadata-probe/swift.stderr")"
 if ! (cd "$base/metadata-probe" && go mod tidy && go build -o "$base/metadata-probe/smb-metadata-probe" .) \
     >"$base/metadata-probe/build.stdout" 2>"$base/metadata-probe/build.stderr"; then
   echo "::error::Synthetic SMB2 metadata probe could not compile (test-only Go module)"
@@ -29,11 +31,11 @@ if ! server_stats="$("$base/metadata-probe/smb-metadata-probe" 2>"$base/metadata
   echo "::error::Synthetic SMB2 metadata probe could not connect or inspect the file"
   exit 1
 fi
-read -r client_id client_birth client_modified client_size <<< "$client_stats"
-read -r server_id server_birth server_modified server_size <<< "$server_stats"
-for number in "$client_id" "$client_birth" "$client_modified" "$client_size" \
-              "$server_id" "$server_birth" "$server_modified" "$server_size"; do
-  [[ "$number" =~ ^[0-9]+$ ]] || { echo "::error::Malformed synthetic SMB metadata"; exit 1; }
+read -r client_id client_birth client_modified client_changed client_size <<< "$client_stats"
+read -r server_id server_birth server_modified server_changed server_size <<< "$server_stats"
+for number in "$client_id" "$client_birth" "$client_modified" "$client_changed" "$client_size" \
+              "$server_id" "$server_birth" "$server_modified" "$server_changed" "$server_size"; do
+  [[ "$number" =~ ^-?[0-9]+$ ]] || { echo "::error::Malformed synthetic SMB metadata"; exit 1; }
 done
 eq() { if [ "$1" = "$2" ]; then printf yes; else printf no; fi; }
-echo "MACSYNC_SMB_METADATA file_id_equal=$(eq "$client_id" "$server_id") creation_seconds_equal=$(eq "$client_birth" "$server_birth") modified_seconds_equal=$(eq "$client_modified" "$server_modified") size_equal=$(eq "$client_size" "$server_size")"
+echo "MACSYNC_SMB_METADATA file_id_equal=$(eq "$client_id" "$server_id") creation_nanoseconds_equal=$(eq "$client_birth" "$server_birth") modified_nanoseconds_equal=$(eq "$client_modified" "$server_modified") change_nanoseconds_equal=$(eq "$client_changed" "$server_changed") size_equal=$(eq "$client_size" "$server_size")"
