@@ -9,7 +9,7 @@ prefix="$(brew --prefix 2>/dev/null || true)"
 if [ -x "$prefix/bin/smbcontrol" ] && [ -f "$base/smb.conf" ]; then
   sudo "$prefix/bin/smbcontrol" -s "$base/smb.conf" smbd shutdown >/dev/null 2>&1 || true
 fi
-if [ -f "$HOME/Library/Preferences/nsmb.conf" ] && [ -d "$base" ]; then
+if [ -f "$base/nsmb-created" ] && [ -f "$HOME/Library/Preferences/nsmb.conf" ]; then
   rm -f "$HOME/Library/Preferences/nsmb.conf"
 fi
 # Remove only the path that this isolated job created, never arbitrary paths.
