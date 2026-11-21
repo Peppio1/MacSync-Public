@@ -59,6 +59,13 @@ public struct SeedFileFingerprint: Codable, Equatable, Sendable {
     public let ctimeSeconds: Int64
     public let ctimeNanos: Int64
 
+    public var modifiedAt: Double {
+        Double(mtimeSeconds) + Double(mtimeNanos) / 1_000_000_000
+    }
+}
+
+// Keep the synthesized memberwise initializer available to existing code.
+extension SeedFileFingerprint {
     /// Retains the exact stat already obtained during a complete inventory.
     /// Never use this snapshot as the sole authority for a queue commit.
     init(fileStat info: stat) {
@@ -72,9 +79,6 @@ public struct SeedFileFingerprint: Codable, Equatable, Sendable {
         )
     }
 
-    public var modifiedAt: Double {
-        Double(mtimeSeconds) + Double(mtimeNanos) / 1_000_000_000
-    }
 }
 
 public struct SeedVerifiedMatch: Sendable {
