@@ -254,7 +254,7 @@ final class NameRectificationTests:XCTestCase {
 
         let remoteNames = ["one?.jpg", "two?.jpg", "three?.jpg"]
         for (index, name) in remoteNames.enumerated() {
-            try Data("remote-\\(index)".utf8).write(to: target.appendingPathComponent(name))
+            try Data("remote-\(index)".utf8).write(to: target.appendingPathComponent(name))
         }
         let localName = "local?.jpg"
         let localBytes = Data("local remains independent".utf8)
@@ -280,7 +280,7 @@ final class NameRectificationTests:XCTestCase {
                         try fm.moveItem(at: target, to: disconnected)
                         simulatedOutage = true
                     } catch {
-                        XCTFail("Cannot disconnect synthetic destination: \\(error)")
+                        XCTFail("Cannot disconnect synthetic destination: \(error)")
                     }
                 }
             })
@@ -296,7 +296,7 @@ final class NameRectificationTests:XCTestCase {
         XCTAssertEqual(deferred.count, 2, "Only the first remote failure may probe this unavailable root")
         for (index, name) in remoteNames.enumerated() {
             XCTAssertEqual(try Data(contentsOf: disconnected.appendingPathComponent(name)),
-                Data("remote-\\(index)".utf8))
+                Data("remote-\(index)".utf8))
         }
 
         try fm.moveItem(at: disconnected, to: target)
@@ -310,7 +310,7 @@ final class NameRectificationTests:XCTestCase {
             XCTAssertFalse(fm.fileExists(atPath: target.appendingPathComponent(name).path))
             let corrected = name.replacingOccurrences(of: "?", with: "-")
             XCTAssertEqual(try Data(contentsOf: target.appendingPathComponent(corrected)),
-                Data("remote-\\(index)".utf8))
+                Data("remote-\(index)".utf8))
         }
     }
 
