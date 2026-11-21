@@ -47,11 +47,11 @@ cat > "$conf" <<EOF
     valid users = $user
     write list = $user
     force user = $user
-    # Apple's SMB3 client uses AAPL metadata requests unlike smbclient.
-    vfs objects = catia fruit streams_xattr
-    fruit:metadata = stream
-    fruit:resource = stream
-    readdir_attr:aapl_max_access = no
+    # CI diagnostic: use straightforward NT ACL and DOS-attribute mapping.
+    # No Samba fruit/AAPL extensions until the basic SMB3 write path passes.
+    nt acl support = no
+    ea support = no
+    store dos attributes = no
     create mask = 0660
     directory mask = 0770
 EOF
