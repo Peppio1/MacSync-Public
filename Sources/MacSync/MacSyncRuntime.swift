@@ -107,7 +107,7 @@ final class MacSyncRuntime: ObservableObject {
                 DispatchQueue.main.async { [weak self] in
                     guard let self, pending, !self.shuttingDown else { return }
                     self.rectificationPending = true
-                    self.automaticStatus = "Rettifica in attesa: riprendila da Nomi incompatibili"
+                    self.automaticStatus = "Rettifica pendente: i percorsi interessati restano protetti; riprendi da Nomi incompatibili"
                 }
             }
         }
@@ -431,7 +431,7 @@ final class MacSyncRuntime: ObservableObject {
                     self.rectificationPending = pending
                     if !self.shuttingDown {
                         self.model.startMonitoring()
-                        self.automaticStatus = pending ? "Rettifica in attesa: riprendila da Nomi incompatibili" : "Rettifica terminata: attendi l'inventario prima di riavviare le copie"
+                        self.automaticStatus = pending ? "Rettifica pendente: percorsi interessati protetti; riabilita le copie indipendenti se desiderato" : "Rettifica terminata: attendi l'inventario prima di riavviare le copie"
                         self.scheduleArchiveAudit()
                     }
                     self.finishShutdownIfReady()
@@ -442,14 +442,10 @@ final class MacSyncRuntime: ObservableObject {
 
     func startManualSynchronization() {
         guard !previewOnly, !shuttingDown, !savingSchedule, !folderConfigurationBusy, !finalShutdownHolding, !copy.queueRebuildRequired,
-              !rectificationPending, model.monitoring, model.safetyGate.isReady, !copy.active, !copy.maintaining,
+              model.monitoring, model.safetyGate.isReady, !copy.active, !copy.maintaining,
               !copy.seedBusy, !copy.seedReady, !copy.interruptionRequested else {
             guard !previewOnly else { return }
-            if rectificationPending {
-                copy.status = "Sincronizzazione sospesa: riprendi la rettifica da Nomi incompatibili"
-            } else {
-                copy.status = copy.queueRebuildRequired ? "Sincronizzazione non avviata: verifica archivio richiesta o coda non leggibile" : !model.monitoring || !model.safetyGate.isReady ? "Sincronizzazione non avviata: monitoraggio o inventario non pronto" : "Sincronizzazione non avviata: operazione già in corso o blocco di sicurezza"
-            }
+            copy.status = copy.queueRebuildRequired ? "Sincronizzazione non avviata: verifica archivio richiesta o coda non leggibile" : !model.monitoring || !model.safetyGate.isReady ? "Sincronizzazione non avviata: monitoraggio o inventario non pronto" : "Sincronizzazione non avviata: operazione già in corso o blocco di sicurezza"
             copy.recordBlockedStart(reason:copy.status)
             return
         }
@@ -838,7 +834,7 @@ final class MacSyncRuntime: ObservableObject {
         autoTimer = nil
         nextAutomaticAttempt = nil
         guard !shuttingDown, !savingSchedule, !folderConfigurationBusy, !suspendedUntilNextLaunch, !finalShutdownHolding,
-              !rectificationPending, copy.automaticCopiesEnabled, !copy.queueRebuildRequired,
+              copy.automaticCopiesEnabled, !copy.queueRebuildRequired,
               !copy.active, !copy.maintaining, !copy.auditBusy, !copy.interruptionRequested, copy.liveProgress == nil else { return }
         let schedule = settings.schedule
         let now = Date()
