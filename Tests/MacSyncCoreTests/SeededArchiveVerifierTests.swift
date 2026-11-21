@@ -53,18 +53,20 @@ final class SeededArchiveVerifierTests: XCTestCase {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }
         let date = Date(timeIntervalSinceNow:-900)
-        try write("same",to:f.source.appendingPathComponent("a.jpg"),date:date)
-        try write("same",to:f.target.appendingPathComponent("a.jpg"),date:date)
+        try write("same",to:f.source.appendingPathComponent("photos/a.jpg"),date:date)
+        try write("same",to:f.target.appendingPathComponent("photos/a.jpg"),date:date)
         let source = try LocalScanner.scan(root:f.source,excludeManaged:true)
         let target = try LocalScanner.scan(root:f.target,excludeManaged:true,preferPOSIXMetadata:true)
-        XCTAssertNotNil(source.first(where: { $0.relativePath == "a.jpg" })?.verificationFingerprint)
-        XCTAssertNotNil(target.first(where: { $0.relativePath == "a.jpg" })?.verificationFingerprint)
+        XCTAssertNotNil(source.first(where: { $0.relativePath == "photos/a.jpg" })?.verificationFingerprint)
+        XCTAssertNotNil(target.first(where: { $0.relativePath == "photos/a.jpg" })?.verificationFingerprint)
+        XCTAssertNotNil(source.first(where: { $0.relativePath == "photos" })?.verificationFingerprint)
+        XCTAssertNotNil(target.first(where: { $0.relativePath == "photos" })?.verificationFingerprint)
         try initializeInventory(f)
         let session = try SeededArchiveSession(database:f.db,mappings:[f.mapping])
         let result = try session.auditAndRecognize(mode:.quick)
-        XCTAssertEqual(result.recognition.matches.count,1)
+        XCTAssertEqual(result.recognition.matches.count,2)
         XCTAssertEqual(result.audit.bytesRead,0)
-        XCTAssertEqual(try session.approve(report:result.recognition),1)
+        XCTAssertEqual(try session.approve(report:result.recognition),2)
     }
 
     func testBatchApprovalKeepsOneChangedFilePending() throws {
