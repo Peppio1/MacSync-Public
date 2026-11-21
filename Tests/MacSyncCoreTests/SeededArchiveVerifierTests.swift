@@ -49,6 +49,60 @@ final class SeededArchiveVerifierTests: XCTestCase {
         }
     }
 
+    func testQuickAuditReusesNoFollowScanFingerprints() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let date = Date(timeIntervalSinceNow:-900)
+        try write("same",to:f.source.appendingPathComponent("a.jpg"),date:date)
+        try write("same",to:f.target.appendingPathComponent("a.jpg"),date:date)
+        let source = try LocalScanner.scan(root:f.source,excludeManaged:true)
+        let target = try LocalScanner.scan(root:f.target,excludeManaged:true,preferPOSIXMetadata:true)
+        XCTAssertNotNil(source.first(where: { $0.relativePath == "a.jpg" })?.verificationFingerprint)
+        XCTAssertNotNil(target.first(where: { $0.relativePath == "a.jpg" })?.verificationFingerprint)
+        try initializeInventory(f)
+        let session = try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let result = try session.auditAndRecognize(mode:.quick)
+        XCTAssertEqual(result.recognition.matches.count,1)
+        XCTAssertEqual(result.audit.bytesRead,0)
+        XCTAssertEqual(try session.approve(report:result.recognition),1)
+    }
+
+    func testBatchApprovalKeepsOneChangedFilePending() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let date = Date(timeIntervalSinceNow:-900)
+        for i in 0..<260 {
+            try write("fixed",to:f.source.appendingPathComponent("photos/f\\(i).jpg"),date:date)
+            try write("fixed",to:f.target.appendingPathComponent("photos/f\\(i).jpg"),date:date)
+        }
+        try initializeInventory(f)
+        let session = try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let result = try session.auditAndRecognize(mode:.quick)
+        XCTAssertEqual(result.recognition.matches.count,261)
+        try write("changed",to:f.target.appendingPathComponent("photos/f129.jpg"))
+        XCTAssertEqual(try session.approve(report:result.recognition),260)
+        XCTAssertEqual(try f.journal.pending().filter { $0.kind == .upsert }.count,1)
+    }
+
+    func testBatchApprovalNeverFollowsReplacedParentSymlink() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let date = Date(timeIntervalSinceNow:-900)
+        try write("same",to:f.source.appendingPathComponent("photos/photo.jpg"),date:date)
+        try write("same",to:f.target.appendingPathComponent("photos/photo.jpg"),date:date)
+        try initializeInventory(f)
+        let session = try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let result = try session.auditAndRecognize(mode:.quick)
+        XCTAssertEqual(result.recognition.matches.count,2)
+        let old = f.base.appendingPathComponent("moved-photos")
+        try FileManager.default.moveItem(at:f.target.appendingPathComponent("photos"),to:old)
+        try FileManager.default.createSymbolicLink(
+            at:f.target.appendingPathComponent("photos"),withDestinationURL:old)
+        XCTAssertEqual(try session.approve(report:result.recognition),0)
+        XCTAssertEqual(try f.journal.pending().filter { $0.kind == .upsert }.count,2)
+        XCTAssertEqual(try String(contentsOf:old.appendingPathComponent("photo.jpg"),encoding:.utf8),"same")
+    }
+
     func testLargeArchiveRecognition200000Files() throws {
         guard ProcessInfo.processInfo.environment["MACSYNC_LARGE_AUDIT"] == "1" else { throw XCTSkip("Opt-in large local archive benchmark") }
         let f = try fixture()
