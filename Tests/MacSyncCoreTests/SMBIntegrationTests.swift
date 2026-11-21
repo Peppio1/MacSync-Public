@@ -82,6 +82,9 @@ final class SMBIntegrationTests: XCTestCase {
         let first = Data(repeating: 0x24, count: 256 * 1024)
         let second = Data(repeating: 0x51, count: 512 * 1024)
         try first.write(to: file)
+        // Respect production stability delay; a fresh source is intentionally deferred.
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -100)], ofItemAtPath: file.path)
 
         let db = base.appendingPathComponent("inventory.sqlite").path
         let journal = try ChangeJournal(path: db)
@@ -104,6 +107,8 @@ final class SMBIntegrationTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: target.appendingPathComponent(name)), first)
         XCTAssertTrue(try journal.pending().isEmpty)
         try second.write(to: file)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -100)], ofItemAtPath: file.path)
         try journal.enqueue(rootID: "smb-test", relativePath: name, kind: .upsert)
         XCTAssertEqual(try worker.runOnce(enabled: true).updated, 1)
         XCTAssertEqual(try Data(contentsOf: target.appendingPathComponent(name)), second)
