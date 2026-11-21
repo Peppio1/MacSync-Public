@@ -702,7 +702,7 @@ public final class MirrorDeletionWorker {
                 guard WindowsPathSafety.validRelativePath(job.relativePath) else { throw MirrorDeletionFailure.unsafePath }
                 // Fresh SQLite protection check immediately before any mirror
                 // mutation. It cannot be bypassed by stale plan snapshots.
-                guard !NameRectification.pendingProtection(journal: journal)
+                guard try !NameRectification.pendingProtection(journal: journal)
                     .protects(rootID: job.rootID, path: job.relativePath) else {
                     result.deferred += 1
                     emit(.deferred, job: job, mapping: mapping,
