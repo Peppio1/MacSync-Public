@@ -4,6 +4,9 @@ import CryptoKit
 
 public enum ArchiveAuditMode: String, Codable, CaseIterable, Sendable {
     case quick, intelligent, deep
+    /// Only these modes are available to operators. Keep .deep internally
+    /// for historical reports and safety/regression diagnostics.
+    public static let selectableModes: [ArchiveAuditMode] = [.quick, .intelligent]
     public var label: String {
         switch self {
         case .quick: return "Rapida (metadati)"
@@ -22,6 +25,31 @@ public struct ArchiveAuditSettings: Codable, Equatable, Sendable {
     public var hour = 3
     public var minute = 0
     public init() {}
+
+    /// Migrate only the operator selection; legacy DEEP reports and the
+    /// internal SHA-256 code remain decodable and available for diagnostics.
+    /// Return whether the stored selection actually changed.
+    @discardableResult public mutating func migrateLegacyDeepSelection() -> Bool {
+        guard mode == .deep else { return false }
+        mode = .intelligent
+        return true
+    }
+
+    /// Restore the existing settings object without discarding schedule,
+    /// repair and enabled flags. Write back immediately only on migration.
+    /// Invalid/unknown settings retain the established default fallback.
+    public static func loadMigratingLegacyDeep(from defaults: UserDefaults, key: String,
+                                               at date: Date = Date()) -> Self {
+        guard let data = defaults.data(forKey: key),
+              var restored = try? JSONDecoder().decode(Self.self, from: data),
+              restored.next(after: date) != nil else { return Self() }
+        if restored.migrateLegacyDeepSelection(),
+           let encoded = try? JSONEncoder().encode(restored) {
+            defaults.set(encoded, forKey: key)
+        }
+        return restored
+    }
+
     public func next(after date: Date, calendar: Calendar = .current) -> Date? {
         guard (0...23).contains(hour), (0...59).contains(minute),
               (1...7).contains(weekday), (1...28).contains(monthDay) else { return nil }
