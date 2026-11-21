@@ -241,6 +241,71 @@ final class NameRectificationTests:XCTestCase {
             source.appendingPathComponent("folder-/child-.jpg")), content)
     }
 
+    func testPreflightDestinationOutageAvoidsRepeatedRemoteChecks() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .resolvingSymlinksInPath()
+        let source = base.appendingPathComponent("source")
+        let target = base.appendingPathComponent("target")
+        let unavailable = base.appendingPathComponent("unavailable")
+        try fm.createDirectory(at: source, withIntermediateDirectories: true)
+        try fm.createDirectory(at: target, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+
+        let names = ["first?.jpg", "second?.jpg", "third?.jpg"]
+        for (index, name) in names.enumerated() {
+            try Data("photo-\(index)".utf8).write(to: target.appendingPathComponent(name))
+        }
+        try Data("independent".utf8).write(to: source.appendingPathComponent("local?.jpg"))
+        let db = base.appendingPathComponent("fixture.sqlite").path
+        _ = try LocalInventory(path: db).reconcile(rootID: "demo", root: source)
+        let mapping = try MountedFolderMapping(rootID: "demo", source: source, target: target)
+        if !mapping.targetVolume.isStrongIdentity { throw XCTSkip("Volume identity unavailable") }
+        let journal = try ChangeJournal(path: db)
+        try journal.verifyDirectoryBindings([mapping], allowNewTarget: true)
+        let log = try SyncActivityLog(path: db)
+        let remoteRows = names.map {
+            IncompatibleName(rootID: "demo", rootPath: target.path,
+                relativePath: $0, objectKind: "file", side: .destination, reason: "Incompatible")
+        }
+        let local = IncompatibleName(rootID: "demo", rootPath: source.path,
+            relativePath: "local?.jpg", objectKind: "file", side: .source, reason: "Incompatible")
+        try fm.moveItem(at: target, to: unavailable)
+        let first = try NameRectification.execute(items: remoteRows + [local],
+            roots: ["demo": source.path], journal: journal, log: log,
+            destinations: ["demo": mapping])
+        XCTAssertEqual(first.failed, 3)
+        XCTAssertEqual(first.skipped, 0)
+        XCTAssertEqual(first.renamed, 1)
+        XCTAssertNotNil(first.firstFailure)
+        XCTAssertFalse(try journal.hasPendingNameRectification(),
+            "Unknown remote fingerprints cannot enter an approved durable plan")
+        XCTAssertEqual(try log.technicalPage().filter {
+            $0.entry.action == "name_rectification_preflight_destination_deferred"
+        }.count, 2)
+        XCTAssertEqual(try Data(contentsOf: source.appendingPathComponent("local-.jpg")),
+            Data("independent".utf8))
+        for (index, name) in names.enumerated() {
+            XCTAssertEqual(try Data(contentsOf: unavailable.appendingPathComponent(name)),
+                Data("photo-\(index)".utf8))
+        }
+
+        // No unverified remote work was saved. A fresh operator-requested
+        // preflight after reconnection must verify and rename each exact file.
+        try fm.moveItem(at: unavailable, to: target)
+        let recovered = try NameRectification.execute(items: remoteRows,
+            roots: ["demo": source.path], journal: try ChangeJournal(path: db), log: log,
+            destinations: ["demo": mapping])
+        XCTAssertEqual(recovered.renamed, 3)
+        XCTAssertEqual(recovered.failed, 0)
+        XCTAssertFalse(try journal.hasPendingNameRectification())
+        for (index, name) in names.enumerated() {
+            let corrected = name.replacingOccurrences(of: "?", with: "-")
+            XCTAssertEqual(try Data(contentsOf: target.appendingPathComponent(corrected)),
+                Data("photo-\(index)".utf8))
+        }
+    }
+
     func testDestinationOutageDefersSiblingsButLocalMoveContinuesAndResumes() throws {
         let fm = FileManager.default
         let base = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
