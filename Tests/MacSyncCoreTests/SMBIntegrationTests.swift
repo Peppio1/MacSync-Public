@@ -250,9 +250,23 @@ final class SMBIntegrationTests: XCTestCase {
         let queueBefore = try journal.pending().map(\.relativePath).sorted()
         let mapping = try MountedFolderMapping(rootID: "smb-audit", source: source, target: target)
         let audit = try ArchiveAudit(journal: journal, mappings: [mapping])
+        let sourceAtStart = try SeededArchiveVerifier.fingerprint(sourceMatch)
+        let targetAtStart = try SeededArchiveVerifier.fingerprint(targetMatch)
+        func logFingerprintState(_ phase: String) {
+            guard let local = try? SeededArchiveVerifier.fingerprint(sourceMatch),
+                  let remote = try? SeededArchiveVerifier.fingerprint(targetMatch) else {
+                print("MACSYNC_SMB_AUDIT_FINGERPRINT phase=\(phase) read=failed")
+                return
+            }
+            // Test-only measurements of synthetic files, with no paths,
+            // credentials or content in the CI logs.
+            print("MACSYNC_SMB_AUDIT_FINGERPRINT phase=\(phase) source_unchanged=\(local == sourceAtStart) target_unchanged=\(remote == targetAtStart) source_ctime_ns=\(local.ctimeNanos) target_ctime_ns=\(remote.ctimeNanos) source_mtime_ns=\(local.mtimeNanos) target_mtime_ns=\(remote.mtimeNanos)")
+        }
+        logFingerprintState("before")
         let quickStart = ProcessInfo.processInfo.systemUptime
         let quick = try audit.run(mode: .quick)
         let quickSeconds = ProcessInfo.processInfo.systemUptime - quickStart
+        logFingerprintState("after-quick")
         XCTAssertEqual(quick.bytesRead, 0, "Quick mode must never hash file contents")
         XCTAssertEqual(quick.queuedRepairs, 0)
         XCTAssertEqual(quick.count(.missing), 1)
@@ -261,6 +275,7 @@ final class SMBIntegrationTests: XCTestCase {
         let deepStart = ProcessInfo.processInfo.systemUptime
         let deep = try audit.run(mode: .deep)
         let deepSeconds = ProcessInfo.processInfo.systemUptime - deepStart
+        logFingerprintState("after-deep")
         if deep.count(.matching) != 1 {
             // Emit only sanitized, synthetic finding categories and metadata.
             // A remote smbfs timestamp/alias mismatch must not be mistaken
