@@ -45,8 +45,18 @@ cat > "$conf" <<EOF
     create mask = 0660
     directory mask = 0770
 EOF
-"$prefix/bin/testparm" -s "$conf" > "$base/testparm.log" 2>&1
-printf '%s\n%s\n' "$password" "$password" | "$prefix/bin/smbpasswd" -s -a -c "$conf" "$user" > "$base/smbpasswd.log" 2>&1
+echo "Validating disposable Samba configuration"
+if ! "$prefix/bin/testparm" -s "$conf" > "$base/testparm.log" 2>&1; then
+  echo "::error::Samba config invalid"
+  tail -n 15 "$base/testparm.log"
+  exit 1
+fi
+echo "Creating ephemeral SMB user (no credential output)"
+if ! printf '%s\n%s\n' "$password" "$password" | "$prefix/bin/smbpasswd" -s -a -c "$conf" "$user" > "$base/smbpasswd.log" 2>&1; then
+  echo "::error::Could not provision ephemeral Samba user"
+  tail -n 15 "$base/smbpasswd.log"
+  exit 1
+fi
 if nc -z -G 2 127.0.0.1 445 >/dev/null 2>&1; then
   echo "::error::Port 445 already occupied on runner; refusing to touch any existing SMB server"
   exit 1
