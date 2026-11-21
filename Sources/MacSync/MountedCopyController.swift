@@ -41,7 +41,7 @@ final class MountedCopyController: ObservableObject {
         lastRecordedCycle = cycle
         recentEntries = entries
         previewStatus = "Confronto iniziale non eseguito"
-        auditSettings.enabled = false; auditSettings.repair = false; auditSettings.mode = .deep
+        auditSettings.enabled = false; auditSettings.repair = false; auditSettings.mode = .intelligent
         if page == .names {
             incompatibleNames=[
                 IncompatibleName(rootID:"demo",rootPath:"/Example/Archivio",relativePath:"Categoria/Cartella A ",objectKind:"directory",side:.source,reason:"Spazio finale",affectedDescendants:9),
@@ -185,12 +185,9 @@ final class MountedCopyController: ObservableObject {
     @Published var seedTotalJobs = 0
     @Published var seedStartedAt: Date?
     @Published var seedCurrentPath = ""
-    @Published var auditSettings: ArchiveAuditSettings = {
-        guard let data = UserDefaults.standard.data(forKey:"MacSync.archiveAuditSettings"),
-              let value = try? JSONDecoder().decode(ArchiveAuditSettings.self,from:data),
-              value.next(after:Date()) != nil else { return ArchiveAuditSettings() }
-        return value
-    }() {
+    @Published var auditSettings: ArchiveAuditSettings = ArchiveAuditSettings.loadMigratingLegacyDeep(
+        from: .standard, key: "MacSync.archiveAuditSettings"
+    ) {
         didSet {
             if !previewOnly, let data = try? JSONEncoder().encode(auditSettings) {
                 UserDefaults.standard.set(data,forKey:"MacSync.archiveAuditSettings")
@@ -419,6 +416,9 @@ final class MountedCopyController: ObservableObject {
         }
         if queueRebuildRequired && !interactive { noteAuditSkipped("avvia manualmente la verifica dopo lo svuotamento"); return }
         var effectiveSettings = auditSettings
+        // Defensive gate for programmatic callers or legacy in-memory values:
+        // the UI/scheduler must never launch internal DEEP.
+        if effectiveSettings.migrateLegacyDeepSelection() { auditSettings = effectiveSettings }
         if queueRebuildRequired && effectiveSettings.mode == .quick { effectiveSettings.mode = .intelligent }
         let settings = effectiveSettings
         guard !active && liveProgress == nil && !interruptionRequested else { auditStatus = "Sospendi le copie prima del riconoscimento"; return }
@@ -430,10 +430,9 @@ final class MountedCopyController: ObservableObject {
         if interactive {
             let alert = NSAlert()
             alert.messageText = "Avviare verifica archivio?"
-            alert.informativeText = (settings.mode == .deep
-                ? "La verifica SHA-256 legge integralmente i file confrontabili, anche via VPN. "
-                : settings.mode == .intelligent ? "Metadati e SHA-256 per file di uguale dimensione con date differenti. "
-                : "La verifica rapida confronta percorso, dimensione e data; non garantisce identità del contenuto. ")
+            alert.informativeText = (settings.mode == .intelligent
+                ? "Confronta percorsi, dimensioni e date (tolleranza 2 secondi); utilizza SHA-256 selettivo sui file dubbi. "
+                : "La verifica rapida confronta percorsi, dimensioni e date (tolleranza 2 secondi), senza leggere il contenuto. ")
                 + "I file corrispondenti saranno riconosciuti e le differenze sicure accodate automaticamente dopo un backup del database. Nessuna scrittura sulle destinazioni."
                 + " Nessun file presente soltanto sul server verrà cancellato."
             alert.addButton(withTitle:"Avvia verifica"); alert.addButton(withTitle:"Annulla")
