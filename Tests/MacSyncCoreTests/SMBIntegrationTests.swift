@@ -93,7 +93,14 @@ final class SMBIntegrationTests: XCTestCase {
             stageEngine: .rcloneDirect(env.rclone))
         let started = ProcessInfo.processInfo.systemUptime
         try journal.enqueue(rootID: "smb-test", relativePath: name, kind: .upsert)
-        XCTAssertEqual(try worker.runOnce(enabled: true).created, 1)
+        let firstCycle = try worker.runOnce(enabled: true)
+        if firstCycle.created != 1 {
+            for row in try log.technicalPage(limit: 20) {
+                print("MACSYNC_SMB_DIAGNOSTIC action=\(row.entry.action) detail=\(row.entry.message)")
+            }
+            print("MACSYNC_SMB_DIAGNOSTIC firstCycle created=\(firstCycle.created) failed=\(firstCycle.failed) deferred=\(firstCycle.deferred)")
+        }
+        XCTAssertEqual(firstCycle.created, 1)
         XCTAssertEqual(try Data(contentsOf: target.appendingPathComponent(name)), first)
         XCTAssertTrue(try journal.pending().isEmpty)
         try second.write(to: file)
