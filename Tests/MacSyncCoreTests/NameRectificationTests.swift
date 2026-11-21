@@ -192,6 +192,14 @@ final class NameRectificationTests:XCTestCase {
         XCTAssertEqual(try Data(contentsOf: source.appendingPathComponent(corrected)), bytes)
         XCTAssertEqual(try Data(contentsOf: target.appendingPathComponent(original)), bytes)
         XCTAssertEqual(try Data(contentsOf: collision), occupied)
+        let firstSides = try NameRectification.pendingSideSummary(journal: journal)
+        XCTAssertEqual(firstSides.sourceCompleted, 1)
+        XCTAssertEqual(firstSides.destinationCompleted, 0)
+        XCTAssertEqual(firstSides.sourcePending, 0)
+        XCTAssertEqual(firstSides.destinationPending, 1)
+        let persistedSides = try NameRectification.pendingSideSummary(journal: ChangeJournal(path: db))
+        XCTAssertEqual(persistedSides.sourceCompleted, 1)
+        XCTAssertEqual(persistedSides.destinationPending, 1)
 
         // The durable plan links both sides by old/new name. New paths,
         // old paths and their parent dependencies are guarded; siblings aren't.
