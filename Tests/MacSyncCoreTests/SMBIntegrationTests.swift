@@ -231,8 +231,17 @@ final class SMBIntegrationTests: XCTestCase {
         let new = root.appendingPathComponent("new-name.jpg")
         let bytes = Data("checked rename preserves original".utf8)
         try bytes.write(to: old)
+        let directory = try AnchoredDirectory(root,
+            expectedVolume: DirectoryBinding.read(root).volume)
+        let settleStarted = ProcessInfo.processInfo.systemUptime
+        let prepared = try NameRectification.stableSMBSnapshot(
+            parent: directory, oldName: old.lastPathComponent, shouldContinue: { true })
+        let settleSeconds = ProcessInfo.processInfo.systemUptime - settleStarted
         var before = stat()
         XCTAssertEqual(old.path.withCString { Darwin.lstat($0, &before) }, 0)
+        XCTAssertEqual(prepared.st_ino, before.st_ino)
+        XCTAssertEqual(prepared.st_mtimespec.tv_sec, before.st_mtimespec.tv_sec)
+        XCTAssertEqual(prepared.st_mtimespec.tv_nsec, before.st_mtimespec.tv_nsec)
         let beforeNs = Int64(before.st_mtimespec.tv_sec) * 1_000_000_000 +
             Int64(before.st_mtimespec.tv_nsec)
         let (status, duration) = try helperRename(env, old: old, new: new)
@@ -263,7 +272,7 @@ final class SMBIntegrationTests: XCTestCase {
         } while ProcessInfo.processInfo.systemUptime - started < 3.5
         XCTAssertTrue(visible, "Mounted smbfs must eventually reflect the checked server rename")
         if visible { XCTAssertEqual(try Data(contentsOf: new), bytes) }
-        print("MACSYNC_SMB_RENAME_REGRESSION fresh_helper_seconds=\(duration) local_visibility_seconds=\(ProcessInfo.processInfo.systemUptime - started)")
+        print("MACSYNC_SMB_RENAME_REGRESSION preflight_settle_seconds=\(settleSeconds) fresh_helper_seconds=\(duration) local_visibility_seconds=\(ProcessInfo.processInfo.systemUptime - started)")
     }
 
     /// A forged source timestamp is never a reason to rename. This regression
