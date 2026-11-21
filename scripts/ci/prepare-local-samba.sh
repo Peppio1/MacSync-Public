@@ -101,9 +101,10 @@ if ! /sbin/mount_smbfs -N "//$user@127.0.0.1/MacSyncCI" "$mountpoint" > "$base/m
     exit 1
   fi
 fi
-fstype="$(/usr/bin/stat -f '%T' "$mountpoint")"
-if [ "$fstype" != "smbfs" ]; then
-  echo "::error::Expected a genuine macOS smbfs volume, got $fstype"
+# /usr/bin/stat -f %T is NOT a filesystem-type query on Darwin.
+# Require the kernel mount table itself to identify the exact mount as smbfs.
+if ! /sbin/mount | grep -F " on $mountpoint (smbfs," >/dev/null; then
+  echo "::error::Expected a genuine smbfs entry for the disposable mount in the kernel mount table"
   exit 1
 fi
 printf '%s\n' "MacSync SMB CI connected (macOS smbfs, Samba over loopback)"
