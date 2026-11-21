@@ -42,6 +42,18 @@ public struct TrackedItem: Equatable, Sendable {
         self.changeStamp = changeStamp
         self.verificationFingerprint = verificationFingerprint
     }
+
+    /// Preserve the persisted inventory comparison semantics. The live
+    /// fingerprint is an ephemeral audit snapshot, not a change-detection
+    /// field: SQLite does not persist it and a second ordinary scan must
+    /// not enqueue unchanged files or directories.
+    public static func == (lhs: TrackedItem, rhs: TrackedItem) -> Bool {
+        lhs.relativePath == rhs.relativePath &&
+        lhs.kind == rhs.kind &&
+        lhs.size == rhs.size &&
+        lhs.modifiedAt == rhs.modifiedAt &&
+        lhs.changeStamp == rhs.changeStamp
+    }
 }
 
 public struct ReconciliationResult: Sendable {
