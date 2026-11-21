@@ -116,24 +116,25 @@ final class SMBIntegrationTests: XCTestCase {
         print("MACSYNC_SMB_INTEGRATION worker_create_update_seconds=\(ProcessInfo.processInfo.systemUptime - started)")
     }
 
-    private func helperRename(_ env: Environment, old: URL, new: URL, shouldSucceed: Bool) throws {
-        var st = stat()
-        XCTAssertEqual(old.path.withCString { Darwin.lstat($0, &st) }, 0)
+
+    private func helperRename(_ env: Environment, old: URL, new: URL) throws -> (Int32, Double) {
+        var source = stat()
+        guard old.path.withCString({ Darwin.lstat($0, &source) }) == 0 else {
+            throw CocoaError(.fileNoSuchFile)
+        }
         let request: [String: Any] = [
             "host": env.host, "port": "445", "share": env.share,
             "user": env.user, "domain": "", "password": env.password,
-            "oldPath": old.lastPathComponent == old.path ? old.path :
-                String(old.path.dropFirst(env.mount.path.count + 1)),
+            "oldPath": String(old.path.dropFirst(env.mount.path.count + 1)),
             "newPath": String(new.path.dropFirst(env.mount.path.count + 1)),
-            "fileID": UInt64(st.st_ino),
-            "createdSeconds": Int64(st.st_birthtimespec.tv_sec),
-            "createdNanos": Int64(st.st_birthtimespec.tv_nsec),
-            "size": Int64(st.st_size),
-            "modifiedSeconds": Int64(st.st_mtimespec.tv_sec),
-            "modifiedNanos": Int64(st.st_mtimespec.tv_nsec),
+            "fileID": UInt64(source.st_ino),
+            "createdSeconds": Int64(source.st_birthtimespec.tv_sec),
+            "createdNanos": Int64(source.st_birthtimespec.tv_nsec),
+            "size": Int64(source.st_size),
+            "modifiedSeconds": Int64(source.st_mtimespec.tv_sec),
+            "modifiedNanos": Int64(source.st_mtimespec.tv_nsec),
             "isDirectory": false
         ]
-        let payload = try JSONSerialization.data(withJSONObject: request)
         let input = Pipe()
         let process = Process()
         process.executableURL = env.helper
@@ -142,37 +143,109 @@ final class SMBIntegrationTests: XCTestCase {
         process.standardError = FileHandle.nullDevice
         let started = ProcessInfo.processInfo.systemUptime
         try process.run()
-        try input.fileHandleForWriting.write(contentsOf: payload)
+        try input.fileHandleForWriting.write(contentsOf: JSONSerialization.data(withJSONObject: request))
         try input.fileHandleForWriting.close()
         process.waitUntilExit()
         let elapsed = ProcessInfo.processInfo.systemUptime - started
-        print("MACSYNC_SMB_INTEGRATION helper_rename_seconds=\(elapsed) expected_success=\(shouldSucceed)")
-        if shouldSucceed {
-            XCTAssertEqual(process.terminationStatus, 0,
-                           "The REAL helper rejected SMB identity or failed the server rename")
-        } else {
-            XCTAssertNotEqual(process.terminationStatus, 0,
-                              "Protected SMB rename must not replace an occupied target")
-        }
+        print("MACSYNC_SMB_INTEGRATION helper_rename_seconds=\(elapsed) status=\(process.terminationStatus)")
+        return (process.terminationStatus, elapsed)
     }
 
-    func testRealSMBProtectedHelperRenameAndCollision() throws {
+    func testRealSMBProtectedHelperRenameAndPreserveContents() throws {
         let env = try Environment()
-        let root = try env.workspace("helper")
+        let root = try env.workspace("helper-success")
         defer { try? FileManager.default.removeItem(at: root) }
-        let first = root.appendingPathComponent("old-name.jpg")
-        let target = root.appendingPathComponent("new-name.jpg")
-        let preserved = Data("protected original".utf8)
-        try preserved.write(to: first)
-        try helperRename(env, old: first, new: target, shouldSucceed: true)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: first.path))
-        XCTAssertEqual(try Data(contentsOf: target), preserved)
-
-        let occupied = Data("do not overwrite".utf8)
-        try occupied.write(to: root.appendingPathComponent("another-old-name.jpg"))
-        try helperRename(env, old: root.appendingPathComponent("another-old-name.jpg"),
-                         new: target, shouldSucceed: false)
-        XCTAssertEqual(try Data(contentsOf: target), preserved)
-        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("another-old-name.jpg")), occupied)
+        let old = root.appendingPathComponent("old-name.jpg")
+        let new = root.appendingPathComponent("new-name.jpg")
+        let bytes = Data("checked rename preserves original".utf8)
+        try bytes.write(to: old)
+        let (status, _) = try helperRename(env, old: old, new: new)
+        guard status == 0 else {
+            // A rejected rename must fail CLOSED. Never cascade into
+            // file-not-found assertions that conceal the original problem.
+            XCTAssertEqual(try Data(contentsOf: old), bytes)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: new.path))
+            XCTFail("Protected helper rejected the real SMB rename (status \(status)); source preserved")
+            return
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: old.path))
+        XCTAssertEqual(try Data(contentsOf: new), bytes)
     }
+
+    func testRealSMBProtectedHelperNeverReplacesOccupiedDestination() throws {
+        let env = try Environment()
+        let root = try env.workspace("helper-collision")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let old = root.appendingPathComponent("old-name.jpg")
+        let occupied = root.appendingPathComponent("new-name.jpg")
+        let oldBytes = Data("source must remain".utf8)
+        let targetBytes = Data("existing destination must remain".utf8)
+        try oldBytes.write(to: old)
+        try targetBytes.write(to: occupied)
+        let (status, _) = try helperRename(env, old: old, new: occupied)
+        XCTAssertNotEqual(status, 0, "An occupied SMB destination may never be replaced")
+        XCTAssertEqual(try Data(contentsOf: old), oldBytes)
+        XCTAssertEqual(try Data(contentsOf: occupied), targetBytes)
+    }
+
+    func testRealSMBDescriptorMetadataCapability() throws {
+        let env = try Environment()
+        let root = try env.workspace("descriptor-metadata")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("metadata.bin")
+        try Data([1, 2, 3, 4]).write(to: file)
+        let fd = root.path.withCString { Darwin.open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) }
+        if fd < 0 {
+            let code = errno
+            print("MACSYNC_SMB_CAPABILITY directory_open=no errno=\(code)")
+            XCTAssertTrue([ENOTSUP, EOPNOTSUPP, ENOSYS, EINVAL].contains(code),
+                "Unexpected failure opening the directory descriptor")
+            return
+        }
+        defer { Darwin.close(fd) }
+        var anchored = stat()
+        let rc = "metadata.bin".withCString {
+            Darwin.fstatat(fd, $0, &anchored, AT_SYMLINK_NOFOLLOW)
+        }
+        if rc < 0 {
+            let code = errno
+            print("MACSYNC_SMB_CAPABILITY fstatat=no errno=\(code)")
+            XCTAssertTrue([ENOTSUP, EOPNOTSUPP, ENOSYS, EINVAL].contains(code),
+                "Unexpected failure of read-only fstatat")
+            return
+        }
+        var pathStat = stat()
+        XCTAssertEqual(file.path.withCString { Darwin.lstat($0, &pathStat) }, 0)
+        XCTAssertEqual(anchored.st_mode & mode_t(S_IFMT), mode_t(S_IFREG))
+        XCTAssertEqual(anchored.st_size, 4)
+        XCTAssertEqual(anchored.st_ino, pathStat.st_ino)
+        print("MACSYNC_SMB_CAPABILITY directory_open=yes fstatat=yes")
+    }
+
+    func testRealSMBDirectoryListingBenchmark200() throws {
+        let env = try Environment()
+        let root = try env.workspace("metadata-benchmark")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let count = 200
+        let prepared = ProcessInfo.processInfo.systemUptime
+        for index in 0..<count {
+            let path = root.appendingPathComponent(String(format: "entry-%04d.jpg", index))
+            try Data([UInt8(index % 251)]).write(to: path)
+        }
+        let setupSeconds = ProcessInfo.processInfo.systemUptime - prepared
+        let started = ProcessInfo.processInfo.systemUptime
+        let names = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        var checked = 0
+        for name in names {
+            var metadata = stat()
+            let path = root.appendingPathComponent(name)
+            XCTAssertEqual(path.path.withCString { Darwin.lstat($0, &metadata) }, 0)
+            XCTAssertEqual(metadata.st_size, 1)
+            checked += 1
+        }
+        let verifySeconds = ProcessInfo.processInfo.systemUptime - started
+        XCTAssertEqual(checked, count)
+        print("MACSYNC_SMB_BENCHMARK files=\(count) create_seconds=\(setupSeconds) list_and_lstat_seconds=\(verifySeconds)")
+    }
+
 }
