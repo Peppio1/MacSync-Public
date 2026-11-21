@@ -352,7 +352,8 @@ public final class SeededArchiveVerifier {
                         sourceFingerprint = try Self.fingerprint(src,directory:match.objectKind == "directory")
                         targetFingerprint = try Self.fingerprint(dst,directory:match.objectKind == "directory")
                     }
-                    if sourceFingerprint == match.source && targetFingerprint == match.target {
+                    if let sourceFingerprint, let targetFingerprint,
+                       sourceFingerprint == match.source && targetFingerprint == match.target {
                         validInBatch.append(match)
                     }
                 } catch {
