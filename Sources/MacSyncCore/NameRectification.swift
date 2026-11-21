@@ -86,34 +86,43 @@ public enum NameRectification {
                                   shouldContinue: () -> Bool) throws -> stat {
         let initial = try parent.leaf(oldName)
         guard (initial.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG) else { return initial }
-        let lastModified = Double(initial.st_mtimespec.tv_sec) +
-            Double(initial.st_mtimespec.tv_nsec) / 1_000_000_000
-        let age = Date().timeIntervalSince1970 - lastModified
-        if age >= 0 && age < 4 {
-            // The deadline is monotonic even if the system clock changes.
-            let deadline = ProcessInfo.processInfo.systemUptime + (4 - age)
-            while ProcessInfo.processInfo.systemUptime < deadline {
-                guard shouldContinue() else { throw SeedVerificationError.cancelled }
-                Thread.sleep(forTimeInterval: 0.125)
-            }
+        func modifiedAt(_ value: stat) -> Double {
+            Double(value.st_mtimespec.tv_sec) +
+                Double(value.st_mtimespec.tv_nsec) / 1_000_000_000
+        }
+        // Old, already-settled files are never delayed. For a recent file,
+        // require an exact pair of snapshots once its last modification is
+        // at least four seconds old. The five-second total cap also prevents
+        // an actively modified file from delaying the entire batch.
+        let initialAge = Date().timeIntervalSince1970 - modifiedAt(initial)
+        guard initialAge >= 0 && initialAge < 4 else { return initial }
+        let deadline = ProcessInfo.processInfo.systemUptime + 5
+        var candidate = initial
+        while true {
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
-            let a = try parent.leaf(oldName)
-            Thread.sleep(forTimeInterval: 0.125)
-            guard shouldContinue() else { throw SeedVerificationError.cancelled }
-            let b = try parent.leaf(oldName)
-            guard a.st_ino == b.st_ino, a.st_mode == b.st_mode,
-                  a.st_birthtimespec.tv_sec == b.st_birthtimespec.tv_sec,
-                  a.st_birthtimespec.tv_nsec == b.st_birthtimespec.tv_nsec,
-                  a.st_size == b.st_size,
-                  a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec,
-                  a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec,
-                  a.st_ctimespec.tv_sec == b.st_ctimespec.tv_sec,
-                  a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec else {
+            guard ProcessInfo.processInfo.systemUptime < deadline else {
                 throw MountedCopyError.sourceChanging
             }
-            return b
+            if Date().timeIntervalSince1970 - modifiedAt(candidate) >= 4 {
+                let a = try parent.leaf(oldName)
+                Thread.sleep(forTimeInterval: 0.125)
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                let b = try parent.leaf(oldName)
+                let unchanged = a.st_ino == b.st_ino && a.st_mode == b.st_mode &&
+                    a.st_birthtimespec.tv_sec == b.st_birthtimespec.tv_sec &&
+                    a.st_birthtimespec.tv_nsec == b.st_birthtimespec.tv_nsec &&
+                    a.st_size == b.st_size &&
+                    a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec &&
+                    a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec &&
+                    a.st_ctimespec.tv_sec == b.st_ctimespec.tv_sec &&
+                    a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec
+                if unchanged && Date().timeIntervalSince1970 - modifiedAt(b) >= 4 { return b }
+                candidate = b
+            } else {
+                Thread.sleep(forTimeInterval: 0.125)
+                candidate = try parent.leaf(oldName)
+            }
         }
-        return initial
     }
 
     /// A confirmed batch persists before its first mutation. Resume checks
@@ -176,6 +185,9 @@ public enum NameRectification {
                     try parent.checkRectification(old: item.name, new: name, matching: snapshot,
                         preflightCache: preflightListingCache)
                     moves.append(Move(item: item, binding: binding, snapshot: snapshot, newName: name))
+                } catch SeedVerificationError.cancelled {
+                    result.cancelled = true
+                    return result
                 } catch {
                     result.skipped += 1
                     report(item, action: "name_rectify_skipped", level: .warning, message: SyncDiagnostic.describe(error))
