@@ -180,6 +180,30 @@ public enum NameRectification {
         return PendingProtection(relations: relations)
     }
 
+    public struct PendingSideSummary: Sendable {
+        public let sourceCompleted: Int
+        public let destinationCompleted: Int
+        public let sourcePending: Int
+        public let destinationPending: Int
+    }
+
+    /// The progress JSON resides in the SAME SQLite batch as the approved
+    /// moves. It is committed atomically with every completed rename; after
+    /// interruption, do not infer a completed side from equal filenames.
+    public static func pendingSideSummary(journal: ChangeJournal) throws -> PendingSideSummary {
+        let pending = try pendingProtection(journal: journal)
+        guard let batch = try journal.pendingNameRectification() else {
+            return PendingSideSummary(sourceCompleted: 0, destinationCompleted: 0,
+                                      sourcePending: 0, destinationPending: 0)
+        }
+        let records = try JSONDecoder().decode([NameRectificationProgressRecord].self, from: batch.progress)
+        return PendingSideSummary(
+            sourceCompleted: records.filter(\.sourceCompleted).count,
+            destinationCompleted: records.filter(\.destinationCompleted).count,
+            sourcePending: pending.relations.filter { $0.side == .source }.count,
+            destinationPending: pending.relations.filter { $0.side == .destination }.count)
+    }
+
     /// SMB metadata from a just-closed Finder write can still be cached.
     /// Capture the persistent plan only after a fresh file has had time to
     /// settle. This is read-only: no timestamp is synthesized and no
@@ -359,7 +383,17 @@ public enum NameRectification {
                 let b = $1.item.relativePath.split(separator: "/").count
                 return a == b ? $0.item.id < $1.item.id : a > b
             }
-            if !moves.isEmpty { try journal.saveNameRectification(JSONEncoder().encode(moves)) }
+            if !moves.isEmpty {
+                let grouped = Dictionary(grouping: moves, by: { counterpartKey($0.item) })
+                let progress = grouped.values.compactMap { group -> NameRectificationProgressRecord? in
+                    guard let first = group.first else { return nil }
+                    return .init(rootID: first.item.rootID, relativePath: first.item.relativePath,
+                        sourceRequired: group.contains { $0.item.side == .source },
+                        destinationRequired: group.contains { $0.item.side == .destination },
+                        sourceCompleted: false, destinationCompleted: false)
+                }
+                try journal.saveNameRectification(JSONEncoder().encode(moves), progress: progress)
+            }
         }
 
         var deferred: [Move] = []
@@ -479,7 +513,8 @@ public enum NameRectification {
                 let journalStarted = ProcessInfo.processInfo.systemUptime
                 try journal.advanceNameRectification(to: index + 1, finished: index + 1 == moves.count && deferred.isEmpty,
                     rootID: item.side == .destination ? item.rootID : nil,
-                    path: item.side == .destination ? path : nil, remainingPlan: remaining)
+                    path: item.side == .destination ? path : nil, remainingPlan: remaining,
+                    completed: (rootID: item.rootID, path: item.relativePath, side: item.side.rawValue))
                 slowPhase(item, name: "sqlite-commit", started: journalStarted)
                 result.renamed += 1
                 if item.side == .source { result.sourceRenamed += 1 }
