@@ -111,6 +111,74 @@ public struct SeedVerificationReport: Sendable {
     public var verifiedCount: Int { matches.count }
 }
 
+/// Read-only directory descriptor pinned to an actual directory inode.
+/// A symlink substituted into a parent path cannot redirect fstatat() outside
+/// the selected archive. The parent is re-opened by name before committing.
+private final class ApprovalParentReader {
+    private let rootPath: String
+    private let parentPath: String
+    private let directoryDescriptor: Int32
+    private let device: UInt64
+    private let inode: UInt64
+
+    init(rootPath: String, relativeParent: String) throws {
+        self.rootPath = rootPath
+        self.parentPath = relativeParent
+        var descriptor = rootPath.withCString {
+            Darwin.open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        guard descriptor >= 0 else { throw SeedVerificationError.unsafeEntry }
+        do {
+            if !relativeParent.isEmpty {
+                for component in relativeParent.split(separator: "/", omittingEmptySubsequences: false) {
+                    guard !component.isEmpty, component != ".", component != ".." else {
+                        throw SeedVerificationError.unsafeEntry
+                    }
+                    let next = String(component).withCString {
+                        openat(descriptor, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                    }
+                    guard next >= 0 else { throw SeedVerificationError.unsafeEntry }
+                    _ = Darwin.close(descriptor)
+                    descriptor = next
+                }
+            }
+            var info = stat()
+            guard fstat(descriptor, &info) == 0,
+                  info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
+                throw SeedVerificationError.unsafeEntry
+            }
+            self.device = UInt64(bitPattern: Int64(info.st_dev))
+            self.inode = UInt64(info.st_ino)
+            self.directoryDescriptor = descriptor
+        } catch {
+            _ = Darwin.close(descriptor)
+            throw error
+        }
+    }
+
+    deinit { _ = Darwin.close(directoryDescriptor) }
+
+    func fingerprint(leaf: String, directory: Bool) throws -> SeedFileFingerprint {
+        guard !leaf.isEmpty, leaf != ".", leaf != "..",
+              !leaf.contains("/"), !leaf.contains("\\0") else {
+            throw SeedVerificationError.unsafeEntry
+        }
+        var info = stat()
+        guard leaf.withCString({ fstatat(directoryDescriptor, $0, &info, AT_SYMLINK_NOFOLLOW) }) == 0,
+              info.st_mode & mode_t(S_IFMT) == mode_t(directory ? S_IFDIR : S_IFREG) else {
+            throw SeedVerificationError.unsafeEntry
+        }
+        return SeedFileFingerprint(fileStat: info)
+    }
+
+    func isStillAtPath() -> Bool {
+        guard let current = try? ApprovalParentReader(rootPath: rootPath, relativeParent: parentPath) else {
+            return false
+        }
+        return current.device == device && current.inode == inode
+    }
+}
+
 /// Only pending UPSERT files are checked; directory and DELETE records are
 /// never acknowledged here. Does NOT enumerate the entire server directory.
 /// Each comparison reads bytes from *both* files and hashes SHA-256 in 1 MiB
@@ -211,30 +279,74 @@ public final class SeededArchiveVerifier {
         var stillValid: [SeedVerifiedMatch] = []
         var lastProgress = ProcessInfo.processInfo.systemUptime
         progress?(0,report.matches.count)
-        for (index, match) in report.matches.enumerated() {
-            defer {
-                let now = ProcessInfo.processInfo.systemUptime
-                if now-lastProgress >= 1 || index+1 == report.matches.count {
-                    lastProgress = now
-                    progress?(index+1,report.matches.count)
+        // Bounded groups avoid hundreds of thousands of repeated SMB root and
+        // parent checks. Parent directories remain anchored by file descriptor,
+        // and every candidate is still live-fingerprinted on BOTH sides.
+        let approvalBatchSize = 128
+        for base in stride(from: 0, to: report.matches.count, by: approvalBatchSize) {
+            if cancellation.isCancelled { throw SeedVerificationError.cancelled }
+            let upper = min(report.matches.count, base + approvalBatchSize)
+            var roots: [String: MountedFolderMapping] = [:]
+            var parents: [String: ApprovalParentReader] = [:]
+            var validInBatch: [SeedVerifiedMatch] = []
+            for index in base..<upper {
+                defer {
+                    let now = ProcessInfo.processInfo.systemUptime
+                    if now-lastProgress >= 1 || index+1 == report.matches.count {
+                        lastProgress = now
+                        progress?(index+1,report.matches.count)
+                    }
+                }
+                if cancellation.isCancelled { throw SeedVerificationError.cancelled }
+                let match = report.matches[index]
+                guard let mapping = mappings[match.rootID],
+                      match.objectKind == "file" || match.objectKind == "directory" else { continue }
+                do {
+                    if roots[match.rootID] == nil {
+                        try mapping.verify()
+                        roots[match.rootID] = mapping
+                    }
+                    let sourceFingerprint: SeedFileFingerprint
+                    let targetFingerprint: SeedFileFingerprint
+                    if WindowsPathSafety.validRelativePath(match.relativePath) {
+                        let components = match.relativePath.split(separator: "/").map(String.init)
+                        guard let leaf = components.last else { continue }
+                        let parent = components.dropLast().joined(separator: "/")
+                        let sourceKey = match.rootID + "\\0s\\0" + parent
+                        let targetKey = match.rootID + "\\0t\\0" + parent
+                        if parents[sourceKey] == nil {
+                            parents[sourceKey] = try ApprovalParentReader(rootPath: mapping.source.path, relativeParent: parent)
+                        }
+                        if parents[targetKey] == nil {
+                            parents[targetKey] = try ApprovalParentReader(rootPath: mapping.target.path, relativeParent: parent)
+                        }
+                        sourceFingerprint = try parents[sourceKey]!.fingerprint(leaf: leaf, directory: match.objectKind == "directory")
+                        targetFingerprint = try parents[targetKey]!.fingerprint(leaf: leaf, directory: match.objectKind == "directory")
+                    } else {
+                        // Preserve exact-spelling and alias checks for names
+                        // that cannot use the ordinary Windows-safe fast path.
+                        let src = try safePath(match.relativePath, mapping: mapping, destination: false)
+                        let dst = try safePath(match.relativePath, mapping: mapping, destination: true)
+                        sourceFingerprint = try Self.fingerprint(src,directory:match.objectKind == "directory")
+                        targetFingerprint = try Self.fingerprint(dst,directory:match.objectKind == "directory")
+                    }
+                    if sourceFingerprint == match.source && targetFingerprint == match.target {
+                        validInBatch.append(match)
+                    }
+                } catch {
+                    // Missing, changed, inaccessible, symlinked or ambiguous
+                    // entries remain pending and are never blindly acknowledged.
+                    continue
                 }
             }
             if cancellation.isCancelled { throw SeedVerificationError.cancelled }
-            guard let mapping = mappings[match.rootID] else { continue }
-            do {
-                try mapping.verify()
-                let src = try safePath(match.relativePath, mapping: mapping, destination: false)
-                let dst = try safePath(match.relativePath, mapping: mapping, destination: true)
-                guard match.objectKind == "file" || match.objectKind == "directory",
-                      try Self.fingerprint(src,directory:match.objectKind == "directory") == match.source,
-                      try Self.fingerprint(dst,directory:match.objectKind == "directory") == match.target else { continue }
-                try mapping.verify()
-                stillValid.append(match)
-            } catch {
-                // A file changed or disappeared AFTER the initial preview.
-                // We do not mark it complete and never silently overwrite it.
+            // If any parent was replaced during the group, discard the WHOLE
+            // batch. A changed root or SMB mount is a hard stop, not success.
+            guard parents.values.allSatisfy({ $0.isStillAtPath() }) else {
                 continue
             }
+            for mapping in roots.values { try mapping.verify() }
+            stillValid.append(contentsOf: validInBatch)
         }
         if !cancellation.mayCommit { throw SeedVerificationError.cancelled }
         onCommit()
