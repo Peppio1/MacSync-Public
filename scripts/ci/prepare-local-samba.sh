@@ -82,7 +82,8 @@ printf '[127.0.0.1:%s]\npassword=%s\n' "$user" "$password" > "$nsmb"
 chmod 600 "$nsmb"
 if ! /sbin/mount_smbfs -N "//$user@127.0.0.1/MacSyncCI" "$mountpoint" > "$base/mount.log" 2>&1; then
   echo "::error::Apple SMB client could not mount the disposable Samba share"
-  # Logs are local to runner only. Do not print authentication diagnostics.
+  # The mount command is passwordless; its concise error contains no secret.
+  tail -n 12 "$base/mount.log" || true
   exit 1
 fi
 fstype="$(/usr/bin/stat -f '%T' "$mountpoint")"
