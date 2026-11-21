@@ -297,7 +297,9 @@ public final class SeededArchiveVerifier {
         // Bounded groups avoid hundreds of thousands of repeated SMB root and
         // parent checks. Parent directories remain anchored by file descriptor,
         // and every candidate is still live-fingerprinted on BOTH sides.
-        let approvalBatchSize = 128
+        // Limit concurrently open source/target parent FDs even when every
+        // candidate is in a different directory (macOS soft limit may be 256).
+        let approvalBatchSize = 32
         for base in stride(from: 0, to: report.matches.count, by: approvalBatchSize) {
             if cancellation.isCancelled { throw SeedVerificationError.cancelled }
             let upper = min(report.matches.count, base + approvalBatchSize)
