@@ -23,7 +23,9 @@ func main() {
     helperFixture := strings.HasPrefix(objectName, "macsync-test-helper-success-") &&
         strings.Count(objectName, "/") == 1 && !strings.Contains(objectName, "..") &&
         (strings.HasSuffix(objectName, "/settled-new.jpg") ||
-            strings.HasSuffix(objectName, "/settled-old.jpg"))
+            strings.HasSuffix(objectName, "/settled-old.jpg") ||
+            strings.HasSuffix(objectName, "/new-name.jpg") ||
+            strings.HasSuffix(objectName, "/old-name.jpg"))
     if os.Getenv("MACSYNC_TEST_SMB_HOST") != "127.0.0.1" ||
        os.Getenv("MACSYNC_TEST_SMB_SHARE") != "MacSyncCI" ||
        (!expectedFixture && !helperFixture) {
