@@ -15,6 +15,10 @@ In `Tests/MacSyncCoreTests/SMBIntegrationTests.swift`:
 - Operazioni `MountedFolderCopyWorker` tramite Rclone `rcloneDirect` verso destinazione montata: nuovo file, aggiornamento, byte e coda SQLite.
 - Test diretto dell'helper `rclone-smb-rename`: rinomina con controllo dell'identità del file; rifiuto della collisione, nessuna sovrascrittura.
 
+Sono state aggiunte inoltre verifiche autonome dell'helper **con destinazione libera** e **con collisione**, per evitare che un fallimento del primo caso mascheri il controllo no-overwrite. Sono presenti un probe read-only `open(O_DIRECTORY|O_NOFOLLOW)`/`fstatat(AT_SYMLINK_NOFOLLOW)` su `smbfs`, benchmark con 200 file SMB (creazione separata da enumerazione e `lstat`), e prova di audit `QUICK` e `DEEP` con verifica che non vi siano scritture nella destinazione né riconoscimenti o cancellazioni automatiche nella coda SQLite. **Queste ultime prove sono da validare con CI prima di dichiararle superate.**
+
+La fixture esegue anche una rinomina SMB con `smbclient` su un file sintetico: serve a distinguere il supporto del server dalla successiva verifica di identità del helper protetto, non a sostituire il comportamento applicativo. Non è introdotto alcun fallback della produzione.
+
 I test sono **opt-in**, attivi solo con `MACSYNC_TEST_SMB_*`; per le suite ordinarie senza fixture producono uno skip esplicito. I test realmente riusciti e quelli falliti devono essere distinti consultando i log del run, non dedotti dalla sola compilazione.
 
 ## Metriche e confronto onesto
@@ -42,3 +46,11 @@ Il workflow cronometra con `scripts/ci/record-duration.py`: installazione Samba,
 ## Da sviluppare in seguito
 
 Se il primo banco è verde: (1) test audit rapido e profondo su SMB, (2) errori/timeout, collisioni e file modificati durante una copia, (3) test mirati nomi incompatibili e semantica Windows, (4) metriche dei roundtrip `stat` e delle directory, (5) stress opt-in con 1k–100k file, (6) test UI comportamentali, (7) compatibilità finale Windows Server fisico su dataset sintetico. La CI di pubblicazione e la firma restano indipendenti.
+
+## Evidenze successive sul runner reale (21 novembre 2026)
+
+- [Workflow 44921989441](https://github.com/Peppio1/MacSync-Public/actions/runs/44921989441): mount genuino `smbfs`, prova lettura/scrittura e worker MacSync con Rclone direct per **creazione e aggiornamento** superati; **helper protetto di rinomina fallito** (exit 1, sorgente non rinominata). NON è un esito totalmente verde.
+- Nello stesso runner ARM64, tempi registrati: installazione Samba **19,726 s**, preparazione/montaggio **3,639 s**, preparazione Rclone **5,975 s**, compilazione helper **54,619 s**, compilazione target Swift **68,070 s**, controllo Rclone locale con invocazione XCTest **2,784 s**, suite SMB **3,744 s** ma fallita. Quest'ultimo valore è il tempo complessivo della prova, non una misura valida di performance per ogni funzione.
+- I due trasferimenti SMB di prova (file di 2 MB e 3 MB, incluso aggiornamento) hanno richiesto **0,815 s** per la sequenza registrata nel test. Campione singolo su loopback; non equivale a VPN.
+- Nuove diagnostiche del ramo sul codice dei test `0be856b`, `ea26bff`, `aa60276` includono collisione indipendente, probe `openat/fstatat` e audit SMB; esiti ancora da verificare. La comparazione rimane separata per architettura, quantità di test e tipo di filesystem.
+
