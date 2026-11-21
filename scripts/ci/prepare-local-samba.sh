@@ -121,6 +121,7 @@ if [ -e "$nsmb" ]; then
 fi
 printf '[127.0.0.1:%s]\npassword=%s\n' "$user" "$password" > "$nsmb"
 chmod 600 "$nsmb"
+: > "$base/nsmb-created"
 if ! /sbin/mount_smbfs -f 0666 -d 0777 -N "//$user@127.0.0.1/MacSyncCI" "$mountpoint" > "$base/mount.log" 2>&1; then
   echo "Apple SMB -N did not accept the ephemeral nsmb.conf entry; retrying once with an ephemeral credential"
   # No shell tracing, stdout or stderr from the command; credential is CI-only,
