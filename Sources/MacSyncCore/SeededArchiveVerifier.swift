@@ -172,7 +172,7 @@ private final class ApprovalParentReader {
 
     func fingerprint(leaf: String, directory: Bool) throws -> SeedFileFingerprint {
         guard !leaf.isEmpty, leaf != ".", leaf != "..",
-              !leaf.contains("/"), !leaf.contains("\\0") else {
+              !leaf.contains("/"), !leaf.contains("\0") else {
             throw SeedVerificationError.unsafeEntry
         }
         var info = stat()
@@ -329,8 +329,8 @@ public final class SeededArchiveVerifier {
                             let components = match.relativePath.split(separator: "/").map(String.init)
                             guard let leaf = components.last else { continue }
                             let parent = components.dropLast().joined(separator: "/")
-                            let sourceKey = match.rootID + "\\0s\\0" + parent
-                            let targetKey = match.rootID + "\\0t\\0" + parent
+                            let sourceKey = match.rootID + "\0s\0" + parent
+                            let targetKey = match.rootID + "\0t\0" + parent
                             if parents[sourceKey] == nil {
                                 parents[sourceKey] = try ApprovalParentReader(rootPath: mapping.source.path, relativeParent: parent)
                             }
