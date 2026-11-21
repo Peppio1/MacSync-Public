@@ -29,8 +29,6 @@ jobs:
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
       HOMEBREW_NO_INSTALL_CLEANUP: '1'
-      MACSYNC_TEST_RCLONE: ${{ runner.temp }}/macsync-smb-rclone/rclone
-      MACSYNC_TEST_SMB_HELPER: ${{ runner.temp }}/macsync-smb-rclone/rclone-smb-rename
     steps:
       - uses: actions/checkout@v5
         with:
@@ -44,6 +42,10 @@ jobs:
           command -v brew
           command -v python3
           echo "MacSync SMB sandbox uses loopback only; no external addresses"
+      - name: Configure test binary paths in runner environment
+        run: |
+          echo "MACSYNC_TEST_RCLONE=$RUNNER_TEMP/macsync-smb-rclone/rclone" >> "$GITHUB_ENV"
+          echo "MACSYNC_TEST_SMB_HELPER=$RUNNER_TEMP/macsync-smb-rclone/rclone-smb-rename" >> "$GITHUB_ENV"
       - name: Install disposable Samba server
         run: python3 scripts/ci/record-duration.py samba-install -- brew install samba
       - name: Start SMB server and mount genuine smbfs
