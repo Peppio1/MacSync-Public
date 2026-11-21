@@ -238,7 +238,7 @@ final class NameRectificationTests:XCTestCase {
         try benchmarkLocalNameBatch(10_000)
     }
 
-    func testPendingDestinationCollisionDoesNotBlockAnIndependentLocalRename() throws {
+    func testPendingDestinationCollisionDoesNotBlockLocalSourceAtSamePathOrIndependentRename() throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             .resolvingSymlinksInPath()
         let source = base.appendingPathComponent("source"), target = base.appendingPathComponent("target")
@@ -273,19 +273,19 @@ final class NameRectificationTests:XCTestCase {
                     XCTFail("Impossibile creare la collisione di prova: \(error)")
                 }
             })
-        XCTAssertEqual(first.renamed, 1)
+        XCTAssertEqual(first.renamed, 2)
         XCTAssertEqual(first.failed, 1)
         XCTAssertNotNil(first.firstFailure)
         XCTAssertTrue(try journal.hasPendingNameRectification())
         XCTAssertEqual(try Data(contentsOf: collision), occupied)
-        XCTAssertEqual(try Data(contentsOf: source.appendingPathComponent(blocked)), data)
+        XCTAssertEqual(try Data(contentsOf: source.appendingPathComponent("a-.jpg")), data)
         XCTAssertEqual(try Data(contentsOf: source.appendingPathComponent("b-.jpg")), data)
 
         try fm.removeItem(at: collision)
         let reopened = try ChangeJournal(path: db)
         let resumed = try NameRectification.execute(items: [], roots: ["demo": source.path],
             journal: reopened, log: log, destinations: ["demo": mapping])
-        XCTAssertEqual(resumed.renamed, 2)
+        XCTAssertEqual(resumed.renamed, 1)
         XCTAssertFalse(try reopened.hasPendingNameRectification())
         XCTAssertEqual(try Data(contentsOf: collision), data)
     }
