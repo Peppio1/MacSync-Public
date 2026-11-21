@@ -385,9 +385,9 @@ final class MacSyncRuntime: ObservableObject {
         }
     }
 
-    /// Explicitly confirmed name maintenance. Stop workers, drain all
-    /// pending mutations, then restart the local inventory. Automatic copies
-    /// and mirror are left off until deliberate operator reauthorization.
+    /// Explicitly confirmed name maintenance. Stop workers and drain before
+    /// any rename. A previously authorized automatic-copy setting may be
+    /// restored after the monitor is restarted; mirror remains disarmed.
     func rectifyNames(_ items:[IncompatibleName]) {
         guard !previewOnly,!rectificationPending,!items.isEmpty,!shuttingDown,!folderConfigurationBusy,!savingSchedule,
               !copy.auditBusy,!copy.seedBusy,!copy.maintaining,!copy.rectifyingNames,!copy.namesBusy,
@@ -408,6 +408,9 @@ final class MacSyncRuntime: ObservableObject {
 
     private func performNameRectification(_ approved: [IncompatibleName]) {
         let pairs = model.configuredPairs()
+        // This does NOT authorize automatic copies for the first time.
+        // Preserve only the earlier explicit choice through maintenance.
+        let restoreAutomaticCopies = copy.automaticCopiesEnabled && !suspendedUntilNextLaunch
         folderConfigurationBusy=true
         preparingRectification=true
         let token=SeedVerificationCancellation()
@@ -431,7 +434,14 @@ final class MacSyncRuntime: ObservableObject {
                     self.rectificationPending = pending
                     if !self.shuttingDown {
                         self.model.startMonitoring()
-                        self.automaticStatus = pending ? "Rettifica pendente: percorsi interessati protetti; riabilita le copie indipendenti se desiderato" : "Rettifica terminata: attendi l'inventario prima di riavviare le copie"
+                        if restoreAutomaticCopies && !token.isCancelled {
+                            self.suspendedUntilNextLaunch = false
+                            self.copy.restorePreviouslyAuthorizedAutomaticCopies()
+                            self.automaticStatus = pending ? "Rettifica pendente: copie indipendenti ripristinate, nomi incerti protetti" : "Rettifica conclusa: copie automatiche precedentemente autorizzate ripristinate"
+                            self.scheduleNextAutomaticAttempt()
+                        } else {
+                            self.automaticStatus = pending ? "Rettifica pendente: percorsi protetti, copie indipendenti avviabili manualmente" : "Rettifica terminata: attendi l'inventario prima di riavviare le copie"
+                        }
                         self.scheduleArchiveAudit()
                     }
                     self.finishShutdownIfReady()
