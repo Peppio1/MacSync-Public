@@ -2,7 +2,7 @@ name: macOS CI
 
 on:
   push:
-    branches: [main, develop-v0.18.1, develop-v0.18.2, develop-v0.18.3, develop-v0.18.4, develop-v0.18.5, develop-v0.18.6, develop-v0.18.7, develop-v0.18.11, develop-v0.18.12, develop-v0.18.13, develop-v0.18.14-audit-performance, develop-v0.18.15-name-rectification-performance]
+    branches: [main, develop-v0.18.1, develop-v0.18.2, develop-v0.18.3, develop-v0.18.4, develop-v0.18.5, develop-v0.18.6, develop-v0.18.7, develop-v0.18.11, develop-v0.18.12, develop-v0.18.13, develop-v0.18.14-audit-performance, develop-v0.18.15-name-rectification-performance, develop-v0.18.15-audit-two-modes]
     paths:
       - 'Package.swift'
       - 'Sources/**'
