@@ -203,7 +203,7 @@ final class NameRectificationTests:XCTestCase {
 
         // Audit must report a pending rename, not a missing/extra file or a
         // reason to read SHA-256. QUICK and INTELLIGENT are both read-only.
-        for mode: ArchiveAuditMode in [.quick, .intelligent] {
+        for mode in [ArchiveAuditMode.quick, .intelligent] {
             let audit = try ArchiveAudit(journal: journal, mappings: [map]).run(mode: mode)
             let known = audit.findings.filter {
                 $0.relativePath == original || $0.relativePath == corrected
