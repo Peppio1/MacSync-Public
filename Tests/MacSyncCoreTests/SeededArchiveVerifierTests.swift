@@ -74,8 +74,8 @@ final class SeededArchiveVerifierTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: f.base) }
         let date = Date(timeIntervalSinceNow:-900)
         for i in 0..<260 {
-            try write("fixed",to:f.source.appendingPathComponent("photos/f\\(i).jpg"),date:date)
-            try write("fixed",to:f.target.appendingPathComponent("photos/f\\(i).jpg"),date:date)
+            try write("fixed",to:f.source.appendingPathComponent("photos/f\(i).jpg"),date:date)
+            try write("fixed",to:f.target.appendingPathComponent("photos/f\(i).jpg"),date:date)
         }
         try initializeInventory(f)
         let session = try SeededArchiveSession(database:f.db,mappings:[f.mapping])
