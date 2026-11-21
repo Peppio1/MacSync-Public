@@ -59,6 +59,19 @@ public struct SeedFileFingerprint: Codable, Equatable, Sendable {
     public let ctimeSeconds: Int64
     public let ctimeNanos: Int64
 
+    /// Retains the exact stat already obtained during a complete inventory.
+    /// Never use this snapshot as the sole authority for a queue commit.
+    init(fileStat info: stat) {
+        self.init(
+            device: UInt64(bitPattern: Int64(info.st_dev)), inode: UInt64(info.st_ino),
+            size: Int64(info.st_size),
+            mtimeSeconds: Int64(info.st_mtimespec.tv_sec),
+            mtimeNanos: Int64(info.st_mtimespec.tv_nsec),
+            ctimeSeconds: Int64(info.st_ctimespec.tv_sec),
+            ctimeNanos: Int64(info.st_ctimespec.tv_nsec)
+        )
+    }
+
     public var modifiedAt: Double {
         Double(mtimeSeconds) + Double(mtimeNanos) / 1_000_000_000
     }
