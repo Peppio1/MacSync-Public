@@ -241,6 +241,96 @@ final class NameRectificationTests:XCTestCase {
             source.appendingPathComponent("folder-/child-.jpg")), content)
     }
 
+    func testDestinationOutageDefersSiblingsButLocalMoveContinuesAndResumes() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .resolvingSymlinksInPath()
+        let source = base.appendingPathComponent("source")
+        let target = base.appendingPathComponent("target")
+        let disconnected = base.appendingPathComponent("temporarily-disconnected")
+        try fm.createDirectory(at: source, withIntermediateDirectories: true)
+        try fm.createDirectory(at: target, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+
+        let remoteNames = ["one?.jpg", "two?.jpg", "three?.jpg"]
+        for (index, name) in remoteNames.enumerated() {
+            try Data("remote-\\(index)".utf8).write(to: target.appendingPathComponent(name))
+        }
+        let localName = "local?.jpg"
+        let localBytes = Data("local remains independent".utf8)
+        try localBytes.write(to: source.appendingPathComponent(localName))
+        let db = base.appendingPathComponent("fixture.sqlite").path
+        _ = try LocalInventory(path: db).reconcile(rootID: "demo", root: source)
+        let mapping = try MountedFolderMapping(rootID: "demo", source: source, target: target)
+        if !mapping.targetVolume.isStrongIdentity { throw XCTSkip("Volume identity unavailable") }
+        let journal = try ChangeJournal(path: db)
+        try journal.verifyDirectoryBindings([mapping], allowNewTarget: true)
+        let log = try SyncActivityLog(path: db)
+        let rows = remoteNames.map {
+            IncompatibleName(rootID: "demo", rootPath: target.path,
+                relativePath: $0, objectKind: "file", side: .destination, reason: "Incompatible")
+        } + [IncompatibleName(rootID: "demo", rootPath: source.path,
+                relativePath: localName, objectKind: "file", side: .source, reason: "Incompatible")]
+        var simulatedOutage = false
+        let first = try NameRectification.execute(items: rows, roots: ["demo": source.path],
+            journal: journal, log: log, destinations: ["demo": mapping],
+            onProgress: { checked, _ in
+                if checked == 0 && !simulatedOutage {
+                    do {
+                        try fm.moveItem(at: target, to: disconnected)
+                        simulatedOutage = true
+                    } catch {
+                        XCTFail("Cannot disconnect synthetic destination: \\(error)")
+                    }
+                }
+            })
+        XCTAssertTrue(simulatedOutage)
+        XCTAssertEqual(first.renamed, 1, "Independent local source must still be rectified")
+        XCTAssertEqual(first.failed, 3, "Every unverified destination item must remain pending")
+        XCTAssertNotNil(first.firstFailure)
+        XCTAssertTrue(try journal.hasPendingNameRectification())
+        XCTAssertEqual(try Data(contentsOf: source.appendingPathComponent("local-.jpg")), localBytes)
+        let deferred = try log.technicalPage().filter {
+            $0.entry.action == "name_rectification_shared_destination_deferred"
+        }
+        XCTAssertEqual(deferred.count, 2, "Only the first remote failure may probe this unavailable root")
+        for (index, name) in remoteNames.enumerated() {
+            XCTAssertEqual(try Data(contentsOf: disconnected.appendingPathComponent(name)),
+                Data("remote-\\(index)".utf8))
+        }
+
+        try fm.moveItem(at: disconnected, to: target)
+        let reopened = try ChangeJournal(path: db)
+        let resumed = try NameRectification.execute(items: [], roots: ["demo": source.path],
+            journal: reopened, log: log, destinations: ["demo": mapping])
+        XCTAssertEqual(resumed.renamed, 3)
+        XCTAssertEqual(resumed.failed, 0)
+        XCTAssertFalse(try reopened.hasPendingNameRectification())
+        for (index, name) in remoteNames.enumerated() {
+            XCTAssertFalse(fm.fileExists(atPath: target.appendingPathComponent(name).path))
+            let corrected = name.replacingOccurrences(of: "?", with: "-")
+            XCTAssertEqual(try Data(contentsOf: target.appendingPathComponent(corrected)),
+                Data("remote-\\(index)".utf8))
+        }
+    }
+
+    func testSharedDestinationFailureClassificationIsStrict() {
+        XCTAssertTrue(NameRectification.isSharedDestinationFailure(
+            SMBNameRectificationError.credentialUnavailable))
+        XCTAssertTrue(NameRectification.isSharedDestinationFailure(
+            SMBNameRectificationError.timedOut))
+        XCTAssertTrue(NameRectification.isSharedDestinationFailure(
+            MountedCopyError.rootUnavailable))
+        XCTAssertFalse(NameRectification.isSharedDestinationFailure(
+            SMBNameRectificationError.helperFailed))
+        XCTAssertFalse(NameRectification.isSharedDestinationFailure(
+            MountedCopyError.destinationConflict))
+        XCTAssertFalse(NameRectification.isSharedDestinationFailure(
+            MountedCopyError.sourceChanging))
+        XCTAssertFalse(NameRectification.isSharedDestinationFailure(
+            MountedCopyError.destinationChanging))
+    }
+
     func testPreflightCacheKeepsSiblingListingAndInvalidatesOnCollision() throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             .resolvingSymlinksInPath()
