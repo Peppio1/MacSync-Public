@@ -1,0 +1,45 @@
+package main
+
+// Disposable test-only metadata reader. Reads a single synthetic object from
+// localhost and compares server-side FileStat to macOS smbfs lstat. No rename,
+// mutation, raw paths or credentials are written to stdout/stderr.
+import (
+    "context"
+    "fmt"
+    "os"
+    "time"
+
+    smb2 "github.com/cloudsoda/go-smb2"
+)
+func fail(phase string) {
+    fmt.Fprintln(os.Stderr, "MacSync SMB metadata probe failed at "+phase)
+    os.Exit(1)
+}
+func main() {
+    if os.Getenv("MACSYNC_TEST_SMB_HOST") != "127.0.0.1" ||
+       os.Getenv("MACSYNC_TEST_SMB_SHARE") != "MacSyncCI" ||
+       os.Getenv("MACSYNC_TEST_SMB_OBJECT") != "macsync-ci-metadata-probe.bin" {
+        fail("fixture-validation")
+    }
+    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+    dialer := &smb2.Dialer{Initiator: &smb2.NTLMInitiator{
+        User: os.Getenv("MACSYNC_TEST_SMB_USER"),
+        Password: os.Getenv("MACSYNC_TEST_SMB_PASSWORD"),
+    }}
+    session, err := dialer.Dial(ctx, "127.0.0.1:445")
+    if err != nil { fail("authentication") }
+    defer session.Logoff()
+    share, err := session.Mount("MacSyncCI")
+    if err != nil { fail("share") }
+    defer share.Umount()
+    object, err := share.Open("macsync-ci-metadata-probe.bin")
+    if err != nil { fail("open") }
+    defer object.Close()
+    info, err := object.Stat()
+    if err != nil { fail("stat") }
+    server, ok := info.Sys().(*smb2.FileStat)
+    if !ok { fail("file-stat-type") }
+    fmt.Printf("%d %d %d %d\n",
+        server.FileId, server.CreationTime.Unix(), info.ModTime().Unix(), info.Size())
+}
