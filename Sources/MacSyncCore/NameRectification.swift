@@ -125,6 +125,35 @@ public enum NameRectification {
         }
     }
 
+    /// A shared destination outage must not trigger an SMB helper invocation
+    /// for every remaining file in the same batch. Only infrastructure
+    /// failures qualify: a file-specific collision, stale fingerprint or
+    /// ambiguous helper response remains isolated to that file.
+    static func isSharedDestinationFailure(_ error: Error) -> Bool {
+        if let smb = error as? SMBNameRectificationError {
+            switch smb {
+            case .mountUnavailable, .credentialUnavailable, .timedOut: return true
+            case .helperFailed: return false
+            }
+        }
+        if let copy = error as? MountedCopyError {
+            switch copy {
+            case .invalidMapping, .rootUnavailable, .volumeChanged, .rcloneUnavailable,
+                 .rcloneLaunchFailed: return true
+            default: return false
+            }
+        }
+        let nsError = error as NSError
+        if nsError.domain == NSPOSIXErrorDomain {
+            return [Int(ENOTCONN), Int(ETIMEDOUT), Int(ENETDOWN),
+                    Int(ENETUNREACH), Int(EHOSTDOWN), Int(EHOSTUNREACH)].contains(nsError.code)
+        }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? Error {
+            return isSharedDestinationFailure(underlying)
+        }
+        return false
+    }
+
     /// A confirmed batch persists before its first mutation. Resume checks
     /// exact paths and identities again, including after a lost SMB response.
     public static func execute(items: [IncompatibleName], roots: [String: String],
@@ -218,6 +247,10 @@ public enum NameRectification {
         // SMB destination must not suppress the source operation at the same
         // path; the persisted unfinished batch still blocks ordinary sync.
         var blockedAncestors = Set<String>()
+        // Per-execution circuit breaker. Pending moves stay in the durable
+        // plan and can be retried explicitly after the destination recovers.
+        // It never clears the journal or authorizes an ordinary sync.
+        var unavailableDestinationRoots = Set<String>()
         func blockKey(_ item: IncompatibleName, path: String) -> String {
             item.rootID + "\0" + item.side.rawValue + "\0" + path
         }
@@ -237,6 +270,16 @@ public enum NameRectification {
             defer { onProgress(index + 1, moves.count) }
             let item = move.item
             if blockedAncestors.contains(blockKey(item, path: item.relativePath)) {
+                deferMove(move)
+                continue
+            }
+            if item.side == .destination && unavailableDestinationRoots.contains(item.rootID) {
+                // The first shared failure has already been reported. Avoid
+                // repeated SMB calls/timeouts while preserving each move in
+                // SQLite for a later operator-approved resume.
+                result.failed += 1
+                report(item, action: "name_rectification_shared_destination_deferred",
+                    level: .warning, message: "Destinazione non disponibile: rettifica conservata nel lotto")
                 deferMove(move)
                 continue
             }
@@ -330,6 +373,9 @@ public enum NameRectification {
                 let reason = SyncDiagnostic.describe(error)
                 if result.firstFailure == nil { result.firstFailure = item.side.label + " · " + reason }
                 report(item, action: "name_rectification_pending_" + item.side.rawValue, level: .warning, message: reason)
+                if item.side == .destination && isSharedDestinationFailure(error) {
+                    unavailableDestinationRoots.insert(item.rootID)
+                }
                 deferMove(move)
             }
         }
