@@ -209,8 +209,8 @@ final class ArchiveAuditAndHistoryTests:XCTestCase {
         XCTAssertEqual(defaults.string(forKey: "other.macsync.preference"), "unrelated-value")
         XCTAssertEqual(try JSONDecoder().decode(ArchiveAuditSettings.self,
             from: XCTUnwrap(defaults.data(forKey: key))), migrated)
-        XCTAssertFalse(ArchiveAuditSettings.loadMigratingLegacyDeep(
-            from: defaults, key: key).migrateLegacyDeepSelection())
+        var loadedAgain = ArchiveAuditSettings.loadMigratingLegacyDeep(from: defaults, key: key)
+        XCTAssertFalse(loadedAgain.migrateLegacyDeepSelection())
     }
 
     func testQuickToleranceOfTwoSecondsDoesNotReadAnyFileContent() throws {
