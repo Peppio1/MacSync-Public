@@ -305,7 +305,9 @@ final class MountedCopyController: ObservableObject {
             var examined = 0
             do {
                 let db = try Self.databaseURL().path
-                let journal = try ChangeJournal(path: db)
+                // Cached name-list refresh must not run schema migration/DDL
+                // while a transfer or archive audit is writing to SQLite.
+                let journal = try ChangeJournal(path: db, readOnly: !scan)
                 let log = scan ? try? SyncActivityLog(path: db) : nil
                 log?.cycleID = UUID().uuidString
                 try? log?.record(level: .info, rootID: "app", action: "name_scan_start", message: "Scansione dei nomi avviata")
@@ -1555,6 +1557,7 @@ final class MountedCopyController: ObservableObject {
     func cancelMaintenance() {
         guard maintaining, !auditBusy else { return }
         maintenanceCancel?.cancel()
+        maintenanceStatus = "Annullamento richiesto… attendo il punto sicuro."
     }
 
     func inspectStaging(sources: [(
