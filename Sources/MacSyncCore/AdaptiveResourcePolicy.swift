@@ -3,7 +3,7 @@ import Foundation
 /// Regulates *presentation* only. Never slows, skips or reorders file
 /// operations, journal commits, safety checks or cancellation tokens.
 public struct AdaptiveResourceProfile: Equatable, Sendable {
-    public enum Thermal: Sendable {
+    public enum Thermal: Equatable, Sendable {
         case nominal, fair, serious, critical
     }
 
