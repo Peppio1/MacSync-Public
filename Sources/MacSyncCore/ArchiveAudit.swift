@@ -298,16 +298,21 @@ public final class ArchiveAudit {
         state.deletionCandidates = deletionCandidates
         let startTick = ProcessInfo.processInfo.systemUptime
         var published: Double = 0
+        var lastDiagnostic: Double = 0
         func check() throws { if cancellation.isCancelled { throw SeedVerificationError.cancelled } }
-        func diagnosticSnapshot() {
-            // Do not keep a shared reference to the growing findings array on
-            // every file event (would trigger copy-on-write on each append).
+        func diagnosticSnapshot(force: Bool = false) {
+            // Diagnostic snapshots previously copied even the large report
+            // structure on every item/visit. Rate-limit only these optional
+            // snapshots; all items still affect counts and safety checks.
+            let now=ProcessInfo.processInfo.systemUptime
+            guard force || now-lastDiagnostic >= 0.2 else { return }
+            lastDiagnostic=now
             var lightweight = state
             lightweight.differences = []; lightweight.deletionCandidates = []
             diagnostic(lightweight)
         }
         func report(force: Bool = false) {
-            diagnosticSnapshot()
+            diagnosticSnapshot(force:force)
             let now = ProcessInfo.processInfo.systemUptime
             if force || now-published >= 1 { published=now; progress(state) }
         }
