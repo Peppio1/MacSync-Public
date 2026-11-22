@@ -135,6 +135,30 @@ public struct SyncLiveProgress: Equatable, Sendable {
     }
 }
 
+/// Keeps at most one pending UI callback for live transfer progress.
+/// The transfer worker remains serial; expensive UI redraws cannot build
+/// an unbounded backlog even if macOS is temporarily too busy to render.
+public final class SyncProgressMailbox: @unchecked Sendable {
+    private let lock=NSLock()
+    private var latest:SyncLiveProgress?
+    private var scheduled=false
+
+    public init() {}
+    public func offer(_ value:SyncLiveProgress) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        latest=value
+        guard !scheduled else { return false }
+        scheduled=true
+        return true
+    }
+    public func take() -> SyncLiveProgress? {
+        lock.lock(); defer { lock.unlock() }
+        let value=latest
+        latest=nil;scheduled=false
+        return value
+    }
+}
+
 /// Separate local history tables. These never acknowledge jobs or participate
 /// in copy/deletion decisions. One instance per serial queue.
 public final class SyncCycleHistory {
