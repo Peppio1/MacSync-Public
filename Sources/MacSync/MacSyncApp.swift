@@ -1103,7 +1103,7 @@ struct MacSyncConfigurationView: View {
             HStack(spacing: 8) {
                 TextField("Cerca file o errore…", text: $copy.logSearch)
                     .textFieldStyle(.roundedBorder)
-                    .onChange(of: copy.logSearch) { _ in copy.refresh() }
+                    // Search results refresh after a short typing pause.
                 Picker("Esito", selection: $copy.logLevel) {
                     Text("Tutti").tag("all")
                     Text("Completati").tag("success")
@@ -1130,10 +1130,12 @@ struct MacSyncConfigurationView: View {
                 Spacer()
                 Button("Aggiorna") { copy.refresh() }
                 Button("Log tecnico…") { showTechnicalLog = true }
-                Button("Esporta TSV…") { copy.exportLog() }
+                Button(copy.exportingLog ? "Esportazione…" : "Esporta TSV…") { copy.exportLog() }
+                    .disabled(copy.exportingLog)
                 Button("Storico cicli…") { initialMetric = nil; showSummary = true }.buttonStyle(.borderedProminent)
             }
             Text("Ultimi 300 eventi. TSV: ricerca ed esito (max 5.000 eventi); gli altri filtri valgono solo per la tabella.").font(.caption).foregroundStyle(.secondary)
+            if copy.exportingLog { ProgressView("Esportazione del registro…").controlSize(.small) }
             Table(visibleRows.map { LogRow(entry: $0) }, selection: $selectedLog) {
                 TableColumn("Data e ora") { row in Text(macSyncDateTime(row.entry.timestamp)).monospacedDigit().font(.caption) }.width(min: 124, ideal: 145)
                 TableColumn("Esito") { row in let entry = row.entry; MacSyncLogBadge(level: entry.level, interrupted: macSyncWasInterrupted(entry)) }.width(min: 76, ideal: 105)
@@ -1171,6 +1173,12 @@ struct MacSyncConfigurationView: View {
                 Text("Errori: \(visibleRows.filter { $0.level == "error" }.count)").font(.caption).foregroundStyle(MacSyncColors.red(scheme))
             }
         }.onAppear { copy.refresh() }
+        .task(id:copy.logSearch) {
+            do { try await Task.sleep(nanoseconds:200_000_000) }
+            catch { return }
+            guard !Task.isCancelled else { return }
+            copy.refresh()
+        }
     }
     private var settingsPage: some View {
         VStack(alignment: .leading, spacing: 7) {
