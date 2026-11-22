@@ -336,7 +336,7 @@ final class MountedCopyController: ObservableObject {
                                     onUpdate: { (updates: [Update]) in
                                         guard let newest = updates.last else { return }
                                         let now = ProcessInfo.processInfo.systemUptime
-                                        guard newest.path.isEmpty || now - lastPosted >= 0.8 else { return }
+                                        guard newest.path.isEmpty || now - lastPosted >= AdaptiveResourceProfile.sample().nameStatusInterval else { return }
                                         lastPosted = now
                                         let detail = newest.path.isEmpty ? "Analisi dei nomi…" : newest.path
                                         show(phase + " · \(newest.count) elementi letti · " + detail)
@@ -961,6 +961,9 @@ final class MountedCopyController: ObservableObject {
                 var history: SyncCycleHistory?
                 var outcomeState = "suspended"
                 var lastUpdate: TimeInterval = 0
+                var profile = AdaptiveResourceProfile.sample()
+                var lastProfileSample = ProcessInfo.processInfo.systemUptime
+                let progressCadence = AdaptiveProgressCadence()
                 let progressMailbox=SyncProgressMailbox()
                 do {
                     let store = try SyncCycleHistory(path:database.path)
@@ -970,7 +973,13 @@ final class MountedCopyController: ObservableObject {
                 } catch { historyError = "Storico non disponibile: " + error.localizedDescription }
                 func publish(force: Bool = false) {
                     let now = ProcessInfo.processInfo.systemUptime
-                    guard force || now-lastUpdate >= 0.2 else { return }
+                    // Refresh the power/thermal profile infrequently. Long
+                    // transfers remain full speed; only UI traffic adapts.
+                    if now - lastProfileSample >= 5 {
+                        profile = AdaptiveResourceProfile.sample()
+                        lastProfileSample = now
+                    }
+                    guard force || now-lastUpdate >= progressCadence.interval(profile: profile) else { return }
                     lastUpdate = now
                     // One pending main-actor update per cycle. New events
                     // replace the pending snapshot instead of enqueuing work.
@@ -979,6 +988,8 @@ final class MountedCopyController: ObservableObject {
                         guard let snapshot=progressMailbox.take(),
                               let self, self.historySessionID==sessionID,
                               !cancellation.isCancelled else { return }
+                        progressCadence.observeDeliveryDelay(
+                            ProcessInfo.processInfo.systemUptime - now)
                         self.liveProgress=snapshot
                     }
                 }
@@ -1016,6 +1027,13 @@ final class MountedCopyController: ObservableObject {
                     } catch { historyError = "Storico incompleto: " + error.localizedDescription }
                     let saved = (try? history?.cycles(limit:1,finishedOnly:true).first) ?? nil
                     let finalStats = totals.stats
+                    let maxUIDeliveryDelay = progressCadence.maximumDeliveryDelay
+                    if maxUIDeliveryDelay >= 0.15 {
+                        try? log.record(level:.info,rootID:"app",
+                            action:"metric_progress_delivery_delay",
+                            durationSeconds:maxUIDeliveryDelay,
+                            message:"Massima attesa nella consegna del progresso UI")
+                    }
                     let warning = historyError
                     let finalOutcome = outcomeState
                     TechnicalFallbackLog.record(databasePath:database.path,cycleID:cycleID,action:"cycle_end",message:finalOutcome)
