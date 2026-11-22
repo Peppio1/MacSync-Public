@@ -39,10 +39,14 @@ public final class ChangeJournal {
     private var connection: OpaquePointer?
     private let databasePath: String
 
-    public init(path: String) throws {
+    /// UI readers use a strict read-only connection without schema DDL or
+    /// journal-mode changes. Existing operational writers retain the original
+    /// constructor behavior and all transactional safety checks.
+    public init(path: String, readOnly: Bool = false) throws {
         self.databasePath = path
         var handle: OpaquePointer?
-        guard sqlite3_open(path, &handle) == SQLITE_OK else {
+        let flags = readOnly ? SQLITE_OPEN_READONLY : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)
+        guard sqlite3_open_v2(path, &handle, flags, nil) == SQLITE_OK else {
             let description = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
             if handle != nil { sqlite3_close(handle) }
             throw JournalError.database("Unable to open SQLite: " + description)
@@ -50,6 +54,10 @@ public final class ChangeJournal {
         connection = handle
 
         do {
+            if readOnly {
+                try execute("PRAGMA busy_timeout=1000; PRAGMA query_only=ON;")
+                return
+            }
             try execute("PRAGMA busy_timeout=5000;")
             try execute("PRAGMA journal_mode=WAL;")
             try execute("PRAGMA synchronous=FULL;")
