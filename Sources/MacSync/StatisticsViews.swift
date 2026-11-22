@@ -342,7 +342,7 @@ struct SyncHistorySheet: View {
             busy=true
             DispatchQueue.global(qos:.utility).async {
                 do {
-                    let values=try SyncCycleHistory(path:path).cycles(limit:100,offset:offset,finishedOnly:true)
+                    let values=try SyncCycleHistory(path:path,readOnly:true).cycles(limit:100,offset:offset,finishedOnly:true)
                     DispatchQueue.main.async {
                         if reset { cycles=values } else { cycles += values.filter { value in !cycles.contains(where:{$0.id==value.id}) } }
                         cycleOffset=offset+values.count; moreCycles=values.count==100
@@ -362,7 +362,7 @@ struct SyncHistorySheet: View {
             let path=try copy.historyPath()
             DispatchQueue.global(qos:.utility).async {
                 do {
-                    let result=try SyncCycleHistory(path:path).totals(cycleID:cycle)
+                    let result=try SyncCycleHistory(path:path,readOnly:true).totals(cycleID:cycle)
                     DispatchQueue.main.async { if scope==selected { totals=result } }
                 } catch { DispatchQueue.main.async { message=error.localizedDescription } }
             }
@@ -452,7 +452,7 @@ private struct HistoryDetailsSheet:View {
             busy=true
             DispatchQueue.global(qos:.utility).async {
                 do {
-                    let page=try SyncCycleHistory(path:path).events(cycleID:cycleID,sessionID:sessionID,
+                    let page=try SyncCycleHistory(path:path,readOnly:true).events(cycleID:cycleID,sessionID:sessionID,
                         kinds:metric.kinds,rootID:filter,search:query,afterID:after,limit:200)
                     DispatchQueue.main.async {
                         if reset { rows=page; selectedRow=nil } else { rows+=page }
