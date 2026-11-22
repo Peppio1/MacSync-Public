@@ -508,4 +508,19 @@ final class ArchiveAuditAndHistoryTests:XCTestCase {
     }
 
 
+    func testSyncProgressMailboxCoalescesMainThreadUpdates() {
+        let mailbox=SyncProgressMailbox()
+        var first=SyncLiveProgress(started:Date(),planned:10)
+        first.processed=1
+        var second=first
+        second.processed=5
+        XCTAssertTrue(mailbox.offer(first))
+        XCTAssertFalse(mailbox.offer(second))
+        XCTAssertEqual(mailbox.take()?.processed,5)
+        XCTAssertNil(mailbox.take())
+        XCTAssertTrue(mailbox.offer(first))
+        XCTAssertEqual(mailbox.take()?.processed,1)
+    }
+
+
 }
