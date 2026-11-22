@@ -37,7 +37,10 @@ struct IncompatibleNamesPanel:View {
         }
     }
     var body:some View {
-        MacSyncPanel("Nomi incompatibili",icon:"folder.badge.questionmark",fillHeight:true) {
+        // Evaluate the potentially large filtered collection once per render.
+        // Heavy SMB scans and SQLite reads already run on background queues.
+        let visibleRows = filtered
+        return MacSyncPanel("Nomi incompatibili",icon:"folder.badge.questionmark",fillHeight:true) {
             HStack {
                 VStack(alignment:.leading,spacing:3) {
                     ForEach(IncompatibleName.Side.allCases, id: \.rawValue) { position in
@@ -73,8 +76,8 @@ struct IncompatibleNamesPanel:View {
                 Button("Seleziona tutto") { selected.formUnion(eligible.map(\.id)) }
                     .help("Seleziona tutte le cartelle e tutti i file rettificabili sui due lati, anche nelle altre schede")
                     .disabled(eligible.isEmpty || !canSelect)
-                Button("Seleziona visibili") { selected.formUnion(filtered.filter{selectable($0)}.map(\.id)) }
-                    .disabled(!canSelect || !filtered.contains(where:{selectable($0)}))
+                Button("Seleziona visibili") { selected.formUnion(visibleRows.filter{selectable($0)}.map(\.id)) }
+                    .disabled(!canSelect || !visibleRows.contains(where:{selectable($0)}))
                 Button("Deseleziona") { selected.removeAll() }.disabled(chosen.isEmpty)
                 Spacer()
                 Button(runtime.rectificationPending ? "Riprendi rettifica" : "Rettifica (\(chosen.count))") {
@@ -111,12 +114,12 @@ struct IncompatibleNamesPanel:View {
             } else if copy.namesBusy {
                 ProgressView().controlSize(.small)
             }
-            if filtered.isEmpty {
+            if visibleRows.isEmpty {
                 Text("Nessun elemento nella selezione.").foregroundStyle(.secondary).frame(maxWidth:.infinity,minHeight:80)
             } else {
                 ScrollView {
                     LazyVStack(alignment:.leading,spacing:8) {
-                        ForEach(filtered) { item in
+                        ForEach(visibleRows) { item in
                             HStack(alignment:.top,spacing:10) {
                                 Toggle("",isOn:Binding(get:{selected.contains(item.id)},set:{ value in
                                     if value { selected.insert(item.id) } else { selected.remove(item.id) }
