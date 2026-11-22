@@ -182,16 +182,19 @@ public struct IncompatibleNameListPage: Sendable {
     public let sourceFiles: Int
     public let destinationFolders: Int
     public let destinationFiles: Int
+    public let selectableIDs: [String]
 
     public init(rows: [IncompatibleName], total: Int,
                 sourceFolders: Int, sourceFiles: Int,
-                destinationFolders: Int, destinationFiles: Int) {
+                destinationFolders: Int, destinationFiles: Int,
+                selectableIDs: [String]) {
         self.rows = rows
         self.total = total
         self.sourceFolders = sourceFolders
         self.sourceFiles = sourceFiles
         self.destinationFolders = destinationFolders
         self.destinationFiles = destinationFiles
+        self.selectableIDs = selectableIDs
     }
 }
 
@@ -207,10 +210,12 @@ public enum IncompatibleNameListing {
         var rows: [IncompatibleName] = []
         rows.reserveCapacity(size)
         var matches = 0
+        var selectableIDs: [String] = []
         var sourceFolders = 0, sourceFiles = 0
         var destinationFolders = 0, destinationFiles = 0
         for (index, item) in items.enumerated() {
             if index % 128 == 0 && !shouldContinue() { return nil }
+            if NameRectification.proposedName(item.name) != nil { selectableIDs.append(item.id) }
             if item.side == .source {
                 if item.isDirectory { sourceFolders += 1 } else { sourceFiles += 1 }
             } else {
@@ -228,6 +233,7 @@ public enum IncompatibleNameListing {
         guard shouldContinue() else { return nil }
         return IncompatibleNameListPage(rows: rows, total: matches,
             sourceFolders: sourceFolders, sourceFiles: sourceFiles,
-            destinationFolders: destinationFolders, destinationFiles: destinationFiles)
+            destinationFolders: destinationFolders, destinationFiles: destinationFiles,
+            selectableIDs: selectableIDs)
     }
 }
