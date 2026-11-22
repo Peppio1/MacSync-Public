@@ -151,7 +151,9 @@ struct IncompatibleNamesPanel:View {
             Label("Rettifica dopo conferma sui lati interessati. Nessuna sovrascrittura.",systemImage:"info.circle")
                 .font(.caption).foregroundStyle(.secondary)
         }
-        .onChange(of:copy.incompatibleNames.map(\.id)) { ids in selected.formIntersection(ids) }
+        .onChange(of:copy.namesRevision) { _ in
+            selected.formIntersection(Set(copy.incompatibleNames.map(\.id)))
+        }
         .sheet(isPresented:$showConfirmation) {
             VStack(alignment:.leading,spacing:12) {
                 Text("Conferma rettifica dei nomi").font(.title2.bold())
