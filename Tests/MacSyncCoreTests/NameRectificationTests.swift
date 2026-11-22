@@ -596,4 +596,76 @@ final class NameRectificationTests:XCTestCase {
         XCTAssertEqual(try Data(contentsOf: collision), data)
     }
 
+
+    func testIncompatibleNamePagingRetainsOrderCountsAndFullSelection() throws {
+        let items = (0..<530).map { index in
+            IncompatibleName(rootID:"demo",rootPath:"/Volumes/Example",
+                relativePath:String(format:"folder_%04d?",index),
+                objectKind:index % 2 == 0 ? "directory" : "file",
+                side:index % 3 == 0 ? .destination : .source,
+                reason:"Carattere incompatibile")
+        }
+        let first = try XCTUnwrap(IncompatibleNameListing.page(items:items,
+            side:"all",directories:true,search:"",offset:0))
+        let next = try XCTUnwrap(IncompatibleNameListing.page(items:items,
+            side:"all",directories:true,search:"",offset:200))
+        XCTAssertEqual(first.total,265)
+        XCTAssertEqual(first.rows.count,200)
+        XCTAssertEqual(next.rows.count,65)
+        XCTAssertEqual(first.rows.first?.relativePath,items[0].relativePath)
+        XCTAssertEqual(next.rows.first?.relativePath,items[400].relativePath)
+        XCTAssertEqual(first.sourceFiles + first.destinationFiles,265)
+        XCTAssertEqual(first.sourceFolders + first.destinationFolders,265)
+        XCTAssertEqual(first.selectableIDs.count,530)
+        let filtered = try XCTUnwrap(IncompatibleNameListing.page(items:items,
+            side:"destination",directories:false,search:"FOLDER_0003?",offset:0))
+        XCTAssertEqual(filtered.total,1)
+        XCTAssertEqual(filtered.rows.first?.relativePath,"folder_0003?")
+        XCTAssertEqual(filtered.rows.first?.side,.destination)
+        XCTAssertEqual(filtered.selectableIDs.count,530)
+        XCTAssertTrue(try XCTUnwrap(IncompatibleNameListing.page(items:items,
+            side:"all",directories:true,search:"",offset:10000)).rows.isEmpty)
+    }
+
+    func testIncompatibleNamePagingAndSelectionAreCooperativelyCancellable() {
+        let items = (0..<5000).map { i in
+            IncompatibleName(rootID:"demo",rootPath:"/test",
+                relativePath:"bad_\(i)?.jpg",objectKind:"file",
+                side:.source,reason:"Carattere incompatibile")
+        }
+        XCTAssertNil(IncompatibleNameListing.page(items:items,side:"all",
+            directories:false,search:"",offset:0,shouldContinue:{false}))
+        XCTAssertNil(IncompatibleNameSelection.resolve(items:items,
+            selectedIDs:Set([items[0].id]),shouldContinue:{false}))
+    }
+
+    func testBilateralNameSelectionUsesBothSidesWithoutUnselectedSibling() throws {
+        let local = IncompatibleName(rootID:"r",rootPath:"/Mac",relativePath:"bad?.jpg",
+            objectKind:"file",side:.source,reason:"Carattere incompatibile")
+        let remote = IncompatibleName(rootID:"r",rootPath:"/Server",relativePath:"bad?.jpg",
+            objectKind:"file",side:.destination,reason:"Carattere incompatibile")
+        let other = IncompatibleName(rootID:"r",rootPath:"/Mac",relativePath:"other?.jpg",
+            objectKind:"file",side:.source,reason:"Carattere incompatibile")
+        let selected = try XCTUnwrap(IncompatibleNameSelection.resolve(
+            items:[local,remote,other],selectedIDs:Set([local.id])))
+        XCTAssertEqual(selected.map(\.id),[local.id,remote.id])
+        XCTAssertEqual(IncompatibleNameSelection.resolve(items:[local,remote,other],
+            selectedIDs:[])?.count,0)
+    }
+
+    func testIncompatibleNameLargeFilteredPageIsBounded() throws {
+        let start=ProcessInfo.processInfo.systemUptime
+        let items=(0..<50000).map { index in
+            IncompatibleName(rootID:"r",rootPath:"/Example",
+                relativePath:"album_\(index)/bad?.jpg",
+                objectKind:"file",side:.source,reason:"Carattere incompatibile")
+        }
+        let result=try XCTUnwrap(IncompatibleNameListing.page(items:items,side:"all",
+            directories:false,search:"album_499",offset:0,limit:200))
+        XCTAssertEqual(result.total,111)
+        XCTAssertEqual(result.rows.count,111)
+        XCTAssertEqual(result.selectableIDs.count,50000)
+        print("UI name listing synthetic 50k fixture (including creation): \(ProcessInfo.processInfo.systemUptime-start)s")
+    }
+
 }
