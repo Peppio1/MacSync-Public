@@ -569,7 +569,9 @@ struct MacSyncConfigurationView: View {
     }
 
     var body: some View {
-        MacSyncSectionShell(page: $page, monitoring: model.monitoring, next: visibleNextCopy, showHeader: true, activity: nil, controls: AnyView(automaticSwitch), nameCount:copy.sourceNameCount) {
+        MacSyncSectionShell(page: $page, monitoring: model.monitoring, next: visibleNextCopy, showHeader: true, activity: nil,
+                            controls: AnyView(HStack(spacing: 10) { automaticSwitch; globalControls }),
+                            nameCount:copy.sourceNameCount) {
             VStack(alignment: .leading, spacing: 10) {
                 switch page {
                 case .overview: overviewPage
@@ -643,6 +645,11 @@ struct MacSyncConfigurationView: View {
     }
 
     @ViewBuilder private var globalControls: some View {
+        if runtime.preparingRectification || copy.rectifyingNames {
+            Button(runtime.rectificationCancellationRequested ? "Annullamento rettifica…" : "Annulla rettifica") {
+                runtime.cancelNameRectification()
+            }.buttonStyle(MacSyncStopStyle()).disabled(runtime.rectificationCancellationRequested)
+        }
         if copy.seedBusy { Button("Annulla SHA-256") { copy.cancelSeedVerification() }.buttonStyle(MacSyncStopStyle()) }
         if copy.auditBusy { Button("Annulla verifica") { copy.cancelArchiveAudit() }.buttonStyle(MacSyncStopStyle()) }
         if copy.maintaining && !copy.auditBusy { Button("Interrompi manutenzione") { copy.cancelMaintenance() }.buttonStyle(MacSyncStopStyle()) }
@@ -661,7 +668,7 @@ struct MacSyncConfigurationView: View {
             Toggle("Sincronizzazione automatica",isOn: Binding(get:{ copy.automaticCopiesEnabled },set:{ runtime.onAutomaticPreferenceChanged($0) }))
                 .labelsHidden().toggleStyle(MacSyncVisibleSwitchStyle(green: true))
                 .help(runtime.automaticStatus)
-                .disabled(runtime.savingSchedule || copy.seedBusy || copy.maintaining || copy.interruptionRequested)
+                .disabled(runtime.savingSchedule || runtime.folderConfigurationBusy || copy.seedBusy || copy.maintaining || copy.interruptionRequested)
             Text(copy.automaticCopiesEnabled ? "Attiva" : "Disattivata").font(.subheadline.weight(.semibold))
                 .foregroundStyle(copy.automaticCopiesEnabled ? MacSyncColors.green(scheme) : Color.secondary)
         }
