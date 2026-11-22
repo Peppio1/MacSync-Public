@@ -1808,6 +1808,7 @@ final class MountedCopyController: ObservableObject {
     private let logReadQueue=DispatchQueue(label:"macsync.activity.reader",qos:.utility)
     private var logReadBusy=false
     @Published private(set) var logReadWarning=""
+    @Published private(set) var exportingLog=false
     func refresh() {
         guard !previewOnly,!logReadBusy else { return }
         logReadBusy=true
@@ -1833,20 +1834,31 @@ final class MountedCopyController: ObservableObject {
     }
 
     func exportLog() {
-        do {
-            let text = try SyncActivityLog(path: Self.databaseURL().path)
-                .exportText(
-                    limit: 5000, level: SyncLogLevel(rawValue: logLevel),
-                    search: logSearch
-                )
-            let panel = NSSavePanel()
-            panel.nameFieldStringValue = "MacSync_sync_log.tsv"
-            panel.title = "Esporta registro sincronizzazioni"
-            guard panel.runModal() == .OK, let url = panel.url else { return }
-            try text.write(to: url, atomically: true, encoding: .utf8)
-            status = "Registro esportato (controlla i nomi dei file prima di condividerlo)"
-        } catch {
-            status = "Esportazione fallita: " + error.localizedDescription
+        guard !exportingLog else { return }
+        // The save dialog is interactive, but SQLite reads and file writes
+        // must never occupy the main actor, especially while a scan runs.
+        let panel = NSSavePanel()
+        panel.nameFieldString = "MacSync_sync_log.tsv"
+        panel.title = "Esporta registro sincronizzazioni"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        exportingLog = true
+        let level = SyncLogLevel(rawValue:logLevel), search = logSearch
+        DispatchQueue.global(qos:.utility).async { [weak self] in
+            let result: String
+            do {
+                let path = try Self.databaseURL().path
+                let text = try SyncActivityLog(path:path,readOnly:true)
+                    .exportText(limit:5000,level:level,search:search)
+                try text.write(to:url,atomically:true,encoding:.utf8)
+                result = "Registro esportato (controlla i nomi dei file prima di condividerlo)"
+            } catch {
+                result = "Esportazione fallita: " + error.localizedDescription
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.exportingLog = false
+                self.status = result
+            }
         }
     }
 }
