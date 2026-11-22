@@ -170,3 +170,64 @@ public struct NameScanSnapshot: Codable, Equatable, Sendable {
         return Self(rootID: rootID, side: side, rootPath: resolved.path, volume: volume, date: Date(), rows: rows)
     }
 }
+
+
+/// Display-only paging and filtering for large incompatible-name inventories.
+/// The result is never permission to rename or delete. The full scan stays
+/// outside SwiftUI's main actor and is cancellable when filters change.
+public struct IncompatibleNameListPage: Sendable {
+    public let rows: [IncompatibleName]
+    public let total: Int
+    public let sourceFolders: Int
+    public let sourceFiles: Int
+    public let destinationFolders: Int
+    public let destinationFiles: Int
+
+    public init(rows: [IncompatibleName], total: Int,
+                sourceFolders: Int, sourceFiles: Int,
+                destinationFolders: Int, destinationFiles: Int) {
+        self.rows = rows
+        self.total = total
+        self.sourceFolders = sourceFolders
+        self.sourceFiles = sourceFiles
+        self.destinationFolders = destinationFolders
+        self.destinationFiles = destinationFiles
+    }
+}
+
+public enum IncompatibleNameListing {
+    /// Preserves the original case-insensitive search semantics and order.
+    /// Count all matches while returning only one bounded page of rows.
+    public static func page(items: [IncompatibleName], side: String,
+                            directories: Bool, search: String, offset: Int,
+                            limit: Int = 200,
+                            shouldContinue: () -> Bool = { true }) -> IncompatibleNameListPage? {
+        let start = max(0, offset)
+        let size = max(1, min(500, limit))
+        var rows: [IncompatibleName] = []
+        rows.reserveCapacity(size)
+        var matches = 0
+        var sourceFolders = 0, sourceFiles = 0
+        var destinationFolders = 0, destinationFiles = 0
+        for (index, item) in items.enumerated() {
+            if index % 128 == 0 && !shouldContinue() { return nil }
+            if item.side == .source {
+                if item.isDirectory { sourceFolders += 1 } else { sourceFiles += 1 }
+            } else {
+                if item.isDirectory { destinationFolders += 1 } else { destinationFiles += 1 }
+            }
+            guard (side == "all" || item.side.rawValue == side),
+                  item.isDirectory == directories,
+                  (search.isEmpty ||
+                   item.relativePath.localizedCaseInsensitiveContains(search) ||
+                   item.rootPath.localizedCaseInsensitiveContains(search) ||
+                   item.reason.localizedCaseInsensitiveContains(search)) else { continue }
+            if matches >= start && rows.count < size { rows.append(item) }
+            matches += 1
+        }
+        guard shouldContinue() else { return nil }
+        return IncompatibleNameListPage(rows: rows, total: matches,
+            sourceFolders: sourceFolders, sourceFiles: sourceFiles,
+            destinationFolders: destinationFolders, destinationFiles: destinationFiles)
+    }
+}
