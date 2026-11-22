@@ -558,7 +558,7 @@ struct MacSyncConfigurationView: View {
                 }
             }
         }
-        .disabled(runtime.folderConfigurationBusy || runtime.shuttingDown)
+        .disabled(runtime.shuttingDown)
         .preferredColorScheme(previewScheme ?? (appearance == "light" ? .light : appearance == "dark" ? .dark : nil))
         .environment(\.locale, Locale(identifier: "it_IT"))
         .frame(minWidth: 980, minHeight: 660)
@@ -584,7 +584,9 @@ struct MacSyncConfigurationView: View {
             if !busy && !runtime.previewOnly { copy.refreshIncompatibleNames(pairs: model.configuredPairs()) }
         }
         .onChange(of:page) { nextPage in
-            if !runtime.previewOnly && nextPage == .names { copy.refreshIncompatibleNames(pairs:model.configuredPairs()) }
+            if !runtime.previewOnly && nextPage == .names && !copy.namesLoaded && !copy.namesBusy {
+                copy.refreshIncompatibleNames(pairs:model.configuredPairs())
+            }
             if !runtime.previewOnly && nextPage == .history { copy.refresh() }
         }
         .onReceive(Timer.publish(every:3,on:.main,in:.common).autoconnect()) { _ in
@@ -1056,7 +1058,8 @@ struct MacSyncConfigurationView: View {
         }
     }
     private var historyPage: some View {
-        MacSyncPanel("Registro e dettagli", icon: "list.bullet.rectangle", fillHeight: true) {
+        let visibleRows = visibleLog
+        return MacSyncPanel("Registro e dettagli", icon: "list.bullet.rectangle", fillHeight: true) {
             if !copy.logReadWarning.isEmpty { Text(copy.logReadWarning).font(.caption).foregroundStyle(.orange) }
             HStack(spacing: 8) {
                 TextField("Cerca file o errore…", text: $copy.logSearch)
@@ -1092,7 +1095,7 @@ struct MacSyncConfigurationView: View {
                 Button("Storico cicli…") { initialMetric = nil; showSummary = true }.buttonStyle(.borderedProminent)
             }
             Text("Ultimi 300 eventi. TSV: ricerca ed esito (max 5.000 eventi); gli altri filtri valgono solo per la tabella.").font(.caption).foregroundStyle(.secondary)
-            Table(visibleLog.map { LogRow(entry: $0) }, selection: $selectedLog) {
+            Table(visibleRows.map { LogRow(entry: $0) }, selection: $selectedLog) {
                 TableColumn("Data e ora") { row in Text(macSyncDateTime(row.entry.timestamp)).monospacedDigit().font(.caption) }.width(min: 124, ideal: 145)
                 TableColumn("Esito") { row in let entry = row.entry; MacSyncLogBadge(level: entry.level, interrupted: macSyncWasInterrupted(entry)) }.width(min: 76, ideal: 105)
                 TableColumn("Operazione") { row in let entry = row.entry; Text(macSyncAction(entry.action)).lineLimit(1) }.width(min: 78, ideal: 108)
@@ -1100,7 +1103,7 @@ struct MacSyncConfigurationView: View {
                 TableColumn("Dim.") { row in let entry = row.entry; Text(entry.bytes == 0 ? "—" : ByteCountFormatter.string(fromByteCount: entry.bytes, countStyle: .file)).monospacedDigit() }.width(min: 60, ideal: 80)
             }.frame(minHeight: 105, maxHeight: .infinity)
                 .layoutPriority(1)
-            if let entry = visibleLog.first(where: { $0.id == selectedLog }) {
+            if let entry = visibleRows.first(where: { $0.id == selectedLog }) {
                 VStack(alignment: .leading, spacing: 7) {
                     HStack {
                         Text("Dettaglio evento").font(.headline)
@@ -1116,17 +1119,17 @@ struct MacSyncConfigurationView: View {
                 }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
             } else {
-                Text(visibleLog.isEmpty ? "Nessun evento corrispondente ai filtri." : "Seleziona una riga per consultare il dettaglio completo.").font(.caption).foregroundStyle(.secondary)
+                Text(visibleRows.isEmpty ? "Nessun evento corrispondente ai filtri." : "Seleziona una riga per consultare il dettaglio completo.").font(.caption).foregroundStyle(.secondary)
             }
             Divider()
             HStack {
-                Text("Eventi visualizzati: \(visibleLog.count)").font(.caption.weight(.medium))
+                Text("Eventi visualizzati: \(visibleRows.count)").font(.caption.weight(.medium))
                 Spacer()
-                Text("Completati: \(visibleLog.filter { $0.level == "success" }.count)").font(.caption).foregroundStyle(MacSyncColors.green(scheme))
+                Text("Completati: \(visibleRows.filter { $0.level == "success" }.count)").font(.caption).foregroundStyle(MacSyncColors.green(scheme))
                 Spacer()
-                Text("Avvisi: \(visibleLog.filter { $0.level == "warning" }.count)").font(.caption)
+                Text("Avvisi: \(visibleRows.filter { $0.level == "warning" }.count)").font(.caption)
                 Spacer()
-                Text("Errori: \(visibleLog.filter { $0.level == "error" }.count)").font(.caption).foregroundStyle(MacSyncColors.red(scheme))
+                Text("Errori: \(visibleRows.filter { $0.level == "error" }.count)").font(.caption).foregroundStyle(MacSyncColors.red(scheme))
             }
         }.onAppear { copy.refresh() }
     }
