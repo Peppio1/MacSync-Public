@@ -617,12 +617,15 @@ final class NameRectificationTests:XCTestCase {
         XCTAssertEqual(first.sourceFiles + first.destinationFiles,265)
         XCTAssertEqual(first.sourceFolders + first.destinationFolders,265)
         XCTAssertEqual(first.selectableIDs.count,530)
+        XCTAssertEqual(first.matchingSelectableIDs.count,265)
+        XCTAssertEqual(next.matchingSelectableIDs.count,265)
         let filtered = try XCTUnwrap(IncompatibleNameListing.page(items:items,
             side:"destination",directories:false,search:"FOLDER_0003?",offset:0))
         XCTAssertEqual(filtered.total,1)
         XCTAssertEqual(filtered.rows.first?.relativePath,"folder_0003?")
         XCTAssertEqual(filtered.rows.first?.side,.destination)
         XCTAssertEqual(filtered.selectableIDs.count,530)
+        XCTAssertEqual(filtered.matchingSelectableIDs.count,1)
         XCTAssertTrue(try XCTUnwrap(IncompatibleNameListing.page(items:items,
             side:"all",directories:true,search:"",offset:10000)).rows.isEmpty)
     }
@@ -665,6 +668,7 @@ final class NameRectificationTests:XCTestCase {
         XCTAssertEqual(result.total,111)
         XCTAssertEqual(result.rows.count,111)
         XCTAssertEqual(result.selectableIDs.count,50000)
+        XCTAssertEqual(result.matchingSelectableIDs.count,111)
         print("UI name listing synthetic 50k fixture (including creation): \(ProcessInfo.processInfo.systemUptime-start)s")
     }
 
