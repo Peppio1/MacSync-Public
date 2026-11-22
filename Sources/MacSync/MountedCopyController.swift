@@ -196,14 +196,19 @@ final class MountedCopyController: ObservableObject {
     }
     @Published private(set) var auditBusy = false
     @Published private(set) var auditProgress: ArchiveAuditProgress?
-    @Published private(set) var incompatibleNames:[IncompatibleName]=[]
+    @Published private(set) var incompatibleNames:[IncompatibleName]=[] {
+        didSet { sourceNameCount = incompatibleNames.reduce(into: 0) { count, item in
+            if item.side == .source { count += 1 }
+        } }
+    }
+    @Published private(set) var sourceNameCount = 0
+    @Published private(set) var namesLoaded = false
     @Published private(set) var namesStatus="Inventario non ancora consultato"
     @Published private(set) var namesBusy=false
     @Published private(set) var nameScanStarted: Date?
     @Published private(set) var rectificationStatus=""
     @Published private(set) var rectificationProgress: (checked: Int, total: Int)?
     @Published private(set) var rectifyingNames=false
-    var sourceNameCount: Int { incompatibleNames.lazy.filter { $0.side == .source }.count }
     var scanningNames: Bool { namesCancellation != nil }
 
     func rectifyNamesAfterDrain(items:[IncompatibleName],
@@ -368,6 +373,7 @@ final class MountedCopyController: ObservableObject {
                 self.namesCancellation = nil
                 self.nameScanStarted = nil
                 self.incompatibleNames = rows
+                self.namesLoaded = true
                 if cancellation.isCancelled {
                     self.namesStatus = "Scansione annullata · risultati completati o precedenti"
                 } else if let lastWarning {
