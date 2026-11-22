@@ -139,14 +139,21 @@ public struct SyncLiveProgress: Equatable, Sendable {
 /// in copy/deletion decisions. One instance per serial queue.
 public final class SyncCycleHistory {
     private var db: OpaquePointer?
-    public init(path: String) throws {
+    /// Read-only views must not run DDL or request journal-mode changes on
+    /// the writer's WAL database. Legacy writer callers retain the same schema.
+    public init(path: String, readOnly: Bool = false) throws {
         var handle: OpaquePointer?
-        guard sqlite3_open(path, &handle) == SQLITE_OK else {
+        let flags = readOnly ? SQLITE_OPEN_READONLY : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)
+        guard sqlite3_open_v2(path, &handle, flags, nil) == SQLITE_OK else {
             if handle != nil { sqlite3_close(handle) }
             throw JournalError.database("Cannot open cycle history")
         }
         db = handle
         do {
+            if readOnly {
+                try execute("PRAGMA busy_timeout=1000; PRAGMA query_only=ON;")
+                return
+            }
             try execute("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;")
             try execute("""
                 CREATE TABLE IF NOT EXISTS sync_cycles_v1(
