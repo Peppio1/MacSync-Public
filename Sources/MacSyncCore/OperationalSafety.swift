@@ -24,6 +24,18 @@ public struct DirectoryBinding: Codable, Equatable, Sendable {
             birthNanos:Int64(s.st_birthtimespec.tv_nsec))
     }
 
+    /// A directory observed after a Finder SMB remount. Never used as a
+    /// substitute for the strict per-cycle volume and directory checks.
+    func isSameObjectAfterSMBRemount(as old: DirectoryBinding) -> Bool {
+        volume.fileSystem.lowercased() == "smbfs" &&
+        old.volume.fileSystem.lowercased() == "smbfs" &&
+        volume.isStrongIdentity && old.volume.isStrongIdentity &&
+        volume.mountSource == old.volume.mountSource &&
+        volume.mountPath != old.volume.mountPath &&
+        inode == old.inode && birthSeconds == old.birthSeconds &&
+        birthNanos == old.birthNanos
+    }
+
     static func encoded(_ url: URL) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
