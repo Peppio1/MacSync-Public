@@ -680,7 +680,6 @@ struct MacSyncConfigurationView: View {
                 HStack {
                     if copy.liveProgress == nil || copy.interruptionRequested { Text(globalActivity).font(.subheadline.weight(.semibold)) }
                     Spacer()
-                    globalControls
                     if !copy.active && copy.liveProgress == nil && !copy.maintaining && !copy.seedBusy && model.scanProgress == nil {
                         Button("Avvia sincronizzazione") { runtime.startManualSynchronization() }.buttonStyle(.borderedProminent).disabled(!model.monitoring || runtime.savingSchedule || copy.queueRebuildRequired)
                     }
