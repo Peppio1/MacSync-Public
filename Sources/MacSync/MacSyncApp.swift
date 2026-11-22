@@ -650,9 +650,24 @@ struct MacSyncConfigurationView: View {
                 runtime.cancelNameRectification()
             }.buttonStyle(MacSyncStopStyle()).disabled(runtime.rectificationCancellationRequested)
         }
-        if copy.seedBusy { Button("Annulla SHA-256") { copy.cancelSeedVerification() }.buttonStyle(MacSyncStopStyle()) }
-        if copy.auditBusy { Button("Annulla verifica") { copy.cancelArchiveAudit() }.buttonStyle(MacSyncStopStyle()) }
-        if copy.maintaining && !copy.auditBusy { Button("Interrompi manutenzione") { copy.cancelMaintenance() }.buttonStyle(MacSyncStopStyle()) }
+        if copy.seedBusy {
+            let cancelling=copy.seedStatus.hasPrefix("Annullamento richiesto")
+            Button(cancelling ? "Annullamento SHA-256…" : "Annulla SHA-256") {
+                copy.cancelSeedVerification()
+            }.buttonStyle(MacSyncStopStyle()).disabled(cancelling)
+        }
+        if copy.auditBusy {
+            let cancelling=copy.auditStatus.hasPrefix("Annullamento richiesto")
+            Button(cancelling ? "Annullamento verifica…" : "Annulla verifica") {
+                copy.cancelArchiveAudit()
+            }.buttonStyle(MacSyncStopStyle()).disabled(cancelling)
+        }
+        if copy.maintaining && !copy.auditBusy {
+            let cancelling=copy.maintenanceStatus.hasPrefix("Annullamento richiesto")
+            Button(cancelling ? "Annullamento manutenzione…" : "Interrompi manutenzione") {
+                copy.cancelMaintenance()
+            }.buttonStyle(MacSyncStopStyle()).disabled(cancelling)
+        }
         if model.scanProgress != nil { Button("Annulla scansione") { runtime.stopCopiesForCurrentLaunch(); model.stopMonitoring() }.buttonStyle(MacSyncStopStyle()) }
         if copy.liveProgress != nil && copy.active {
             Button(copy.interruptionRequested ? "Interruzione richiesta…" : "Interrompi ciclo") { copy.interruptCurrentCycle() }
