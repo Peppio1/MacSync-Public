@@ -108,28 +108,64 @@ public enum StageTransferEngine {
         var lastStats:(Int64,Double)?
         let reader = output.fileHandleForReading
         defer { try? reader.close() }
-        // Drain stderr on the serial worker so callbacks cannot race SQLite
-        // or the UI progress model. Raw output may contain absolute paths:
-        // never persist it or print it. Only extract numeric stats.
+        // Poll stderr instead of blocking in availableData when a silent
+        // Rclone process is stalled on SMB. Cancellation is checked every
+        // 100 ms independently of logging, and no remote operation is
+        // acknowledged here: the caller keeps uncertain jobs pending.
+        // Drain stderr on this worker; never expose raw output or credentials.
+        let descriptor = reader.fileDescriptor
+        var reachedEOF = false
+        var cancellationStarted: TimeInterval?
+        var sentKill = false
         while true {
-            let chunk = reader.availableData
-            if chunk.isEmpty { break }
-            if !shouldContinue(), !cancelled {
+            if !shouldContinue() && !cancelled {
                 cancelled = true
+                cancellationStarted = ProcessInfo.processInfo.systemUptime
                 if process.isRunning { process.terminate() }
             }
-            pending.append(chunk)
-            while let index = pending.firstIndex(of: 10) {
-                let line = Data(pending.prefix(upTo: index))
-                pending.removeSubrange(pending.startIndex...index)
-                if let sample = Self.parseStats(line) { lastStats=sample; progress(sample.0, sample.1) }
-                if let event = Self.classifyDiagnostic(line,verbosity:verbosity) {
-                    let key=event.0.rawValue+"|"+event.1
-                    seen[key,default:0]+=1
-                    if seen[key]==1 { diagnostic(event.0,event.1) }
+            // SIGTERM may be ignored by a stalled subprocess. Escalate only
+            // for this dedicated Rclone process, never the protected SMB
+            // rename helper; the worker still reports cancellation, not success.
+            if cancelled && !sentKill && process.isRunning,
+               let started = cancellationStarted,
+               ProcessInfo.processInfo.systemUptime - started >= 2.0 {
+                sentKill = true
+                _ = Darwin.kill(process.processIdentifier, SIGKILL)
+            }
+            var pollFD = pollfd(fd: descriptor,
+                                events: Int16(POLLIN | POLLHUP | POLLERR),
+                                revents: 0)
+            let ready = Darwin.poll(&pollFD, 1, process.isRunning ? 100 : 0)
+            if ready < 0 {
+                if errno == EINTR { continue }
+                // A polling error is not proof that Rclone has stopped.
+                cancelled = true
+                if process.isRunning { process.terminate() }
+                break
+            }
+            if ready > 0 && !reachedEOF &&
+               (pollFD.revents & Int16(POLLIN | POLLHUP | POLLERR)) != 0 {
+                // Only read when poll indicates available data or EOF.
+                let chunk = reader.availableData
+                if chunk.isEmpty {
+                    reachedEOF = true
+                } else {
+                    pending.append(chunk)
+                    while let index = pending.firstIndex(of: 10) {
+                        let line = Data(pending.prefix(upTo: index))
+                        pending.removeSubrange(pending.startIndex...index)
+                        if let sample = Self.parseStats(line) { lastStats=sample; progress(sample.0, sample.1) }
+                        if let event = Self.classifyDiagnostic(line,verbosity:verbosity) {
+                            let key=event.0.rawValue+"|"+event.1
+                            seen[key,default:0]+=1
+                            if seen[key]==1 { diagnostic(event.0,event.1) }
+                        }
+                    }
+                    if pending.count > 262144 { pending.removeAll(keepingCapacity: false) }
                 }
             }
-            if pending.count > 262144 { pending.removeAll(keepingCapacity: false) }
+            if !process.isRunning && (reachedEOF || ready == 0) { break }
+            if reachedEOF && process.isRunning { Thread.sleep(forTimeInterval: 0.05) }
         }
         process.waitUntilExit()
         for (key,count) in seen.sorted(by:{$0.key<$1.key}) where count>1 {
