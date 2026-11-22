@@ -57,6 +57,7 @@ final class MacSyncRuntime: ObservableObject {
     private var auditRevision = 0
     @Published private(set) var rectificationPending = false
     @Published private(set) var preparingRectification = false
+    @Published private(set) var rectificationCancellationRequested = false
     private var suspendedUntilNextLaunch = false
     private var configurationRevision = 0
     private var outages = ConnectionOutageTracker()
@@ -490,6 +491,12 @@ final class MacSyncRuntime: ObservableObject {
         performNameRectification([])
     }
 
+    func cancelNameRectification() {
+        guard preparingRectification || copy.rectifyingNames else { return }
+        rectificationCancellationRequested = true
+        folderEditCancellation?.cancel()
+    }
+
     private func performNameRectification(_ approved: [IncompatibleName]) {
         let pairs = model.configuredPairs()
         // This does NOT authorize automatic copies for the first time.
@@ -497,6 +504,7 @@ final class MacSyncRuntime: ObservableObject {
         let restoreAutomaticCopies = copy.automaticCopiesEnabled && !suspendedUntilNextLaunch
         folderConfigurationBusy=true
         preparingRectification=true
+        rectificationCancellationRequested=false
         let token=SeedVerificationCancellation()
         folderEditCancellation=token
         stopAllOperations()
@@ -510,11 +518,13 @@ final class MacSyncRuntime: ObservableObject {
                 self.preparingRectification=false
                 if self.shuttingDown || token.isCancelled {
                     self.folderConfigurationBusy=false;self.folderEditCancellation=nil
+                    self.rectificationCancellationRequested=false
                     self.finishShutdownIfReady();return
                 }
                 self.copy.rectifyNamesAfterDrain(items:approved,pairs:pairs,token:token) { [weak self] pending in
                     guard let self else { return }
                     self.folderConfigurationBusy=false;self.folderEditCancellation=nil
+                    self.rectificationCancellationRequested=false
                     self.rectificationPending = pending
                     if !self.shuttingDown {
                         self.model.startMonitoring()
