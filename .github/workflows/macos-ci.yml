@@ -68,7 +68,7 @@ jobs:
           MACSYNC_TEST_RCLONE: ${{ runner.temp }}/macsync-rclone/rclone
         run: swift test -Xswiftc -warnings-as-errors
       - name: Synthetic stress test (500000 diagnostic updates, bounded queue)
-        if: github.ref == 'refs/heads/develop-v0.18.15-adaptive-resource-stress'
+        if: github.ref == 'refs/heads/develop-v0.18.15-adaptive-resource-stress' || github.ref == 'refs/heads/release-v0.18.15-prep'
         env:
           MACSYNC_PERF_STRESS: '1'
         run: swift test -Xswiftc -warnings-as-errors --filter InventoryReadTests/testHalfMillionDiagnosticUpdatesStressOptIn
