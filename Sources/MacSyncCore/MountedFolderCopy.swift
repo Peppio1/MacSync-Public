@@ -62,6 +62,18 @@ public struct VolumeFingerprint: Equatable, Codable, Sendable {
         return fingerprint(from: &info)
     }
 
+    /// Read only the mount table; never mount a share or contact the network.
+    /// The exact SMB mount source is used as a strict recovery identifier.
+    public static func mountedVolumes() -> [VolumeFingerprint] {
+        var entries: UnsafeMutablePointer<statfs>?
+        let count = getmntinfo(&entries, Int32(MNT_NOWAIT))
+        guard count > 0, let entries else { return [] }
+        return (0..<Int(count)).map { index in
+            var entry = entries[index]
+            return fingerprint(from: &entry)
+        }
+    }
+
     public static func read(directoryDescriptor: Int32) throws -> VolumeFingerprint {
         var info = statfs()
         guard fstatfs(directoryDescriptor,&info) == 0 else { throw MountedCopyError.rootUnavailable }
