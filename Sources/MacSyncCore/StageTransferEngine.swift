@@ -139,9 +139,15 @@ public enum StageTransferEngine {
             if ready < 0 {
                 if errno == EINTR { continue }
                 // A polling error is not proof that Rclone has stopped.
-                cancelled = true
-                if process.isRunning { process.terminate() }
-                break
+                // Keep rechecking its lifetime rather than blocking forever
+                // in waitUntilExit; the cancellation grace period still applies.
+                if !cancelled {
+                    cancelled = true
+                    cancellationStarted = ProcessInfo.processInfo.systemUptime
+                    if process.isRunning { process.terminate() }
+                }
+                Thread.sleep(forTimeInterval: 0.05)
+                continue
             }
             if ready > 0 && !reachedEOF &&
                (pollFD.revents & Int16(POLLIN | POLLHUP | POLLERR)) != 0 {
