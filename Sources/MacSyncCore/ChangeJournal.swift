@@ -722,7 +722,7 @@ public final class ChangeJournal {
         guard !maps.isEmpty, oldVolume.fileSystem.lowercased() == "smbfs",
               oldVolume.isStrongIdentity,
               !(try hasPendingNameRectification()),
-              Set(maps.map(\\.rootID)).count == maps.count else {
+              Set(maps.map { $0.rootID }).count == maps.count else {
             throw MountedCopyError.volumeChanged
         }
         try execute("BEGIN IMMEDIATE TRANSACTION;")
@@ -756,7 +756,9 @@ public final class ChangeJournal {
                     throw MountedCopyError.volumeChanged
                 }
                 if saved != current {
-                    let encoded = String(decoding:try JSONEncoder().encode(current),as:UTF8.self)
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.sortedKeys]
+                    let encoded = String(decoding:try encoder.encode(current),as:UTF8.self)
                     let update = try prepare("UPDATE directory_bindings SET stamp=? WHERE root_id=? AND role='target' AND stamp=?;")
                     defer { sqlite3_finalize(update) }
                     try bind(encoded,at:1,in:update)
