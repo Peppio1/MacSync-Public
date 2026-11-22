@@ -31,6 +31,9 @@ final class MacSyncRuntime: ObservableObject {
     @Published private(set) var healthCheckedAt: Date?
     private var probingHealth = false
     private var healthRevision = 0
+    private var remountProbeInFlight = false
+    private var lastRemountProbeAt: Date?
+    @Published private(set) var remountRecoveryStatus = ""
 
     @Published private(set) var savingSchedule = false
     @Published private(set) var folderConfigurationBusy = false
@@ -101,6 +104,7 @@ final class MacSyncRuntime: ObservableObject {
             self?.prepareSignedUpdate(release)
         }
         updates.start()
+        DispatchQueue.main.async { [weak self] in self?.recoverExistingFinderSMBMountIfNeeded() }
         if let path = try? copy.historyPath() {
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 let pending = (try? ChangeJournal(path: path).hasPendingNameRectification()) == true
@@ -119,6 +123,7 @@ final class MacSyncRuntime: ObservableObject {
     // reconnect attempts or automatic authorization. Stale results discarded.
     func refreshFolderHealth() {
         guard !previewOnly, !shuttingDown, !folderConfigurationBusy, !probingHealth else { return }
+        recoverExistingFinderSMBMountIfNeeded()
         let plan=model.editableCommonPlan
         let pairs=model.configuredPairs().filter{ !$0.path.isEmpty }
         let rev=healthRevision
@@ -152,6 +157,85 @@ final class MacSyncRuntime: ObservableObject {
                             for (id,action,state) in events where state != .checking {
                                 try? log.record(level:state.isError ? .warning : .info,rootID:id,action:action,message:state.description)
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Recover only an already mounted, uniquely matched SMB share. No
+    /// credential lookup, Finder mount request or silent trust reset occurs.
+    /// The expensive probe and SQLite checks stay off the main actor.
+    private func recoverExistingFinderSMBMountIfNeeded() {
+        guard !previewOnly, !shuttingDown, !folderConfigurationBusy, !remountProbeInFlight,
+              !copy.active, !copy.maintaining, !copy.auditBusy, !copy.seedBusy,
+              !copy.rectifyingNames, !copy.namesBusy, !rectificationPending,
+              !finalShutdownHolding, let plan = model.remountRecoveryPlan,
+              let expected = plan.expected,
+              expected.fileSystem.lowercased() == "smbfs", expected.isStrongIdentity,
+              !plan.parent.isEmpty, !plan.sources.isEmpty else { return }
+        let now = Date()
+        if let previous = lastRemountProbeAt, now.timeIntervalSince(previous) < 20 { return }
+        lastRemountProbeAt = now
+        remountProbeInFlight = true
+        let revision = configurationRevision
+        DispatchQueue.global(qos:.utility).async { [weak self] in
+            // A live but different SMB share at the old path is not a safe
+            // remount candidate. A stale local /Volumes directory is allowed.
+            let old = try? VolumeFingerprint.read(at:URL(fileURLWithPath:plan.parent))
+            let oldIsOtherSMB = old?.fileSystem.lowercased() == "smbfs" && old != expected
+            let candidate: (path:String,volume:VolumeFingerprint)? =
+                DestinationProbe.inspect(path:plan.parent,expectedVolume:expected) != .ready && !oldIsOtherSMB
+                ? SMBRemountLocator.verifiedCandidate(savedPath:plan.parent,expected:expected) : nil
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                guard !self.shuttingDown, self.configurationRevision == revision,
+                      self.model.remountRecoveryPlan == plan,
+                      !self.folderConfigurationBusy, !self.copy.active,
+                      !self.copy.maintaining, !self.copy.auditBusy,
+                      !self.copy.rectifyingNames else {
+                    self.remountProbeInFlight = false
+                    return
+                }
+                guard let candidate, let db = try? self.copy.historyPath() else {
+                    self.remountProbeInFlight = false
+                    return
+                }
+                self.folderConfigurationBusy = true
+                let newParent = candidate.path, volume = candidate.volume
+                DispatchQueue.global(qos:.utility).async { [weak self] in
+                    let verified: Bool
+                    do {
+                        let maps = try plan.sources.map { source in
+                            try MountedFolderMapping(rootID:source.id,
+                                source:URL(fileURLWithPath:source.path),
+                                target:URL(fileURLWithPath:newParent).appendingPathComponent(source.name),
+                                expectedTargetVolume:volume)
+                        }
+                        let journal = try ChangeJournal(path:db)
+                        try journal.rebindVerifiedSMBMount(maps,oldVolume:expected)
+                        verified = true
+                    } catch { verified = false }
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { return }
+                        if verified && self.configurationRevision == revision && !self.shuttingDown &&
+                           self.model.acceptVerifiedSMBRemount(oldParent:plan.parent,
+                                 newParent:newParent,newVolume:volume) {
+                            // A new mount path requires renewed consent to
+                            // mirror/delete; previously allowed copies stay enabled.
+                            self.copy.revokeMirrorAuthorization()
+                            self.destinations.configurationChanged()
+                            self.healthRevision += 1
+                            self.remountRecoveryStatus = "Condivisione Finder ritrovata e verificata. Copie disponibili; eventuali cancellazioni richiedono nuova autorizzazione."
+                        } else if !self.shuttingDown {
+                            self.remountRecoveryStatus = "Condivisione SMB rilevata con un percorso diverso; identità delle cartelle non confermata. Nessuna scrittura autorizzata."
+                        }
+                        self.folderConfigurationBusy = false
+                        self.remountProbeInFlight = false
+                        if !self.shuttingDown {
+                            self.refreshFolderHealth()
+                            self.scheduleNextAutomaticAttempt()
                         }
                     }
                 }
