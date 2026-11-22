@@ -961,6 +961,7 @@ final class MountedCopyController: ObservableObject {
                 var history: SyncCycleHistory?
                 var outcomeState = "suspended"
                 var lastUpdate: TimeInterval = 0
+                let progressMailbox=SyncProgressMailbox()
                 do {
                     let store = try SyncCycleHistory(path:database.path)
                     try store.markInterrupted(exceptSession:sessionID)
@@ -971,10 +972,14 @@ final class MountedCopyController: ObservableObject {
                     let now = ProcessInfo.processInfo.systemUptime
                     guard force || now-lastUpdate >= 0.2 else { return }
                     lastUpdate = now
-                    let snapshot = progress
+                    // One pending main-actor update per cycle. New events
+                    // replace the pending snapshot instead of enqueuing work.
+                    guard progressMailbox.offer(progress) else { return }
                     DispatchQueue.main.async { [weak self] in
-                        guard !cancellation.isCancelled else { return }
-                        self?.liveProgress = snapshot
+                        guard let snapshot=progressMailbox.take(),
+                              let self, self.historySessionID==sessionID,
+                              !cancellation.isCancelled else { return }
+                        self.liveProgress=snapshot
                     }
                 }
                 func observe(_ event: SyncCycleEvent) {
