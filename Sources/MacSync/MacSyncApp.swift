@@ -557,6 +557,10 @@ struct MacSyncConfigurationView: View {
                 case .settings: settingsPage
                 }
             }
+            // Keep the sidebar navigable while a folder edit or coordinated
+            // rename drains workers. Preserve the old safety interlock for
+            // page actions until each control has been audited individually.
+            .disabled(runtime.folderConfigurationBusy)
         }
         .disabled(runtime.shuttingDown)
         .preferredColorScheme(previewScheme ?? (appearance == "light" ? .light : appearance == "dark" ? .dark : nil))
