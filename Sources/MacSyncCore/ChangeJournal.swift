@@ -764,7 +764,7 @@ public final class ChangeJournal {
                     try bind(encoded,at:1,in:update)
                     try bind(map.rootID,at:2,in:update)
                     try bind(String(decoding:data,as:UTF8.self),at:3,in:update)
-                    guard sqlite3_step(update) == SQLITE_DONE, sqlite3_changes(db) == 1 else {
+                    guard sqlite3_step(update) == SQLITE_DONE, sqlite3_changes(connection) == 1 else {
                         throw MountedCopyError.volumeChanged
                     }
                 }
