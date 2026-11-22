@@ -712,6 +712,68 @@ public final class ChangeJournal {
         } catch { try? execute("ROLLBACK;"); throw error }
     }
 
+    /// Startup-only recovery of an already Finder-mounted SMB share whose
+    /// mount path changed. Requires the exact same remote mount source and
+    /// stable directory inode/birth identity for EVERY target. No queue item,
+    /// consent, source binding or file content is modified by this operation.
+    /// A missing/changed binding is ambiguous and must fail closed.
+    public func rebindVerifiedSMBMount(_ maps: [MountedFolderMapping],
+                                       oldVolume: VolumeFingerprint) throws {
+        guard !maps.isEmpty, oldVolume.fileSystem.lowercased() == "smbfs",
+              oldVolume.isStrongIdentity,
+              !(try hasPendingNameRectification()),
+              Set(maps.map(\\.rootID)).count == maps.count else {
+            throw MountedCopyError.volumeChanged
+        }
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            for map in maps {
+                try map.verify()
+                guard try watchedRootPath(rootID:map.rootID) == map.source.path else {
+                    throw MountedCopyError.sourceRootChanged
+                }
+                _ = try verifyLocalSourceBinding(rootID: map.rootID, root: map.source)
+                let current = try DirectoryBinding.read(map.target)
+                guard current.volume.fileSystem.lowercased() == "smbfs",
+                      current.volume.mountSource == oldVolume.mountSource,
+                      current.volume.mountPath != oldVolume.mountPath,
+                      current.volume.isStrongIdentity else { throw MountedCopyError.volumeChanged }
+
+                let query = try prepare("SELECT stamp FROM directory_bindings WHERE root_id=? AND role='target';")
+                defer { sqlite3_finalize(query) }
+                try bind(map.rootID,at:1,in:query)
+                guard sqlite3_step(query) == SQLITE_ROW,
+                      let data = columnText(query,at:0).data(using:.utf8),
+                      let saved = try? JSONDecoder().decode(DirectoryBinding.self,from:data) else {
+                    throw MountedCopyError.volumeChanged
+                }
+                guard saved == current ||
+                      (saved.volume == oldVolume && current.isSameObjectAfterSMBRemount(as:saved)) else {
+                    throw MountedCopyError.volumeChanged
+                }
+                try map.verify()
+                guard try DirectoryBinding.read(map.target) == current else {
+                    throw MountedCopyError.volumeChanged
+                }
+                if saved != current {
+                    let encoded = String(decoding:try JSONEncoder().encode(current),as:UTF8.self)
+                    let update = try prepare("UPDATE directory_bindings SET stamp=? WHERE root_id=? AND role='target' AND stamp=?;")
+                    defer { sqlite3_finalize(update) }
+                    try bind(encoded,at:1,in:update)
+                    try bind(map.rootID,at:2,in:update)
+                    try bind(String(decoding:data,as:UTF8.self),at:3,in:update)
+                    guard sqlite3_step(update) == SQLITE_DONE, sqlite3_changes(db) == 1 else {
+                        throw MountedCopyError.volumeChanged
+                    }
+                }
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
     public func pendingUploadUpperBound() throws -> Int64? {
         let stmt = try prepare("""
             SELECT MAX(id) FROM change_queue WHERE completed=0 AND kind='upsert';
