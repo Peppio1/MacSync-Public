@@ -197,11 +197,15 @@ final class MountedCopyController: ObservableObject {
     @Published private(set) var auditBusy = false
     @Published private(set) var auditProgress: ArchiveAuditProgress?
     @Published private(set) var incompatibleNames:[IncompatibleName]=[] {
-        didSet { sourceNameCount = incompatibleNames.reduce(into: 0) { count, item in
-            if item.side == .source { count += 1 }
-        } }
+        didSet {
+            sourceNameCount = incompatibleNames.reduce(into: 0) { count, item in
+                if item.side == .source { count += 1 }
+            }
+            namesRevision &+= 1
+        }
     }
-    @Published private(set) var sourceNameCount = 0
+    private(set) var sourceNameCount = 0
+    private(set) var namesRevision = 0
     @Published private(set) var namesLoaded = false
     @Published private(set) var namesStatus="Inventario non ancora consultato"
     @Published private(set) var namesBusy=false
