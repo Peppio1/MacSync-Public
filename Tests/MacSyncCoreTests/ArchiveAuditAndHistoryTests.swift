@@ -488,4 +488,24 @@ final class ArchiveAuditAndHistoryTests:XCTestCase {
         XCTAssertTrue(try f.journal.pending().isEmpty)
     }
 
+    func testReadonlyHistoryDoesNotInitializeOrMutateSQLite() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "macsync-history-readonly-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at:base,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:base) }
+        let db = base.appendingPathComponent("history.sqlite").path
+
+        XCTAssertThrowsError(try SyncCycleHistory(path:db,readOnly:true))
+        XCTAssertFalse(FileManager.default.fileExists(atPath:db))
+
+        let writer = try SyncCycleHistory(path:db)
+        try writer.begin(id:"cycle",sessionID:"session",at:Date(),automatic:false)
+        try writer.finish(id:"cycle",at:Date(),seconds:0.1,state:"completed")
+        let reader = try SyncCycleHistory(path:db,readOnly:true)
+        XCTAssertEqual(try reader.cycles(limit:10,finishedOnly:true).map(\.id),["cycle"])
+        XCTAssertThrowsError(try reader.begin(id:"forbidden",sessionID:"session",at:Date()))
+        XCTAssertEqual(try writer.cycles(limit:10).map(\.id),["cycle"])
+    }
+
+
 }
