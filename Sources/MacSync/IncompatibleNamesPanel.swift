@@ -94,9 +94,9 @@ struct IncompatibleNamesPanel:View {
                 }
                     .help("Seleziona tutti i nomi rettificabili dei due lati, anche fuori dalla pagina corrente")
                     .disabled(!current || namePage?.selectableIDs.isEmpty != false || !canSelect)
-                Button("Seleziona visibili") { selected.formUnion(visibleRows.filter{selectable($0)}.map(\.id)) }
-                    .help("Seleziona soltanto gli elementi della pagina visualizzata")
-                    .disabled(!current || !canSelect || !visibleRows.contains(where:{selectable($0)}))
+                Button("Seleziona visibili") { selected.formUnion(namePage?.matchingSelectableIDs ?? []) }
+                    .help("Seleziona tutti i risultati del filtro, anche nelle altre pagine")
+                    .disabled(!current || !canSelect || namePage?.matchingSelectableIDs.isEmpty != false)
                 Button("Deseleziona") { selected.removeAll() }.disabled(selected.isEmpty)
                 Spacer()
                 Button(runtime.rectificationPending ? "Riprendi rettifica" :
@@ -172,7 +172,7 @@ struct IncompatibleNamesPanel:View {
                     }
                 }.frame(maxHeight:.infinity)
                 HStack {
-                    Text("\(namePage.map { pageOffset + 1 } ?? 0)–\(pageOffset + visibleRows.count) di \(namePage?.total ?? 0) risultati")
+                    Text("\(pageOffset + 1)–\(pageOffset + visibleRows.count) di \(namePage?.total ?? 0) risultati")
                         .font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Button("Precedenti") { pageOffset = max(0,pageOffset-200) }
