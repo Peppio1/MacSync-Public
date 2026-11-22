@@ -237,3 +237,30 @@ public enum IncompatibleNameListing {
             selectableIDs: selectableIDs)
     }
 }
+
+
+/// Preserves bilateral selection semantics without traversing the full list
+/// inside a SwiftUI view update. Only already selectable rows are included.
+public enum IncompatibleNameSelection {
+    public static func resolve(items: [IncompatibleName], selectedIDs: Set<String>,
+                               shouldContinue: () -> Bool = { true }) -> [IncompatibleName]? {
+        guard !selectedIDs.isEmpty else { return [] }
+        var selectedPaths: Set<String> = []
+        for (index, item) in items.enumerated() {
+            if index % 128 == 0 && !shouldContinue() { return nil }
+            if selectedIDs.contains(item.id), NameRectification.proposedName(item.name) != nil {
+                selectedPaths.insert(item.rootID + "\0" + item.relativePath)
+            }
+        }
+        guard !selectedPaths.isEmpty else { return [] }
+        var result: [IncompatibleName] = []
+        for (index, item) in items.enumerated() {
+            if index % 128 == 0 && !shouldContinue() { return nil }
+            if selectedPaths.contains(item.rootID + "\0" + item.relativePath),
+               NameRectification.proposedName(item.name) != nil {
+                result.append(item)
+            }
+        }
+        return shouldContinue() ? result : nil
+    }
+}
