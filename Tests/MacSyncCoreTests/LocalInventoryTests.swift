@@ -299,4 +299,23 @@ final class LocalInventoryTests: XCTestCase {
         XCTAssertThrowsError(try inventory.reconcile(rootID: "photos", root: root, subtree: foreign))
         XCTAssertEqual(try inventory.itemCount(rootID: "photos"), 0)
     }
+    func testReadOnlyJournalDoesNotCreateDatabaseOrChangeQueuedJobs() throws {
+        let base=FileManager.default.temporaryDirectory.appendingPathComponent(
+            "macsync-journal-reader-"+UUID().uuidString)
+        try FileManager.default.createDirectory(at:base,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:base) }
+        let db=base.appendingPathComponent("read-lane.sqlite").path
+
+        XCTAssertThrowsError(try ChangeJournal(path:db,readOnly:true))
+        XCTAssertFalse(FileManager.default.fileExists(atPath:db))
+        let writer=try ChangeJournal(path:db)
+        try writer.enqueue(rootID:"test",relativePath:"photo.jpg",kind:.upsert)
+        let reader=try ChangeJournal(path:db,readOnly:true)
+        XCTAssertEqual(try reader.pending().count,1)
+        XCTAssertThrowsError(try reader.enqueue(rootID:"test",relativePath:"other.jpg",kind:.upsert))
+        XCTAssertEqual(try writer.pending().count,1)
+        XCTAssertEqual(try reader.pending().count,1)
+    }
+
+
 }
