@@ -108,4 +108,51 @@ final class AutomaticCopyReadinessTests: XCTestCase {
         )
         XCTAssertFalse(old.isStrongIdentity)
     }
+
+    func testUniqueFinderSMBRemountResolvesNewMountPathWithoutGuessingShare() {
+        let original = VolumeFingerprint(fileSystem:"smbfs",mountPath:"/Volumes/Archivio",
+            mountSource:"//user@server/Condivisione")
+        let restored = VolumeFingerprint(fileSystem:"smbfs",mountPath:"/Volumes/Archivio-1",
+            mountSource:"//user@server/Condivisione")
+        XCTAssertEqual(SMBRemountLocator.candidatePath(
+            savedPath:"/Volumes/Archivio/Foto/Da_editare",
+            expected:original,mounted:[restored]),
+            "/Volumes/Archivio-1/Foto/Da_editare")
+        XCTAssertNil(SMBRemountLocator.candidatePath(
+            savedPath:"/Volumes/Archivio/Foto",
+            expected:original,mounted:[restored,restored]))
+        XCTAssertNil(SMBRemountLocator.candidatePath(
+            savedPath:"/Volumes/Archivio/Foto",
+            expected:original,mounted:[
+                VolumeFingerprint(fileSystem:"smbfs",mountPath:"/Volumes/Archivio-1",
+                    mountSource:"//other@server/Condivisione")]))
+        XCTAssertNil(SMBRemountLocator.candidatePath(
+            savedPath:"/Volumes/Archivio/Foto",
+            expected:VolumeFingerprint(fileSystem:"smbfs",mountPath:"/Volumes/Archivio"),
+            mounted:[restored]))
+        XCTAssertNil(SMBRemountLocator.candidatePath(
+            savedPath:"/Volumes/Altro/Foto",
+            expected:original,mounted:[restored]))
+    }
+
+    func testFinderRemountStillRequiresExactStableDirectoryIdentity() {
+        let old = DirectoryBinding(
+            volume:VolumeFingerprint(fileSystem:"smbfs",mountPath:"/Volumes/Archivio",
+                mountSource:"//user@server/Condivisione"),
+            inode:1234,birthSeconds:5678,birthNanos:42)
+        let same = DirectoryBinding(
+            volume:VolumeFingerprint(fileSystem:"smbfs",mountPath:"/Volumes/Archivio-1",
+                mountSource:"//user@server/Condivisione"),
+            inode:1234,birthSeconds:5678,birthNanos:42)
+        XCTAssertTrue(same.isSameObjectAfterSMBRemount(as:old))
+        let replaced = DirectoryBinding(volume:same.volume,
+            inode:9999,birthSeconds:5678,birthNanos:42)
+        XCTAssertFalse(replaced.isSameObjectAfterSMBRemount(as:old))
+        let differentAccount = DirectoryBinding(
+            volume:VolumeFingerprint(fileSystem:"smbfs",mountPath:"/Volumes/Archivio-1",
+                mountSource:"//other@server/Condivisione"),
+            inode:1234,birthSeconds:5678,birthNanos:42)
+        XCTAssertFalse(differentAccount.isSameObjectAfterSMBRemount(as:old))
+    }
+
 }

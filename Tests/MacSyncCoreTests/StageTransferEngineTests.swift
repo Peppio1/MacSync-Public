@@ -144,4 +144,64 @@ final class StageTransferEngineTests: XCTestCase {
         XCTAssertThrowsError(try engine.pathOperation("purge",url:base,shouldContinue:{true}))
         XCTAssertTrue(fm.fileExists(atPath:base.path))
     }
+    /// A fake subprocess that does not emit stderr: the old blocking reader
+    /// could not notice a cancellation until the process eventually exited.
+    func testCancelSilentRcloneSubprocessWithoutWaitingForOutput() throws {
+        let base=FileManager.default.temporaryDirectory
+            .appendingPathComponent("macsync-rclone-cancel-"+UUID().uuidString)
+        try FileManager.default.createDirectory(at:base,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:base) }
+        let helper=base.appendingPathComponent("silent-helper.sh")
+        try "#!/bin/sh\nexec /bin/sleep 12\n".write(to:helper,atomically:true,encoding:.utf8)
+        try FileManager.default.setAttributes([.posixPermissions:0o700],ofItemAtPath:helper.path)
+        let token=SeedVerificationCancellation()
+        DispatchQueue.global(qos:.userInitiated).asyncAfter(deadline:.now()+0.2) {
+            token.cancel()
+        }
+        let begin=ProcessInfo.processInfo.systemUptime
+        do {
+            try StageTransferEngine.rcloneDirect(helper).pathOperation("mkdir",url:base,
+                shouldContinue:{ !token.isCancelled })
+            XCTFail("A silent cancelled subprocess must not be reported as successful")
+        } catch SeedVerificationError.cancelled {
+            let elapsed=ProcessInfo.processInfo.systemUptime-begin
+            XCTAssertLessThan(elapsed,3.0,"Cancellation should not wait for the 12-second helper")
+        }
+    }
+
+    func testSilentSuccessfulRcloneSubprocessExitsNormally() throws {
+        let base=FileManager.default.temporaryDirectory
+            .appendingPathComponent("macsync-rclone-silent-"+UUID().uuidString)
+        try FileManager.default.createDirectory(at:base,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:base) }
+        let helper=base.appendingPathComponent("silent-helper.sh")
+        try "#!/bin/sh\nexec /bin/sleep 0.1\n".write(to:helper,atomically:true,encoding:.utf8)
+        try FileManager.default.setAttributes([.posixPermissions:0o700],ofItemAtPath:helper.path)
+        try StageTransferEngine.rcloneDirect(helper).pathOperation("mkdir",url:base,
+            shouldContinue:{ true })
+    }
+
+
+    func testCancelStubbornSilentRcloneSubprocessHasBoundedShutdown() throws {
+        let base=FileManager.default.temporaryDirectory
+            .appendingPathComponent("macsync-rclone-stubborn-"+UUID().uuidString)
+        try FileManager.default.createDirectory(at:base,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:base) }
+        let helper=base.appendingPathComponent("stubborn-helper.sh")
+        try "#!/bin/sh\ntrap '' TERM\nexec /bin/sleep 12\n".write(
+            to:helper,atomically:true,encoding:.utf8)
+        try FileManager.default.setAttributes([.posixPermissions:0o700],ofItemAtPath:helper.path)
+        let token=SeedVerificationCancellation()
+        DispatchQueue.global(qos:.userInitiated).asyncAfter(deadline:.now()+0.2) { token.cancel() }
+        let started=ProcessInfo.processInfo.systemUptime
+        do {
+            try StageTransferEngine.rcloneDirect(helper).pathOperation("mkdir",url:base,
+                shouldContinue:{ !token.isCancelled })
+            XCTFail("Ignored termination must not be reported as success")
+        } catch SeedVerificationError.cancelled {
+            XCTAssertLessThan(ProcessInfo.processInfo.systemUptime-started,5.0)
+        }
+    }
+
+
 }

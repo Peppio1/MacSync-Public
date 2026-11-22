@@ -28,13 +28,31 @@ public struct TrackedItem: Equatable, Sendable {
     public let size: Int64
     public let modifiedAt: Double
     public let changeStamp: String?
+    /// Exact no-follow stat acquired during this scan, never a durable proof.
+    /// Used only to avoid duplicating SMB calls in a quick archive audit;
+    /// queue acknowledgements still require a live revalidation.
+    public let verificationFingerprint: SeedFileFingerprint?
 
-    public init(relativePath: String, kind: String, size: Int64, modifiedAt: Double, changeStamp: String? = nil) {
+    public init(relativePath: String, kind: String, size: Int64, modifiedAt: Double, changeStamp: String? = nil,
+                verificationFingerprint: SeedFileFingerprint? = nil) {
         self.relativePath = relativePath
         self.kind = kind
         self.size = size
         self.modifiedAt = modifiedAt
         self.changeStamp = changeStamp
+        self.verificationFingerprint = verificationFingerprint
+    }
+
+    /// Preserve the persisted inventory comparison semantics. The live
+    /// fingerprint is an ephemeral audit snapshot, not a change-detection
+    /// field: SQLite does not persist it and a second ordinary scan must
+    /// not enqueue unchanged files or directories.
+    public static func == (lhs: TrackedItem, rhs: TrackedItem) -> Bool {
+        lhs.relativePath == rhs.relativePath &&
+        lhs.kind == rhs.kind &&
+        lhs.size == rhs.size &&
+        lhs.modifiedAt == rhs.modifiedAt &&
+        lhs.changeStamp == rhs.changeStamp
     }
 }
 
@@ -115,6 +133,7 @@ public enum LocalScanner {
             let size: Int64
             let modified: Double
             var changeStamp: String?
+            var verificationFingerprint: SeedFileFingerprint?
             if preferPOSIXMetadata {
                 // Remote read-only inventory: gather type, size, timestamps
                 // and identity in ONE no-follow syscall instead of retrieving
@@ -131,6 +150,9 @@ public enum LocalScanner {
                 }
                 size = Int64(actual.st_size)
                 modified = Double(actual.st_mtimespec.tv_sec) + Double(actual.st_mtimespec.tv_nsec)/1_000_000_000
+                if kind == "file" || kind == "directory" {
+                    verificationFingerprint = SeedFileFingerprint(fileStat: actual)
+                }
                 if kind == "file" {
                     changeStamp = "\(actual.st_ino):\(actual.st_ctimespec.tv_sec):\(actual.st_ctimespec.tv_nsec)"
                 }
@@ -154,6 +176,16 @@ public enum LocalScanner {
                         throw JournalError.database("File changed during inventory scan")
                     }
                     changeStamp = "\(actual.st_ino):\(actual.st_ctimespec.tv_sec):\(actual.st_ctimespec.tv_nsec)"
+                    verificationFingerprint = SeedFileFingerprint(fileStat: actual)
+                } else if kind == "directory" {
+                    // This additional stat is local, not SMB. It avoids remote
+                    // directory re-reads when the audit later recognizes it.
+                    var actual = stat()
+                    guard file.path.withCString({ lstat($0,&actual) }) == 0,
+                          actual.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
+                        throw JournalError.database("Directory changed during inventory scan")
+                    }
+                    verificationFingerprint = SeedFileFingerprint(fileStat: actual)
                 }
             }
             let prefix = root.path + "/"
@@ -173,7 +205,8 @@ public enum LocalScanner {
             let relative = String(effectivePath.dropFirst(prefix.count))
             let item = TrackedItem(
                 relativePath: relative, kind: kind, size: size,
-                modifiedAt: modified, changeStamp: changeStamp
+                modifiedAt: modified, changeStamp: changeStamp,
+                verificationFingerprint: verificationFingerprint
             )
             found.append(item)
             onItem(item)

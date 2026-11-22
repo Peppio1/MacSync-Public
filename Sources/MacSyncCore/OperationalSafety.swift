@@ -24,6 +24,18 @@ public struct DirectoryBinding: Codable, Equatable, Sendable {
             birthNanos:Int64(s.st_birthtimespec.tv_nsec))
     }
 
+    /// A directory observed after a Finder SMB remount. Never used as a
+    /// substitute for the strict per-cycle volume and directory checks.
+    func isSameObjectAfterSMBRemount(as old: DirectoryBinding) -> Bool {
+        volume.fileSystem.lowercased() == "smbfs" &&
+        old.volume.fileSystem.lowercased() == "smbfs" &&
+        volume.isStrongIdentity && old.volume.isStrongIdentity &&
+        volume.mountSource == old.volume.mountSource &&
+        volume.mountPath != old.volume.mountPath &&
+        inode == old.inode && birthSeconds == old.birthSeconds &&
+        birthNanos == old.birthNanos
+    }
+
     static func encoded(_ url: URL) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -489,14 +501,33 @@ public final class AnchoredDirectory {
         }
         try remove(name,matching:current,shouldContinue:shouldContinue)
     }
-    func checkRectification(old: String, new: String, matching original: stat) throws {
+    /// During read-only batch preflight reuse bounded, identity-stamped
+    /// sibling listings; a cached match is NEVER authorization to mutate.
+    /// rectifyName() and the SMB path still perform fresh collision checks
+    /// immediately before the operation and keep exclusive publication.
+    func checkRectification(old: String, new: String, matching original: stat,
+                            preflightCache: AuditDirectoryListingCache? = nil) throws {
         guard WindowsPathSafety.validComponent(new),
               old != ".",old != "..",!old.contains("/"),!old.contains("\0"),!old.isEmpty,
               !WindowsPathSafety.validComponent(old) else { throw MountedCopyError.unsafeFile }
         try verify()
-        let names=try FileManager.default.contentsOfDirectory(atPath:url.path)
-        guard names.contains(where:{Array($0.utf8)==Array(old.utf8)}),
-              !names.contains(where:{Array($0.utf8) != Array(old.utf8) && WindowsPathSafety.comparisonFold($0)==WindowsPathSafety.comparisonFold(new)}) else {
+        let oldCandidates: [String]
+        let newCandidates: [String]
+        if let preflightCache {
+            // The cache rechecks directory device, inode and timestamps on
+            // each lookup, and discards uncertain or changed snapshots.
+            oldCandidates = try preflightCache.aliases(for: old, in: url)
+            newCandidates = try preflightCache.aliases(for: new, in: url)
+        } else {
+            let names = try FileManager.default.contentsOfDirectory(atPath: url.path)
+            oldCandidates = names
+            newCandidates = names
+        }
+        guard oldCandidates.contains(where: { $0.utf8.elementsEqual(old.utf8) }),
+              !newCandidates.contains(where: {
+                  !$0.utf8.elementsEqual(old.utf8) &&
+                  WindowsPathSafety.comparisonFold($0) == WindowsPathSafety.comparisonFold(new)
+              }) else {
             throw MountedCopyError.destinationConflict
         }
         guard Self.sameFile(try leaf(old),original),

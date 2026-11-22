@@ -54,4 +54,26 @@ final class TechnicalLogTests:XCTestCase {
         XCTAssertTrue(TechnicalFallbackLog.recent(databasePath:path).contains("database is locked"))
         XCTAssertFalse(TechnicalFallbackLog.recent(databasePath:path,limit:1).contains("cycle_start"))
     }
+
+    func testReadonlyExportWorksWhileWriterConnectionIsOpen() throws {
+        let base=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:base,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:base) }
+        let path=base.appendingPathComponent("activity.sqlite").path
+        let writer=try SyncActivityLog(path:path)
+        try writer.record(level:.info,rootID:"test",action:"created",
+            relativePath:"photo?.jpg",message:"new\tfile")
+        try writer.record(level:.error,rootID:"test",action:"failed",
+            relativePath:"bad?.jpg",message:"access denied")
+        let reader=try SyncActivityLog(path:path,readOnly:true)
+        let result=try reader.exportText(limit:5000,level:.error)
+        XCTAssertTrue(result.contains("timestamp\tlevel\troot\taction"))
+        XCTAssertTrue(result.contains("bad?.jpg"))
+        XCTAssertFalse(result.contains("photo?.jpg"))
+        XCTAssertFalse(result.contains("new\tfile"))
+        let destination=base.appendingPathComponent("export.tsv")
+        try result.write(to:destination,atomically:true,encoding:.utf8)
+        XCTAssertEqual(try String(contentsOf:destination,encoding:.utf8),result)
+    }
+
 }

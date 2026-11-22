@@ -41,7 +41,7 @@ final class MountedCopyController: ObservableObject {
         lastRecordedCycle = cycle
         recentEntries = entries
         previewStatus = "Confronto iniziale non eseguito"
-        auditSettings.enabled = false; auditSettings.repair = false; auditSettings.mode = .deep
+        auditSettings.enabled = false; auditSettings.repair = false; auditSettings.mode = .intelligent
         if page == .names {
             incompatibleNames=[
                 IncompatibleName(rootID:"demo",rootPath:"/Example/Archivio",relativePath:"Categoria/Cartella A ",objectKind:"directory",side:.source,reason:"Spazio finale",affectedDescendants:9),
@@ -185,12 +185,9 @@ final class MountedCopyController: ObservableObject {
     @Published var seedTotalJobs = 0
     @Published var seedStartedAt: Date?
     @Published var seedCurrentPath = ""
-    @Published var auditSettings: ArchiveAuditSettings = {
-        guard let data = UserDefaults.standard.data(forKey:"MacSync.archiveAuditSettings"),
-              let value = try? JSONDecoder().decode(ArchiveAuditSettings.self,from:data),
-              value.next(after:Date()) != nil else { return ArchiveAuditSettings() }
-        return value
-    }() {
+    @Published var auditSettings: ArchiveAuditSettings = ArchiveAuditSettings.loadMigratingLegacyDeep(
+        from: .standard, key: "MacSync.archiveAuditSettings"
+    ) {
         didSet {
             if !previewOnly, let data = try? JSONEncoder().encode(auditSettings) {
                 UserDefaults.standard.set(data,forKey:"MacSync.archiveAuditSettings")
@@ -199,14 +196,23 @@ final class MountedCopyController: ObservableObject {
     }
     @Published private(set) var auditBusy = false
     @Published private(set) var auditProgress: ArchiveAuditProgress?
-    @Published private(set) var incompatibleNames:[IncompatibleName]=[]
+    @Published private(set) var incompatibleNames:[IncompatibleName]=[] {
+        didSet {
+            sourceNameCount = incompatibleNames.reduce(into: 0) { count, item in
+                if item.side == .source { count += 1 }
+            }
+            namesRevision &+= 1
+        }
+    }
+    private(set) var sourceNameCount = 0
+    private(set) var namesRevision = 0
+    @Published private(set) var namesLoaded = false
     @Published private(set) var namesStatus="Inventario non ancora consultato"
     @Published private(set) var namesBusy=false
     @Published private(set) var nameScanStarted: Date?
     @Published private(set) var rectificationStatus=""
     @Published private(set) var rectificationProgress: (checked: Int, total: Int)?
     @Published private(set) var rectifyingNames=false
-    var sourceNameCount: Int { incompatibleNames.lazy.filter { $0.side == .source }.count }
     var scanningNames: Bool { namesCancellation != nil }
 
     func rectifyNamesAfterDrain(items:[IncompatibleName],
@@ -242,12 +248,17 @@ final class MountedCopyController: ObservableObject {
                         lastProgress = now
                         DispatchQueue.main.async { [weak self] in self?.rectificationProgress = (checked, total) }
                     }, shouldContinue:{!token.isCancelled})
+                let sides = try NameRectification.pendingSideSummary(journal: journal)
                 pending = try journal.hasPendingNameRectification()
+                let localPending = sides.sourcePending
+                let remotePending = sides.destinationPending
+                let localCompleted = pending ? sides.sourceCompleted : result.sourceRenamed
+                let remoteCompleted = pending ? sides.destinationCompleted : result.destinationRenamed
                 try? log.record(level: pending ? .warning : .info, rootID: "app",
                     action: pending ? "name_rectification_waiting" : "name_rectification_finish",
                     durationSeconds: ProcessInfo.processInfo.systemUptime - started, message: "Esito del lotto")
                 resolved=result.resolvedIDs
-                status="\(result.renamed) rettificati · \(result.skipped) da correggere manualmente · \(result.failed) non verificati"
+                status="iMac: \(localCompleted) rinominati, \(localPending) pendenti · SMB: \(remoteCompleted) rinominati, \(remotePending) pendenti · \(result.skipped) conflitti · \(result.failed) non verificati"
                 if result.cancelled { status+=" · interrotto" }
                 if let reason = result.firstFailure { status += "\n" + reason }
             } catch { status="Rettifica interrotta: "+SyncDiagnostic.describe(error)+"; controllare il registro" }
@@ -255,7 +266,7 @@ final class MountedCopyController: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { completion(needsRetry);return }
                 self.incompatibleNames.removeAll{completedIDs.contains($0.id)}
-                self.rectificationStatus=finalStatus + (needsRetry ? " · Rettifica in attesa di verifica" : " · Copie e cancellazioni sospese")
+                self.rectificationStatus=finalStatus + (needsRetry ? " · Percorsi pendenti protetti; le copie indipendenti possono procedere" : " · Verificare i nomi eventualmente irrisolti")
                 self.rectifyingNames=false
                 self.rectificationProgress=nil
                 self.refresh()
@@ -294,7 +305,9 @@ final class MountedCopyController: ObservableObject {
             var examined = 0
             do {
                 let db = try Self.databaseURL().path
-                let journal = try ChangeJournal(path: db)
+                // Cached name-list refresh must not run schema migration/DDL
+                // while a transfer or archive audit is writing to SQLite.
+                let journal = try ChangeJournal(path: db, readOnly: !scan)
                 let log = scan ? try? SyncActivityLog(path: db) : nil
                 log?.cycleID = UUID().uuidString
                 try? log?.record(level: .info, rootID: "app", action: "name_scan_start", message: "Scansione dei nomi avviata")
@@ -323,7 +336,7 @@ final class MountedCopyController: ObservableObject {
                                     onUpdate: { (updates: [Update]) in
                                         guard let newest = updates.last else { return }
                                         let now = ProcessInfo.processInfo.systemUptime
-                                        guard newest.path.isEmpty || now - lastPosted >= 0.8 else { return }
+                                        guard newest.path.isEmpty || now - lastPosted >= AdaptiveResourceProfile.sample().nameStatusInterval else { return }
                                         lastPosted = now
                                         let detail = newest.path.isEmpty ? "Analisi dei nomi…" : newest.path
                                         show(phase + " · \(newest.count) elementi letti · " + detail)
@@ -366,6 +379,7 @@ final class MountedCopyController: ObservableObject {
                 self.namesCancellation = nil
                 self.nameScanStarted = nil
                 self.incompatibleNames = rows
+                self.namesLoaded = true
                 if cancellation.isCancelled {
                     self.namesStatus = "Scansione annullata · risultati completati o precedenti"
                 } else if let lastWarning {
@@ -419,6 +433,9 @@ final class MountedCopyController: ObservableObject {
         }
         if queueRebuildRequired && !interactive { noteAuditSkipped("avvia manualmente la verifica dopo lo svuotamento"); return }
         var effectiveSettings = auditSettings
+        // Defensive gate for programmatic callers or legacy in-memory values:
+        // the UI/scheduler must never launch internal DEEP.
+        if effectiveSettings.migrateLegacyDeepSelection() { auditSettings = effectiveSettings }
         if queueRebuildRequired && effectiveSettings.mode == .quick { effectiveSettings.mode = .intelligent }
         let settings = effectiveSettings
         guard !active && liveProgress == nil && !interruptionRequested else { auditStatus = "Sospendi le copie prima del riconoscimento"; return }
@@ -430,10 +447,9 @@ final class MountedCopyController: ObservableObject {
         if interactive {
             let alert = NSAlert()
             alert.messageText = "Avviare verifica archivio?"
-            alert.informativeText = (settings.mode == .deep
-                ? "La verifica SHA-256 legge integralmente i file confrontabili, anche via VPN. "
-                : settings.mode == .intelligent ? "Metadati e SHA-256 per file di uguale dimensione con date differenti. "
-                : "La verifica rapida confronta percorso, dimensione e data; non garantisce identità del contenuto. ")
+            alert.informativeText = (settings.mode == .intelligent
+                ? "Confronta percorsi, dimensioni e date (tolleranza 2 secondi); utilizza SHA-256 selettivo sui file dubbi. "
+                : "La verifica rapida confronta percorsi, dimensioni e date (tolleranza 2 secondi), senza leggere il contenuto. ")
                 + "I file corrispondenti saranno riconosciuti e le differenze sicure accodate automaticamente dopo un backup del database. Nessuna scrittura sulle destinazioni."
                 + " Nessun file presente soltanto sul server verrà cancellato."
             alert.addButton(withTitle:"Avvia verifica"); alert.addButton(withTitle:"Annulla")
@@ -510,15 +526,25 @@ final class MountedCopyController: ObservableObject {
                 recognitionProgress.currentPath = ""
                 diagnostic(recognitionProgress); progress(recognitionProgress)
                 var recognizedFiles = 0, recognizedDirectories = 0
-                let acknowledged = try local.approve(report:recognition,cancellation:cancel,progress:{ processed,total in
-                    recognitionProgress.compared = processed
-                    recognitionProgress.total = total
-                    diagnostic(recognitionProgress); progress(recognitionProgress)
-                },onCommit:{
-                    recognitionProgress.phase = "Finalizzazione database"
-                    recognitionProgress.comparisonStarted = nil
-                    diagnostic(recognitionProgress); progress(recognitionProgress)
-                },onCounts:{ files,directories in recognizedFiles = files; recognizedDirectories = directories })
+                let approvalStarted = ProcessInfo.processInfo.systemUptime
+                let acknowledged: Int
+                do {
+                    // Record this phase even when approval is cancelled or fails.
+                    defer {
+                        try? auditLog?.record(level:.info,rootID:"app",action:"metric_audit_recognition",
+                                              durationSeconds:ProcessInfo.processInfo.systemUptime-approvalStarted,
+                                              message:"Durata riconoscimento automatico")
+                    }
+                    acknowledged = try local.approve(report:recognition,cancellation:cancel,progress:{ processed,total in
+                        recognitionProgress.compared = processed
+                        recognitionProgress.total = total
+                        diagnostic(recognitionProgress); progress(recognitionProgress)
+                    },onCommit:{
+                        recognitionProgress.phase = "Finalizzazione database"
+                        recognitionProgress.comparisonStarted = nil
+                        diagnostic(recognitionProgress); progress(recognitionProgress)
+                    },onCounts:{ files,directories in recognizedFiles = files; recognizedDirectories = directories })
+                }
                 report.recognizedFiles = recognizedFiles
                 report.recognizedDirectories = recognizedDirectories
                 if let rebuildToken {
@@ -824,6 +850,15 @@ final class MountedCopyController: ObservableObject {
         if !enabled && automaticSession { stop() }
     }
 
+    /// Reinstates an opt-in captured BEFORE a name-maintenance drain. This
+    /// must never be called for a new automatic enablement: the regular
+    /// setAutomaticCopiesEnabled(true) requires the operator's alert.
+    /// Mirror authorization stays revoked until explicitly renewed.
+    func restorePreviouslyAuthorizedAutomaticCopies() {
+        guard !previewOnly, !active, !rectifyingNames else { return }
+        automaticCopiesEnabled = true
+    }
+
     /// Called solely by the app-level coordinator after explicit opt-in.
     /// Mirror work is allowed only with a validated persisted authorization.
     func startAutomaticSafeCopies(
@@ -926,6 +961,10 @@ final class MountedCopyController: ObservableObject {
                 var history: SyncCycleHistory?
                 var outcomeState = "suspended"
                 var lastUpdate: TimeInterval = 0
+                var profile = AdaptiveResourceProfile.sample()
+                var lastProfileSample = ProcessInfo.processInfo.systemUptime
+                let progressCadence = AdaptiveProgressCadence()
+                let progressMailbox=SyncProgressMailbox()
                 do {
                     let store = try SyncCycleHistory(path:database.path)
                     try store.markInterrupted(exceptSession:sessionID)
@@ -934,12 +973,24 @@ final class MountedCopyController: ObservableObject {
                 } catch { historyError = "Storico non disponibile: " + error.localizedDescription }
                 func publish(force: Bool = false) {
                     let now = ProcessInfo.processInfo.systemUptime
-                    guard force || now-lastUpdate >= 0.2 else { return }
+                    // Refresh the power/thermal profile infrequently. Long
+                    // transfers remain full speed; only UI traffic adapts.
+                    if now - lastProfileSample >= 5 {
+                        profile = AdaptiveResourceProfile.sample()
+                        lastProfileSample = now
+                    }
+                    guard force || now-lastUpdate >= progressCadence.interval(profile: profile) else { return }
                     lastUpdate = now
-                    let snapshot = progress
+                    // One pending main-actor update per cycle. New events
+                    // replace the pending snapshot instead of enqueuing work.
+                    guard progressMailbox.offer(progress) else { return }
                     DispatchQueue.main.async { [weak self] in
-                        guard !cancellation.isCancelled else { return }
-                        self?.liveProgress = snapshot
+                        guard let snapshot=progressMailbox.take(),
+                              let self, self.historySessionID==sessionID,
+                              !cancellation.isCancelled else { return }
+                        progressCadence.observeDeliveryDelay(
+                            ProcessInfo.processInfo.systemUptime - now)
+                        self.liveProgress=snapshot
                     }
                 }
                 func observe(_ event: SyncCycleEvent) {
@@ -965,6 +1016,9 @@ final class MountedCopyController: ObservableObject {
                     worker?.onTransferProgress = nil
                     mirrorWorker?.onEvent = nil
                     mirrorWorker?.onJobStarted = nil
+                    // Cycle-level diagnostics must not inherit the last
+                    // file's job identity in the activity log.
+                    log.currentJob=nil
                     if cancellation.endCycle() { outcomeState = "interrupted"
                         try? log.record(level: .info, rootID: "app", action: "cycle", message: "Ciclo interrotto su richiesta; operazioni in coda preservate")
                     }
@@ -976,10 +1030,16 @@ final class MountedCopyController: ObservableObject {
                     } catch { historyError = "Storico incompleto: " + error.localizedDescription }
                     let saved = (try? history?.cycles(limit:1,finishedOnly:true).first) ?? nil
                     let finalStats = totals.stats
+                    let maxUIDeliveryDelay = progressCadence.maximumDeliveryDelay
+                    if maxUIDeliveryDelay >= 0.15 {
+                        try? log.record(level:.info,rootID:"app",
+                            action:"metric_progress_delivery_delay",
+                            durationSeconds:maxUIDeliveryDelay,
+                            message:"Massima attesa nella consegna del progresso UI")
+                    }
                     let warning = historyError
                     let finalOutcome = outcomeState
                     TechnicalFallbackLog.record(databasePath:database.path,cycleID:cycleID,action:"cycle_end",message:finalOutcome)
-                    log.currentJob=nil
                     log.cycleID=nil
                     if !automatic { timer.cancel() }
                     DispatchQueue.main.async { [weak self] in
@@ -1522,6 +1582,7 @@ final class MountedCopyController: ObservableObject {
     func cancelMaintenance() {
         guard maintaining, !auditBusy else { return }
         maintenanceCancel?.cancel()
+        maintenanceStatus = "Annullamento richiesto… attendo il punto sicuro."
     }
 
     func inspectStaging(sources: [(
@@ -1775,6 +1836,7 @@ final class MountedCopyController: ObservableObject {
     private let logReadQueue=DispatchQueue(label:"macsync.activity.reader",qos:.utility)
     private var logReadBusy=false
     @Published private(set) var logReadWarning=""
+    @Published private(set) var exportingLog=false
     func refresh() {
         guard !previewOnly,!logReadBusy else { return }
         logReadBusy=true
@@ -1800,20 +1862,31 @@ final class MountedCopyController: ObservableObject {
     }
 
     func exportLog() {
-        do {
-            let text = try SyncActivityLog(path: Self.databaseURL().path)
-                .exportText(
-                    limit: 5000, level: SyncLogLevel(rawValue: logLevel),
-                    search: logSearch
-                )
-            let panel = NSSavePanel()
-            panel.nameFieldStringValue = "MacSync_sync_log.tsv"
-            panel.title = "Esporta registro sincronizzazioni"
-            guard panel.runModal() == .OK, let url = panel.url else { return }
-            try text.write(to: url, atomically: true, encoding: .utf8)
-            status = "Registro esportato (controlla i nomi dei file prima di condividerlo)"
-        } catch {
-            status = "Esportazione fallita: " + error.localizedDescription
+        guard !exportingLog else { return }
+        // The save dialog is interactive, but SQLite reads and file writes
+        // must never occupy the main actor, especially while a scan runs.
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "MacSync_sync_log.tsv"
+        panel.title = "Esporta registro sincronizzazioni"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        exportingLog = true
+        let level = SyncLogLevel(rawValue:logLevel), search = logSearch
+        DispatchQueue.global(qos:.utility).async { [weak self] in
+            let result: String
+            do {
+                let path = try Self.databaseURL().path
+                let text = try SyncActivityLog(path:path,readOnly:true)
+                    .exportText(limit:5000,level:level,search:search)
+                try text.write(to:url,atomically:true,encoding:.utf8)
+                result = "Registro esportato (controlla i nomi dei file prima di condividerlo)"
+            } catch {
+                result = "Esportazione fallita: " + error.localizedDescription
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.exportingLog = false
+                self.status = result
+            }
         }
     }
 }

@@ -103,6 +103,30 @@ final class MacSyncViewModel: ObservableObject {
         ]
     }
 
+    /// Existing persisted common-root configuration only. Automatic recovery
+    /// is deliberately unavailable for ambiguous legacy folder pairs.
+    var remountRecoveryPlan: CommonFolderPlan? { commonPlan }
+
+    /// Adopt a different Finder mount point only after the core has matched
+    /// the immutable directory identities and atomically rebound SQLite.
+    @discardableResult
+    func acceptVerifiedSMBRemount(oldParent: String, newParent: String,
+                                  newVolume: VolumeFingerprint) -> Bool {
+        guard var plan = commonPlan, plan.parent == oldParent,
+              let expected = plan.expected,
+              expected.fileSystem.lowercased() == "smbfs",
+              expected.isStrongIdentity,
+              newVolume.fileSystem.lowercased() == "smbfs",
+              newVolume.mountSource == expected.mountSource,
+              newVolume.mountPath != expected.mountPath else { return false }
+        plan.parent = newParent
+        plan.expected = newVolume
+        guard plan.isValid, let encoded = try? JSONEncoder().encode(plan) else { return false }
+        UserDefaults.standard.set(encoded, forKey:"MacSync.commonFolders.v1")
+        commonPlan = plan
+        return true
+    }
+
     var editableCommonPlan: CommonFolderPlan {
         if let commonPlan { return commonPlan }
         let legacy = configuredPairs().filter { !$0.path.isEmpty }
@@ -545,7 +569,9 @@ struct MacSyncConfigurationView: View {
     }
 
     var body: some View {
-        MacSyncSectionShell(page: $page, monitoring: model.monitoring, next: visibleNextCopy, showHeader: true, activity: nil, controls: AnyView(automaticSwitch), nameCount:copy.sourceNameCount) {
+        MacSyncSectionShell(page: $page, monitoring: model.monitoring, next: visibleNextCopy, showHeader: true, activity: nil,
+                            controls: AnyView(HStack(spacing: 10) { automaticSwitch; globalControls }),
+                            nameCount:copy.sourceNameCount) {
             VStack(alignment: .leading, spacing: 10) {
                 switch page {
                 case .overview: overviewPage
@@ -557,8 +583,12 @@ struct MacSyncConfigurationView: View {
                 case .settings: settingsPage
                 }
             }
+            // Keep the sidebar navigable while a folder edit or coordinated
+            // rename drains workers. Preserve the old safety interlock for
+            // page actions until each control has been audited individually.
+            .disabled(runtime.folderConfigurationBusy)
         }
-        .disabled(runtime.folderConfigurationBusy || runtime.shuttingDown)
+        .disabled(runtime.shuttingDown)
         .preferredColorScheme(previewScheme ?? (appearance == "light" ? .light : appearance == "dark" ? .dark : nil))
         .environment(\.locale, Locale(identifier: "it_IT"))
         .frame(minWidth: 980, minHeight: 660)
@@ -584,7 +614,9 @@ struct MacSyncConfigurationView: View {
             if !busy && !runtime.previewOnly { copy.refreshIncompatibleNames(pairs: model.configuredPairs()) }
         }
         .onChange(of:page) { nextPage in
-            if !runtime.previewOnly && nextPage == .names { copy.refreshIncompatibleNames(pairs:model.configuredPairs()) }
+            if !runtime.previewOnly && nextPage == .names && !copy.namesLoaded && !copy.namesBusy {
+                copy.refreshIncompatibleNames(pairs:model.configuredPairs())
+            }
             if !runtime.previewOnly && nextPage == .history { copy.refresh() }
         }
         .onReceive(Timer.publish(every:3,on:.main,in:.common).autoconnect()) { _ in
@@ -613,9 +645,29 @@ struct MacSyncConfigurationView: View {
     }
 
     @ViewBuilder private var globalControls: some View {
-        if copy.seedBusy { Button("Annulla SHA-256") { copy.cancelSeedVerification() }.buttonStyle(MacSyncStopStyle()) }
-        if copy.auditBusy { Button("Annulla verifica") { copy.cancelArchiveAudit() }.buttonStyle(MacSyncStopStyle()) }
-        if copy.maintaining && !copy.auditBusy { Button("Interrompi manutenzione") { copy.cancelMaintenance() }.buttonStyle(MacSyncStopStyle()) }
+        if runtime.preparingRectification || copy.rectifyingNames {
+            Button(runtime.rectificationCancellationRequested ? "Annullamento rettifica…" : "Annulla rettifica") {
+                runtime.cancelNameRectification()
+            }.buttonStyle(MacSyncStopStyle()).disabled(runtime.rectificationCancellationRequested)
+        }
+        if copy.seedBusy {
+            let cancelling=copy.seedStatus.hasPrefix("Annullamento richiesto")
+            Button(cancelling ? "Annullamento SHA-256…" : "Annulla SHA-256") {
+                copy.cancelSeedVerification()
+            }.buttonStyle(MacSyncStopStyle()).disabled(cancelling)
+        }
+        if copy.auditBusy {
+            let cancelling=copy.auditStatus.hasPrefix("Annullamento richiesto")
+            Button(cancelling ? "Annullamento verifica…" : "Annulla verifica") {
+                copy.cancelArchiveAudit()
+            }.buttonStyle(MacSyncStopStyle()).disabled(cancelling)
+        }
+        if copy.maintaining && !copy.auditBusy {
+            let cancelling=copy.maintenanceStatus.hasPrefix("Annullamento richiesto")
+            Button(cancelling ? "Annullamento manutenzione…" : "Interrompi manutenzione") {
+                copy.cancelMaintenance()
+            }.buttonStyle(MacSyncStopStyle()).disabled(cancelling)
+        }
         if model.scanProgress != nil { Button("Annulla scansione") { runtime.stopCopiesForCurrentLaunch(); model.stopMonitoring() }.buttonStyle(MacSyncStopStyle()) }
         if copy.liveProgress != nil && copy.active {
             Button(copy.interruptionRequested ? "Interruzione richiesta…" : "Interrompi ciclo") { copy.interruptCurrentCycle() }
@@ -631,7 +683,7 @@ struct MacSyncConfigurationView: View {
             Toggle("Sincronizzazione automatica",isOn: Binding(get:{ copy.automaticCopiesEnabled },set:{ runtime.onAutomaticPreferenceChanged($0) }))
                 .labelsHidden().toggleStyle(MacSyncVisibleSwitchStyle(green: true))
                 .help(runtime.automaticStatus)
-                .disabled(runtime.savingSchedule || copy.seedBusy || copy.maintaining || copy.interruptionRequested)
+                .disabled(runtime.savingSchedule || runtime.folderConfigurationBusy || copy.seedBusy || copy.maintaining || copy.interruptionRequested)
             Text(copy.automaticCopiesEnabled ? "Attiva" : "Disattivata").font(.subheadline.weight(.semibold))
                 .foregroundStyle(copy.automaticCopiesEnabled ? MacSyncColors.green(scheme) : Color.secondary)
         }
@@ -643,7 +695,6 @@ struct MacSyncConfigurationView: View {
                 HStack {
                     if copy.liveProgress == nil || copy.interruptionRequested { Text(globalActivity).font(.subheadline.weight(.semibold)) }
                     Spacer()
-                    globalControls
                     if !copy.active && copy.liveProgress == nil && !copy.maintaining && !copy.seedBusy && model.scanProgress == nil {
                         Button("Avvia sincronizzazione") { runtime.startManualSynchronization() }.buttonStyle(.borderedProminent).disabled(!model.monitoring || runtime.savingSchedule || copy.queueRebuildRequired)
                     }
@@ -888,6 +939,11 @@ struct MacSyncConfigurationView: View {
                                 Text(URL(fileURLWithPath:plan.parent).lastPathComponent).font(.subheadline.weight(.semibold))
                                 Text(plan.parent).font(.caption).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
                                 healthLabel(destinationHealth)
+                                if !runtime.remountRecoveryStatus.isEmpty {
+                                    Text(runtime.remountRecoveryStatus)
+                                        .font(.caption).foregroundStyle(.secondary)
+                                        .fixedSize(horizontal:false,vertical:true)
+                                }
                                 if runtime.parentHealth.isReady {
                                     ForEach(Array(plan.sources.filter{runtime.targetHealth[$0.id]?.isError == true}.prefix(4))) { item in
                                         Text(item.name + ": " + (runtime.targetHealth[item.id]?.description ?? "")).font(.caption).foregroundStyle(.red)
@@ -1056,12 +1112,13 @@ struct MacSyncConfigurationView: View {
         }
     }
     private var historyPage: some View {
-        MacSyncPanel("Registro e dettagli", icon: "list.bullet.rectangle", fillHeight: true) {
+        let visibleRows = visibleLog
+        return MacSyncPanel("Registro e dettagli", icon: "list.bullet.rectangle", fillHeight: true) {
             if !copy.logReadWarning.isEmpty { Text(copy.logReadWarning).font(.caption).foregroundStyle(.orange) }
             HStack(spacing: 8) {
                 TextField("Cerca file o errore…", text: $copy.logSearch)
                     .textFieldStyle(.roundedBorder)
-                    .onChange(of: copy.logSearch) { _ in copy.refresh() }
+                    // Search results refresh after a short typing pause.
                 Picker("Esito", selection: $copy.logLevel) {
                     Text("Tutti").tag("all")
                     Text("Completati").tag("success")
@@ -1088,11 +1145,13 @@ struct MacSyncConfigurationView: View {
                 Spacer()
                 Button("Aggiorna") { copy.refresh() }
                 Button("Log tecnico…") { showTechnicalLog = true }
-                Button("Esporta TSV…") { copy.exportLog() }
+                Button(copy.exportingLog ? "Esportazione…" : "Esporta TSV…") { copy.exportLog() }
+                    .disabled(copy.exportingLog)
                 Button("Storico cicli…") { initialMetric = nil; showSummary = true }.buttonStyle(.borderedProminent)
             }
             Text("Ultimi 300 eventi. TSV: ricerca ed esito (max 5.000 eventi); gli altri filtri valgono solo per la tabella.").font(.caption).foregroundStyle(.secondary)
-            Table(visibleLog.map { LogRow(entry: $0) }, selection: $selectedLog) {
+            if copy.exportingLog { ProgressView("Esportazione del registro…").controlSize(.small) }
+            Table(visibleRows.map { LogRow(entry: $0) }, selection: $selectedLog) {
                 TableColumn("Data e ora") { row in Text(macSyncDateTime(row.entry.timestamp)).monospacedDigit().font(.caption) }.width(min: 124, ideal: 145)
                 TableColumn("Esito") { row in let entry = row.entry; MacSyncLogBadge(level: entry.level, interrupted: macSyncWasInterrupted(entry)) }.width(min: 76, ideal: 105)
                 TableColumn("Operazione") { row in let entry = row.entry; Text(macSyncAction(entry.action)).lineLimit(1) }.width(min: 78, ideal: 108)
@@ -1100,7 +1159,7 @@ struct MacSyncConfigurationView: View {
                 TableColumn("Dim.") { row in let entry = row.entry; Text(entry.bytes == 0 ? "—" : ByteCountFormatter.string(fromByteCount: entry.bytes, countStyle: .file)).monospacedDigit() }.width(min: 60, ideal: 80)
             }.frame(minHeight: 105, maxHeight: .infinity)
                 .layoutPriority(1)
-            if let entry = visibleLog.first(where: { $0.id == selectedLog }) {
+            if let entry = visibleRows.first(where: { $0.id == selectedLog }) {
                 VStack(alignment: .leading, spacing: 7) {
                     HStack {
                         Text("Dettaglio evento").font(.headline)
@@ -1116,19 +1175,25 @@ struct MacSyncConfigurationView: View {
                 }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
             } else {
-                Text(visibleLog.isEmpty ? "Nessun evento corrispondente ai filtri." : "Seleziona una riga per consultare il dettaglio completo.").font(.caption).foregroundStyle(.secondary)
+                Text(visibleRows.isEmpty ? "Nessun evento corrispondente ai filtri." : "Seleziona una riga per consultare il dettaglio completo.").font(.caption).foregroundStyle(.secondary)
             }
             Divider()
             HStack {
-                Text("Eventi visualizzati: \(visibleLog.count)").font(.caption.weight(.medium))
+                Text("Eventi visualizzati: \(visibleRows.count)").font(.caption.weight(.medium))
                 Spacer()
-                Text("Completati: \(visibleLog.filter { $0.level == "success" }.count)").font(.caption).foregroundStyle(MacSyncColors.green(scheme))
+                Text("Completati: \(visibleRows.filter { $0.level == "success" }.count)").font(.caption).foregroundStyle(MacSyncColors.green(scheme))
                 Spacer()
-                Text("Avvisi: \(visibleLog.filter { $0.level == "warning" }.count)").font(.caption)
+                Text("Avvisi: \(visibleRows.filter { $0.level == "warning" }.count)").font(.caption)
                 Spacer()
-                Text("Errori: \(visibleLog.filter { $0.level == "error" }.count)").font(.caption).foregroundStyle(MacSyncColors.red(scheme))
+                Text("Errori: \(visibleRows.filter { $0.level == "error" }.count)").font(.caption).foregroundStyle(MacSyncColors.red(scheme))
             }
         }.onAppear { copy.refresh() }
+        .task(id:copy.logSearch) {
+            do { try await Task.sleep(nanoseconds:200_000_000) }
+            catch { return }
+            guard !Task.isCancelled else { return }
+            copy.refresh()
+        }
     }
     private var settingsPage: some View {
         VStack(alignment: .leading, spacing: 7) {

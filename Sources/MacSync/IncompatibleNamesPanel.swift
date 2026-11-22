@@ -2,6 +2,19 @@ import AppKit
 import SwiftUI
 import MacSyncCore
 
+private struct NameListingRequest: Equatable {
+    let revision: Int
+    let side: String
+    let directories: Bool
+    let search: String
+    let offset: Int
+}
+
+private struct NameSelectionRequest: Equatable {
+    let revision: Int
+    let namesRevision: Int
+}
+
 struct IncompatibleNamesPanel:View {
     @ObservedObject var copy:MountedCopyController
     @ObservedObject var model:MacSyncViewModel
@@ -14,13 +27,21 @@ struct IncompatibleNamesPanel:View {
     @State private var selected=Set<String>()
     @State private var confirmation:[IncompatibleName]=[]
     @State private var showConfirmation=false
-    private var eligible:[IncompatibleName] {
-        copy.incompatibleNames.filter{selectable($0)}
+    @State private var pageOffset=0
+    @State private var namePage:IncompatibleNameListPage?
+    @State private var displayedRequest:NameListingRequest?
+    @State private var selectedRows:[IncompatibleName]=[]
+    @State private var selectionRevision=0
+    @State private var resolvedSelection:NameSelectionRequest?
+
+    private var listingRequest:NameListingRequest {
+        .init(revision:copy.namesRevision,side:side,directories:directories,
+              search:search,offset:pageOffset)
     }
-    private var chosen:[IncompatibleName] {
-        let paths = Set(eligible.lazy.filter { selected.contains($0.id) }.map { $0.rootID + "\0" + $0.relativePath })
-        return eligible.filter { paths.contains($0.rootID + "\0" + $0.relativePath) }
+    private var selectionRequest:NameSelectionRequest {
+        .init(revision:selectionRevision,namesRevision:copy.namesRevision)
     }
+    private var chosen:[IncompatibleName] { selectedRows }
     private var canRectify:Bool {
         !runtime.previewOnly && !runtime.folderConfigurationBusy && !runtime.shuttingDown &&
         !copy.auditBusy && !copy.seedBusy && !copy.maintaining && !copy.rectifyingNames && !copy.namesBusy
@@ -29,21 +50,19 @@ struct IncompatibleNamesPanel:View {
     private func selectable(_ item:IncompatibleName)->Bool {
         NameRectification.proposedName(item.name) != nil
     }
-    private var filtered:[IncompatibleName] {
-        copy.incompatibleNames.filter { item in
-            (side=="all" || item.side.rawValue==side) && item.isDirectory==directories &&
-            (search.isEmpty || item.relativePath.localizedCaseInsensitiveContains(search) ||
-             item.rootPath.localizedCaseInsensitiveContains(search) || item.reason.localizedCaseInsensitiveContains(search))
-        }
-    }
     var body:some View {
-        MacSyncPanel("Nomi incompatibili",icon:"folder.badge.questionmark",fillHeight:true) {
+        // Rendering uses only a bounded snapshot. Filtering and counting are
+        // performed in a cancellable worker, never during a SwiftUI update.
+        let current = displayedRequest == listingRequest
+        let selectionCurrent = resolvedSelection == selectionRequest
+        let visibleRows = current ? (namePage?.rows ?? []) : []
+        return MacSyncPanel("Nomi incompatibili",icon:"folder.badge.questionmark",fillHeight:true) {
             HStack {
                 VStack(alignment:.leading,spacing:3) {
                     ForEach(IncompatibleName.Side.allCases, id: \.rawValue) { position in
-                        let rows = copy.incompatibleNames.filter { $0.side == position }
-                        let folders = rows.filter(\.isDirectory).count
-                        Text("\(position.label): \(folders) cartelle · \(rows.count - folders) file").font(.subheadline)
+                        let folders = position == .source ? (namePage?.sourceFolders ?? 0) : (namePage?.destinationFolders ?? 0)
+                        let files = position == .source ? (namePage?.sourceFiles ?? 0) : (namePage?.destinationFiles ?? 0)
+                        Text("\(position.label): \(folders) cartelle · \(files) file").font(.subheadline)
                     }
                     Text("I nomi già corrispondenti possono essere incompatibili con nuove copie. Le due posizioni sono contate separatamente.")
                         .font(.caption2).foregroundStyle(.secondary)
@@ -70,21 +89,25 @@ struct IncompatibleNamesPanel:View {
             }
             TextField("Cerca nome, percorso o motivo…",text:$search).textFieldStyle(.roundedBorder)
             HStack {
-                Button("Seleziona tutto") { selected.formUnion(eligible.map(\.id)) }
-                    .help("Seleziona tutte le cartelle e tutti i file rettificabili sui due lati, anche nelle altre schede")
-                    .disabled(eligible.isEmpty || !canSelect)
-                Button("Seleziona visibili") { selected.formUnion(filtered.filter{selectable($0)}.map(\.id)) }
-                    .disabled(!canSelect || !filtered.contains(where:{selectable($0)}))
-                Button("Deseleziona") { selected.removeAll() }.disabled(chosen.isEmpty)
+                Button("Seleziona tutto") {
+                    selected.formUnion(namePage?.selectableIDs ?? [])
+                }
+                    .help("Seleziona tutti i nomi rettificabili dei due lati, anche fuori dalla pagina corrente")
+                    .disabled(!current || namePage?.selectableIDs.isEmpty != false || !canSelect)
+                Button("Seleziona visibili") { selected.formUnion(namePage?.matchingSelectableIDs ?? []) }
+                    .help("Seleziona tutti i risultati del filtro, anche nelle altre pagine")
+                    .disabled(!current || !canSelect || namePage?.matchingSelectableIDs.isEmpty != false)
+                Button("Deseleziona") { selected.removeAll() }.disabled(selected.isEmpty)
                 Spacer()
-                Button(runtime.rectificationPending ? "Riprendi rettifica" : "Rettifica (\(chosen.count))") {
+                Button(runtime.rectificationPending ? "Riprendi rettifica" :
+                    (selectionCurrent ? "Rettifica (\(chosen.count))" : "Calcolo selezione…")) {
                     if runtime.rectificationPending {
                         runtime.resumeNameRectification()
                     } else {
                         confirmation=chosen;showConfirmation=true
                     }
                 }.buttonStyle(.borderedProminent)
-                    .disabled(!canRectify || (runtime.rectificationPending ? copy.active : chosen.isEmpty))
+                    .disabled(!canRectify || !selectionCurrent || (runtime.rectificationPending ? copy.active : chosen.isEmpty))
             }
             if runtime.preparingRectification {
                 ProgressView("Arresto delle attività prima della rettifica…")
@@ -111,12 +134,17 @@ struct IncompatibleNamesPanel:View {
             } else if copy.namesBusy {
                 ProgressView().controlSize(.small)
             }
-            if filtered.isEmpty {
+            if !current {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text("Aggiornamento elenco…").font(.caption).foregroundStyle(.secondary)
+                }.frame(maxWidth:.infinity,minHeight:80)
+            } else if visibleRows.isEmpty {
                 Text("Nessun elemento nella selezione.").foregroundStyle(.secondary).frame(maxWidth:.infinity,minHeight:80)
             } else {
                 ScrollView {
                     LazyVStack(alignment:.leading,spacing:8) {
-                        ForEach(filtered) { item in
+                        ForEach(visibleRows) { item in
                             HStack(alignment:.top,spacing:10) {
                                 Toggle("",isOn:Binding(get:{selected.contains(item.id)},set:{ value in
                                     if value { selected.insert(item.id) } else { selected.remove(item.id) }
@@ -143,12 +171,30 @@ struct IncompatibleNamesPanel:View {
                         }
                     }
                 }.frame(maxHeight:.infinity)
+                HStack {
+                    Text("\(pageOffset + 1)–\(pageOffset + visibleRows.count) di \(namePage?.total ?? 0) risultati")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Precedenti") { pageOffset = max(0,pageOffset-200) }
+                        .disabled(!current || pageOffset == 0)
+                    Button("Successivi") { pageOffset += 200 }
+                        .disabled(!current || pageOffset + visibleRows.count >= (namePage?.total ?? 0))
+                }
             }
             if !message.isEmpty { Text(message).font(.caption).foregroundStyle(.secondary) }
             Label("Rettifica dopo conferma sui lati interessati. Nessuna sovrascrittura.",systemImage:"info.circle")
                 .font(.caption).foregroundStyle(.secondary)
         }
-        .onChange(of:copy.incompatibleNames.map(\.id)) { ids in selected.formIntersection(ids) }
+        .onChange(of:copy.namesRevision) { _ in
+            selected.formIntersection(Set(copy.incompatibleNames.map(\.id)))
+            pageOffset = 0
+        }
+        .onChange(of:selected) { _ in selectionRevision &+= 1 }
+        .onChange(of:search) { _ in pageOffset = 0 }
+        .onChange(of:side) { _ in pageOffset = 0 }
+        .onChange(of:directories) { _ in pageOffset = 0 }
+        .task(id:listingRequest) { await loadPage(listingRequest) }
+        .task(id:selectionRequest) { await resolveSelection(selectionRequest) }
         .sheet(isPresented:$showConfirmation) {
             VStack(alignment:.leading,spacing:12) {
                 Text("Conferma rettifica dei nomi").font(.title2.bold())
@@ -175,6 +221,41 @@ struct IncompatibleNamesPanel:View {
             }.padding(20).frame(width:650,height:500)
         }
     }
+    @MainActor private func loadPage(_ request:NameListingRequest) async {
+        let items = copy.incompatibleNames
+        // Coalesce rapid typing; tab switching and paging remain immediate.
+        if !request.search.isEmpty {
+            do { try await Task.sleep(nanoseconds:180_000_000) }
+            catch { return }
+        }
+        let cancellation = SeedVerificationCancellation()
+        let page = await withTaskCancellationHandler(operation:{
+            await Task.detached(priority:.userInitiated) {
+                IncompatibleNameListing.page(items:items,side:request.side,
+                    directories:request.directories,search:request.search,
+                    offset:request.offset,shouldContinue:{!cancellation.isCancelled})
+            }.value
+        },onCancel:{ cancellation.cancel() })
+        guard !Task.isCancelled, listingRequest == request, let page else { return }
+        namePage = page
+        displayedRequest = request
+    }
+
+    @MainActor private func resolveSelection(_ request:NameSelectionRequest) async {
+        let items = copy.incompatibleNames
+        let selectedIDs = selected
+        let cancellation = SeedVerificationCancellation()
+        let resolved = await withTaskCancellationHandler(operation:{
+            await Task.detached(priority:.userInitiated) {
+                IncompatibleNameSelection.resolve(items:items,selectedIDs:selectedIDs,
+                    shouldContinue:{!cancellation.isCancelled})
+            }.value
+        },onCancel:{ cancellation.cancel() })
+        guard !Task.isCancelled, selectionRequest == request, let resolved else { return }
+        selectedRows = resolved
+        resolvedSelection = request
+    }
+
     private func reveal(_ item:IncompatibleName) {
         guard let pair=model.configuredPairs().first(where:{$0.id==item.rootID}) else { message="Coppia non più configurata"; return }
         let expected=item.side == .source ? pair.path : pair.destination

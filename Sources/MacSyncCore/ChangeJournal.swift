@@ -26,14 +26,27 @@ public enum JournalError: Error, LocalizedError {
 
 /// Persistent local event queue. The first prototype stores events but never
 /// executes file transfers or deletions.
+struct NameRectificationProgressRecord: Codable, Equatable {
+    let rootID: String
+    let relativePath: String
+    var sourceRequired: Bool
+    var destinationRequired: Bool
+    var sourceCompleted: Bool
+    var destinationCompleted: Bool
+}
+
 public final class ChangeJournal {
     private var connection: OpaquePointer?
     private let databasePath: String
 
-    public init(path: String) throws {
+    /// UI readers use a strict read-only connection without schema DDL or
+    /// journal-mode changes. Existing operational writers retain the original
+    /// constructor behavior and all transactional safety checks.
+    public init(path: String, readOnly: Bool = false) throws {
         self.databasePath = path
         var handle: OpaquePointer?
-        guard sqlite3_open(path, &handle) == SQLITE_OK else {
+        let flags = readOnly ? SQLITE_OPEN_READONLY : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)
+        guard sqlite3_open_v2(path, &handle, flags, nil) == SQLITE_OK else {
             let description = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
             if handle != nil { sqlite3_close(handle) }
             throw JournalError.database("Unable to open SQLite: " + description)
@@ -41,6 +54,10 @@ public final class ChangeJournal {
         connection = handle
 
         do {
+            if readOnly {
+                try execute("PRAGMA busy_timeout=1000; PRAGMA query_only=ON;")
+                return
+            }
             try execute("PRAGMA busy_timeout=5000;")
             try execute("PRAGMA journal_mode=WAL;")
             try execute("PRAGMA synchronous=FULL;")
@@ -55,7 +72,23 @@ public final class ChangeJournal {
                     completed INTEGER NOT NULL DEFAULT 0
                 );
                 """)
-            try execute("CREATE TABLE IF NOT EXISTS name_rectification_batch(singleton INTEGER PRIMARY KEY CHECK(singleton=1), plan TEXT NOT NULL, next_move INTEGER NOT NULL DEFAULT 0);")
+            try execute("CREATE TABLE IF NOT EXISTS name_rectification_batch(singleton INTEGER PRIMARY KEY CHECK(singleton=1), plan TEXT NOT NULL, next_move INTEGER NOT NULL DEFAULT 0, progress TEXT NOT NULL DEFAULT '[]');")
+            // Child completion index, not another rename plan: identities and
+            // old/new names remain exclusively in name_rectification_batch.
+            // Constant-time upserts avoid re-encoding thousands of statuses
+            // after every successful rename.
+            try execute("CREATE TABLE IF NOT EXISTS name_rectification_completed(root_id TEXT NOT NULL, relative_path TEXT NOT NULL, side TEXT NOT NULL CHECK(side IN ('source','destination')), PRIMARY KEY(root_id,relative_path,side));")
+            // Existing profiles retain their approved plan, next_move and
+            // exact fingerprints. Adding a column never rewrites the plan.
+            let columns = try prepare("PRAGMA table_info(name_rectification_batch);")
+            var hasProgress = false
+            while sqlite3_step(columns) == SQLITE_ROW {
+                if columnText(columns, at: 1) == "progress" { hasProgress = true }
+            }
+            sqlite3_finalize(columns)
+            if !hasProgress {
+                try execute("ALTER TABLE name_rectification_batch ADD COLUMN progress TEXT NOT NULL DEFAULT '[]';")
+            }
             try execute("CREATE TABLE IF NOT EXISTS name_rectification_scopes(root_id TEXT NOT NULL, path TEXT NOT NULL, expires REAL NOT NULL, PRIMARY KEY(root_id,path));")
             try execute("CREATE TABLE IF NOT EXISTS name_scan_cache(root_id TEXT NOT NULL, side TEXT NOT NULL, snapshot TEXT NOT NULL, PRIMARY KEY(root_id, side));")
             try execute("CREATE TABLE IF NOT EXISTS publication_intents(job_id INTEGER PRIMARY KEY, root_id TEXT NOT NULL, relative_path TEXT NOT NULL);")
@@ -473,11 +506,11 @@ public final class ChangeJournal {
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseFailure() }
     }
 
-    func pendingNameRectification() throws -> (data: Data, offset: Int)? {
-        let statement = try prepare("SELECT plan,next_move FROM name_rectification_batch WHERE singleton=1;")
+    func pendingNameRectification() throws -> (data: Data, offset: Int, progress: Data)? {
+        let statement = try prepare("SELECT plan,next_move,progress FROM name_rectification_batch WHERE singleton=1;")
         defer { sqlite3_finalize(statement) }
         switch sqlite3_step(statement) {
-        case SQLITE_ROW: return (Data(columnText(statement, at: 0).utf8), Int(sqlite3_column_int64(statement, 1)))
+        case SQLITE_ROW: return (Data(columnText(statement, at: 0).utf8), Int(sqlite3_column_int64(statement, 1)), Data(columnText(statement, at: 2).utf8))
         case SQLITE_DONE: return nil
         default: throw databaseFailure()
         }
@@ -487,20 +520,78 @@ public final class ChangeJournal {
         try pendingNameRectification() != nil
     }
 
-    func saveNameRectification(_ data: Data?) throws {
-        guard let data else {
-            try execute("DELETE FROM name_rectification_batch WHERE singleton=1;")
-            return
-        }
-        let statement = try prepare("INSERT OR REPLACE INTO name_rectification_batch(singleton,plan) VALUES(1,?);")
+    func nameRectificationCompleted() throws -> Set<String> {
+        let statement = try prepare("SELECT root_id,relative_path,side FROM name_rectification_completed;")
         defer { sqlite3_finalize(statement) }
-        try bind(String(decoding: data, as: UTF8.self), at: 1, in: statement)
-        guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseFailure() }
+        var completed = Set<String>()
+        while true {
+            switch sqlite3_step(statement) {
+            case SQLITE_DONE: return completed
+            case SQLITE_ROW:
+                completed.insert(columnText(statement, at: 0) + "\0" +
+                                 columnText(statement, at: 1) + "\0" +
+                                 columnText(statement, at: 2))
+            default: throw databaseFailure()
+            }
+        }
     }
 
-    func advanceNameRectification(to offset: Int, finished: Bool, rootID: String?, path: String?, remainingPlan: Data?) throws {
+    func saveNameRectification(_ data: Data?, progress: [NameRectificationProgressRecord]? = nil) throws {
+        guard let data else {
+            try execute("DELETE FROM name_rectification_batch WHERE singleton=1;")
+            try execute("DELETE FROM name_rectification_completed;")
+            return
+        }
+        // The first save must atomically reset the previous batch's side
+        // statuses. Rewrites of the remaining plan run inside the existing
+        // advanceNameRectification transaction and preserve those statuses.
+        let write: () throws -> Void = {
+            let statement = try self.prepare("""
+                INSERT OR REPLACE INTO name_rectification_batch(singleton,plan,progress)
+                VALUES(1,?,?);
+                """)
+            defer { sqlite3_finalize(statement) }
+            try self.bind(String(decoding: data, as: UTF8.self), at: 1, in: statement)
+            let existing = try self.pendingNameRectification()
+            let statusBytes = try progress.map { try JSONEncoder().encode($0) } ??
+                existing?.progress ?? Data("[]".utf8)
+            try self.bind(String(decoding: statusBytes, as: UTF8.self), at: 2, in: statement)
+            guard sqlite3_step(statement) == SQLITE_DONE else { throw self.databaseFailure() }
+        }
+        if progress != nil {
+            try execute("BEGIN IMMEDIATE TRANSACTION;")
+            do {
+                try write()
+                try execute("DELETE FROM name_rectification_completed;")
+                try execute("COMMIT;")
+            } catch {
+                try? execute("ROLLBACK;")
+                throw error
+            }
+        } else {
+            try write()
+        }
+    }
+
+    func advanceNameRectification(to offset: Int, finished: Bool, rootID: String?, path: String?,
+                                  remainingPlan: Data?, completed: (rootID: String, path: String, side: String)? = nil) throws {
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
+            if let completed {
+                guard completed.side == "source" || completed.side == "destination",
+                      try pendingNameRectification() != nil else {
+                    throw JournalError.database("Lato o registro rettifica non valido")
+                }
+                let record = try prepare("""
+                    INSERT OR IGNORE INTO name_rectification_completed(root_id,relative_path,side)
+                    VALUES(?,?,?);
+                    """)
+                defer { sqlite3_finalize(record) }
+                try bind(completed.rootID, at: 1, in: record)
+                try bind(completed.path, at: 2, in: record)
+                try bind(completed.side, at: 3, in: record)
+                guard sqlite3_step(record) == SQLITE_DONE else { throw databaseFailure() }
+            }
             if let rootID, let path {
                 try execute("DELETE FROM name_rectification_scopes WHERE expires<=CAST(strftime('%s','now') AS INTEGER);")
                 let add = try prepare("""
@@ -627,6 +718,70 @@ public final class ChangeJournal {
             }
             try execute("COMMIT;")
         } catch { try? execute("ROLLBACK;"); throw error }
+    }
+
+    /// Startup-only recovery of an already Finder-mounted SMB share whose
+    /// mount path changed. Requires the exact same remote mount source and
+    /// stable directory inode/birth identity for EVERY target. No queue item,
+    /// consent, source binding or file content is modified by this operation.
+    /// A missing/changed binding is ambiguous and must fail closed.
+    public func rebindVerifiedSMBMount(_ maps: [MountedFolderMapping],
+                                       oldVolume: VolumeFingerprint) throws {
+        guard !maps.isEmpty, oldVolume.fileSystem.lowercased() == "smbfs",
+              oldVolume.isStrongIdentity,
+              !(try hasPendingNameRectification()),
+              Set(maps.map { $0.rootID }).count == maps.count else {
+            throw MountedCopyError.volumeChanged
+        }
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            for map in maps {
+                try map.verify()
+                guard try watchedRootPath(rootID:map.rootID) == map.source.path else {
+                    throw MountedCopyError.sourceRootChanged
+                }
+                _ = try verifyLocalSourceBinding(rootID: map.rootID, root: map.source)
+                let current = try DirectoryBinding.read(map.target)
+                guard current.volume.fileSystem.lowercased() == "smbfs",
+                      current.volume.mountSource == oldVolume.mountSource,
+                      current.volume.mountPath != oldVolume.mountPath,
+                      current.volume.isStrongIdentity else { throw MountedCopyError.volumeChanged }
+
+                let query = try prepare("SELECT stamp FROM directory_bindings WHERE root_id=? AND role='target';")
+                defer { sqlite3_finalize(query) }
+                try bind(map.rootID,at:1,in:query)
+                guard sqlite3_step(query) == SQLITE_ROW,
+                      let data = columnText(query,at:0).data(using:.utf8),
+                      let saved = try? JSONDecoder().decode(DirectoryBinding.self,from:data) else {
+                    throw MountedCopyError.volumeChanged
+                }
+                guard saved == current ||
+                      (saved.volume == oldVolume && current.isSameObjectAfterSMBRemount(as:saved)) else {
+                    throw MountedCopyError.volumeChanged
+                }
+                try map.verify()
+                guard try DirectoryBinding.read(map.target) == current else {
+                    throw MountedCopyError.volumeChanged
+                }
+                if saved != current {
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.sortedKeys]
+                    let encoded = String(decoding:try encoder.encode(current),as:UTF8.self)
+                    let update = try prepare("UPDATE directory_bindings SET stamp=? WHERE root_id=? AND role='target' AND stamp=?;")
+                    defer { sqlite3_finalize(update) }
+                    try bind(encoded,at:1,in:update)
+                    try bind(map.rootID,at:2,in:update)
+                    try bind(String(decoding:data,as:UTF8.self),at:3,in:update)
+                    guard sqlite3_step(update) == SQLITE_DONE, sqlite3_changes(connection) == 1 else {
+                        throw MountedCopyError.volumeChanged
+                    }
+                }
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
     }
 
     public func pendingUploadUpperBound() throws -> Int64? {

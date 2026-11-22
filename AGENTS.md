@@ -9,6 +9,21 @@
 - Nel ramo v0.18.14 `TrackedItem.verificationFingerprint` è **solo un dato transitorio per l'audit**: il confronto con l'inventario persistito usa esclusivamente i campi storici. Non reintrodurre la regressione che accodava file invariati.
 - Questo paragrafo è il riferimento **attuale**. Le sezioni v0.17.0 e precedenti sotto sono conservate a fini storici, non rappresentano lo stato delle release odierne.
 
+## Candidata v0.18.15 — stabilità delle rinomine su SMB
+
+- Non tentare di risolvere i rifiuti `source-mtime` disattivando i controlli sul contenuto o scegliendo una tolleranza arbitraria: su un file sintetico appena scritto, il mount macOS riportava un timestamp iniziale inferiore di 2,6093 millisecondi rispetto al server, poi si aggiornava.
+- Nella candidata `develop-v0.18.15-smb-rename-stability`, acquisire il fingerprint **dopo** un'attesa limitata solo ai file della destinazione `smbfs` recentemente modificati; richiedere campioni esatti stabili. Retry Go ammessi soltanto prima della mutazione e soltanto su mancata conferma dell'mtime; non ripetere rinomine dall'esito incerto. Dopo successo esplicito attendere **solo in lettura** visibilità del nuovo percorso Finder con identità conservata.
+- Conservare `RenameNoReplace` con `ReplaceIfExists=0`, niente operazioni POSIX native SMB, niente copia+delete, nessun bypass di volume e fingerprint. File incerti restano nel piano SQLite.
+- Suite Samba reale `smbfs` verificata 9/9 su CI `44943967362` (codice identico alla candidata), senza sostituire il collaudo Windows Server 2016/Finder-Portachiavi/VPN. Documentazione: `docs/DEVELOPMENT_v0.18.15_SMB_RENAME_STABILITY.md`. Nessuna release senza autorizzazione.
+
+## Candidata v0.18.15 — soltanto QUICK e INTELLIGENT nell'interfaccia
+
+- Modifica ISOLATA nel ramo `develop-v0.18.15-audit-two-modes`, derivato dal codice `6fa9f99dd94ccffd80c3a7569793fb17d3a91980`. Rollback nominato `rollback-before-v0.18.15-audit-two-modes`. **Non è una release**.
+- L'utente può scegliere solo `ArchiveAuditMode.quick` e `.intelligent`. Il caso `.deep` è ancora nel motore e nel decoder per compatibilità storica, ma è escluso dal Picker. Preferenze `mode=deep` migrate a `intelligent` senza perdere calendario, consenso di riparazione o impostazioni correlate.
+- Non semplificare la verifica di stabilità: i 2 secondi sono la tolleranza per confronto mtime sorgente/destinazione, NON una tolleranza per ctime/inode/file identity. Conservare fail-closed, SHA-256 selettivo intelligente, cache validata, test interni DEEP, e assenza di eliminazioni automatiche.
+- Test della nuova UI e del core e prove SMB autentiche nel ramo `develop-v0.18.15-audit-two-modes-smb`. Il problema indipendente dell'helper SMB di rinomina non deve essere nascosto o considerato risolto. Per dettagli: `docs/DEVELOPMENT_v0.18.15_AUDIT_MODES.md`.
+- Nessun merge o firma/rilascio finché la CI e le protezioni non sono verificate e l'utente non autorizza.
+
 ## v0.18.5 — candidato Rclone
 
 Ramo develop-v0.18.5, rollback rollback-before-v0.18.5-rclone (release v0.18.4).

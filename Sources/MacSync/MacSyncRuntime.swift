@@ -31,6 +31,9 @@ final class MacSyncRuntime: ObservableObject {
     @Published private(set) var healthCheckedAt: Date?
     private var probingHealth = false
     private var healthRevision = 0
+    private var remountProbeInFlight = false
+    private var lastRemountProbeAt: Date?
+    @Published private(set) var remountRecoveryStatus = ""
 
     @Published private(set) var savingSchedule = false
     @Published private(set) var folderConfigurationBusy = false
@@ -54,6 +57,7 @@ final class MacSyncRuntime: ObservableObject {
     private var auditRevision = 0
     @Published private(set) var rectificationPending = false
     @Published private(set) var preparingRectification = false
+    @Published private(set) var rectificationCancellationRequested = false
     private var suspendedUntilNextLaunch = false
     private var configurationRevision = 0
     private var outages = ConnectionOutageTracker()
@@ -101,13 +105,14 @@ final class MacSyncRuntime: ObservableObject {
             self?.prepareSignedUpdate(release)
         }
         updates.start()
+        DispatchQueue.main.async { [weak self] in self?.recoverExistingFinderSMBMountIfNeeded() }
         if let path = try? copy.historyPath() {
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 let pending = (try? ChangeJournal(path: path).hasPendingNameRectification()) == true
                 DispatchQueue.main.async { [weak self] in
                     guard let self, pending, !self.shuttingDown else { return }
                     self.rectificationPending = true
-                    self.automaticStatus = "Rettifica in attesa: riprendila da Nomi incompatibili"
+                    self.automaticStatus = "Rettifica pendente: i percorsi interessati restano protetti; riprendi da Nomi incompatibili"
                 }
             }
         }
@@ -119,6 +124,7 @@ final class MacSyncRuntime: ObservableObject {
     // reconnect attempts or automatic authorization. Stale results discarded.
     func refreshFolderHealth() {
         guard !previewOnly, !shuttingDown, !folderConfigurationBusy, !probingHealth else { return }
+        recoverExistingFinderSMBMountIfNeeded()
         let plan=model.editableCommonPlan
         let pairs=model.configuredPairs().filter{ !$0.path.isEmpty }
         let rev=healthRevision
@@ -152,6 +158,85 @@ final class MacSyncRuntime: ObservableObject {
                             for (id,action,state) in events where state != .checking {
                                 try? log.record(level:state.isError ? .warning : .info,rootID:id,action:action,message:state.description)
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Recover only an already mounted, uniquely matched SMB share. No
+    /// credential lookup, Finder mount request or silent trust reset occurs.
+    /// The expensive probe and SQLite checks stay off the main actor.
+    private func recoverExistingFinderSMBMountIfNeeded() {
+        guard !previewOnly, !shuttingDown, !folderConfigurationBusy, !remountProbeInFlight,
+              !copy.active, !copy.maintaining, !copy.auditBusy, !copy.seedBusy,
+              !copy.rectifyingNames, !copy.namesBusy, !rectificationPending,
+              !finalShutdownHolding, let plan = model.remountRecoveryPlan,
+              let expected = plan.expected,
+              expected.fileSystem.lowercased() == "smbfs", expected.isStrongIdentity,
+              !plan.parent.isEmpty, !plan.sources.isEmpty else { return }
+        let now = Date()
+        if let previous = lastRemountProbeAt, now.timeIntervalSince(previous) < 20 { return }
+        lastRemountProbeAt = now
+        remountProbeInFlight = true
+        let revision = configurationRevision
+        DispatchQueue.global(qos:.utility).async { [weak self] in
+            // A live but different SMB share at the old path is not a safe
+            // remount candidate. A stale local /Volumes directory is allowed.
+            let old = try? VolumeFingerprint.read(at:URL(fileURLWithPath:plan.parent))
+            let oldIsOtherSMB = old?.fileSystem.lowercased() == "smbfs" && old != expected
+            let candidate: (path:String,volume:VolumeFingerprint)? =
+                DestinationProbe.inspect(path:plan.parent,expectedVolume:expected) != .ready && !oldIsOtherSMB
+                ? SMBRemountLocator.verifiedCandidate(savedPath:plan.parent,expected:expected) : nil
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                guard !self.shuttingDown, self.configurationRevision == revision,
+                      self.model.remountRecoveryPlan == plan,
+                      !self.folderConfigurationBusy, !self.copy.active,
+                      !self.copy.maintaining, !self.copy.auditBusy,
+                      !self.copy.rectifyingNames else {
+                    self.remountProbeInFlight = false
+                    return
+                }
+                guard let candidate, let db = try? self.copy.historyPath() else {
+                    self.remountProbeInFlight = false
+                    return
+                }
+                self.folderConfigurationBusy = true
+                let newParent = candidate.path, volume = candidate.volume
+                DispatchQueue.global(qos:.utility).async { [weak self] in
+                    let verified: Bool
+                    do {
+                        let maps = try plan.sources.map { source in
+                            try MountedFolderMapping(rootID:source.id,
+                                source:URL(fileURLWithPath:source.path),
+                                target:URL(fileURLWithPath:newParent).appendingPathComponent(source.name),
+                                expectedTargetVolume:volume)
+                        }
+                        let journal = try ChangeJournal(path:db)
+                        try journal.rebindVerifiedSMBMount(maps,oldVolume:expected)
+                        verified = true
+                    } catch { verified = false }
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { return }
+                        if verified && self.configurationRevision == revision && !self.shuttingDown &&
+                           self.model.acceptVerifiedSMBRemount(oldParent:plan.parent,
+                                 newParent:newParent,newVolume:volume) {
+                            // A new mount path requires renewed consent to
+                            // mirror/delete; previously allowed copies stay enabled.
+                            self.copy.revokeMirrorAuthorization()
+                            self.destinations.configurationChanged()
+                            self.healthRevision += 1
+                            self.remountRecoveryStatus = "Condivisione Finder ritrovata e verificata. Copie disponibili; eventuali cancellazioni richiedono nuova autorizzazione."
+                        } else if !self.shuttingDown {
+                            self.remountRecoveryStatus = "Condivisione SMB rilevata con un percorso diverso; identità delle cartelle non confermata. Nessuna scrittura autorizzata."
+                        }
+                        self.folderConfigurationBusy = false
+                        self.remountProbeInFlight = false
+                        if !self.shuttingDown {
+                            self.refreshFolderHealth()
+                            self.scheduleNextAutomaticAttempt()
                         }
                     }
                 }
@@ -385,9 +470,9 @@ final class MacSyncRuntime: ObservableObject {
         }
     }
 
-    /// Explicitly confirmed name maintenance. Stop workers, drain all
-    /// pending mutations, then restart the local inventory. Automatic copies
-    /// and mirror are left off until deliberate operator reauthorization.
+    /// Explicitly confirmed name maintenance. Stop workers and drain before
+    /// any rename. A previously authorized automatic-copy setting may be
+    /// restored after the monitor is restarted; mirror remains disarmed.
     func rectifyNames(_ items:[IncompatibleName]) {
         guard !previewOnly,!rectificationPending,!items.isEmpty,!shuttingDown,!folderConfigurationBusy,!savingSchedule,
               !copy.auditBusy,!copy.seedBusy,!copy.maintaining,!copy.rectifyingNames,!copy.namesBusy,
@@ -406,10 +491,20 @@ final class MacSyncRuntime: ObservableObject {
         performNameRectification([])
     }
 
+    func cancelNameRectification() {
+        guard preparingRectification || copy.rectifyingNames else { return }
+        rectificationCancellationRequested = true
+        folderEditCancellation?.cancel()
+    }
+
     private func performNameRectification(_ approved: [IncompatibleName]) {
         let pairs = model.configuredPairs()
+        // This does NOT authorize automatic copies for the first time.
+        // Preserve only the earlier explicit choice through maintenance.
+        let restoreAutomaticCopies = copy.automaticCopiesEnabled && !suspendedUntilNextLaunch
         folderConfigurationBusy=true
         preparingRectification=true
+        rectificationCancellationRequested=false
         let token=SeedVerificationCancellation()
         folderEditCancellation=token
         stopAllOperations()
@@ -423,15 +518,24 @@ final class MacSyncRuntime: ObservableObject {
                 self.preparingRectification=false
                 if self.shuttingDown || token.isCancelled {
                     self.folderConfigurationBusy=false;self.folderEditCancellation=nil
+                    self.rectificationCancellationRequested=false
                     self.finishShutdownIfReady();return
                 }
                 self.copy.rectifyNamesAfterDrain(items:approved,pairs:pairs,token:token) { [weak self] pending in
                     guard let self else { return }
                     self.folderConfigurationBusy=false;self.folderEditCancellation=nil
+                    self.rectificationCancellationRequested=false
                     self.rectificationPending = pending
                     if !self.shuttingDown {
                         self.model.startMonitoring()
-                        self.automaticStatus = pending ? "Rettifica in attesa: riprendila da Nomi incompatibili" : "Rettifica terminata: attendi l'inventario prima di riavviare le copie"
+                        if restoreAutomaticCopies && !token.isCancelled {
+                            self.suspendedUntilNextLaunch = false
+                            self.copy.restorePreviouslyAuthorizedAutomaticCopies()
+                            self.automaticStatus = pending ? "Rettifica pendente: copie indipendenti ripristinate, nomi incerti protetti" : "Rettifica conclusa: copie automatiche precedentemente autorizzate ripristinate"
+                            self.scheduleNextAutomaticAttempt()
+                        } else {
+                            self.automaticStatus = pending ? "Rettifica pendente: percorsi protetti, copie indipendenti avviabili manualmente" : "Rettifica terminata: attendi l'inventario prima di riavviare le copie"
+                        }
                         self.scheduleArchiveAudit()
                     }
                     self.finishShutdownIfReady()
@@ -442,14 +546,10 @@ final class MacSyncRuntime: ObservableObject {
 
     func startManualSynchronization() {
         guard !previewOnly, !shuttingDown, !savingSchedule, !folderConfigurationBusy, !finalShutdownHolding, !copy.queueRebuildRequired,
-              !rectificationPending, model.monitoring, model.safetyGate.isReady, !copy.active, !copy.maintaining,
+              model.monitoring, model.safetyGate.isReady, !copy.active, !copy.maintaining,
               !copy.seedBusy, !copy.seedReady, !copy.interruptionRequested else {
             guard !previewOnly else { return }
-            if rectificationPending {
-                copy.status = "Sincronizzazione sospesa: riprendi la rettifica da Nomi incompatibili"
-            } else {
-                copy.status = copy.queueRebuildRequired ? "Sincronizzazione non avviata: verifica archivio richiesta o coda non leggibile" : !model.monitoring || !model.safetyGate.isReady ? "Sincronizzazione non avviata: monitoraggio o inventario non pronto" : "Sincronizzazione non avviata: operazione già in corso o blocco di sicurezza"
-            }
+            copy.status = copy.queueRebuildRequired ? "Sincronizzazione non avviata: verifica archivio richiesta o coda non leggibile" : !model.monitoring || !model.safetyGate.isReady ? "Sincronizzazione non avviata: monitoraggio o inventario non pronto" : "Sincronizzazione non avviata: operazione già in corso o blocco di sicurezza"
             copy.recordBlockedStart(reason:copy.status)
             return
         }
@@ -838,7 +938,7 @@ final class MacSyncRuntime: ObservableObject {
         autoTimer = nil
         nextAutomaticAttempt = nil
         guard !shuttingDown, !savingSchedule, !folderConfigurationBusy, !suspendedUntilNextLaunch, !finalShutdownHolding,
-              !rectificationPending, copy.automaticCopiesEnabled, !copy.queueRebuildRequired,
+              copy.automaticCopiesEnabled, !copy.queueRebuildRequired,
               !copy.active, !copy.maintaining, !copy.auditBusy, !copy.interruptionRequested, copy.liveProgress == nil else { return }
         let schedule = settings.schedule
         let now = Date()

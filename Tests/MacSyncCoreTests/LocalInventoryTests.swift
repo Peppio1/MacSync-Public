@@ -12,6 +12,36 @@ final class LocalInventoryTests: XCTestCase {
         return (base, source, database)
     }
 
+    func testAuditFingerprintDoesNotChangePersistedInventoryEquality() throws {
+        let (base, root, _) = try temporaryFixture()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let folder = root.appendingPathComponent("photos", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("unchanged".utf8).write(to: folder.appendingPathComponent("a.jpg"))
+
+        let scanned = try LocalScanner.scan(root: root, ignoreDSStore: true)
+        for item in scanned where item.kind == "file" || item.kind == "directory" {
+            XCTAssertNotNil(item.verificationFingerprint)
+            // Reconstruct the fields actually persisted by file_inventory.
+            let stored = TrackedItem(
+                relativePath: item.relativePath, kind: item.kind,
+                size: item.size, modifiedAt: item.modifiedAt,
+                changeStamp: item.changeStamp
+            )
+            XCTAssertEqual(item, stored)
+            XCTAssertEqual(stored, item)
+            XCTAssertNotEqual(
+                item,
+                TrackedItem(
+                    relativePath: item.relativePath, kind: item.kind,
+                    size: item.size + 1, modifiedAt: item.modifiedAt,
+                    changeStamp: item.changeStamp
+                )
+            )
+        }
+        XCTAssertEqual(scanned.count, 2)
+    }
+
     func testRemotePOSIXMetadataScanPreservesFileIdentityAndExclusions() throws {
         let (base,root,_) = try temporaryFixture()
         defer { try? FileManager.default.removeItem(at:base) }
@@ -269,4 +299,23 @@ final class LocalInventoryTests: XCTestCase {
         XCTAssertThrowsError(try inventory.reconcile(rootID: "photos", root: root, subtree: foreign))
         XCTAssertEqual(try inventory.itemCount(rootID: "photos"), 0)
     }
+    func testReadOnlyJournalDoesNotCreateDatabaseOrChangeQueuedJobs() throws {
+        let base=FileManager.default.temporaryDirectory.appendingPathComponent(
+            "macsync-journal-reader-"+UUID().uuidString)
+        try FileManager.default.createDirectory(at:base,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:base) }
+        let db=base.appendingPathComponent("read-lane.sqlite").path
+
+        XCTAssertThrowsError(try ChangeJournal(path:db,readOnly:true))
+        XCTAssertFalse(FileManager.default.fileExists(atPath:db))
+        let writer=try ChangeJournal(path:db)
+        try writer.enqueue(rootID:"test",relativePath:"photo.jpg",kind:.upsert)
+        let reader=try ChangeJournal(path:db,readOnly:true)
+        XCTAssertEqual(try reader.pending().count,1)
+        XCTAssertThrowsError(try reader.enqueue(rootID:"test",relativePath:"other.jpg",kind:.upsert))
+        XCTAssertEqual(try writer.pending().count,1)
+        XCTAssertEqual(try reader.pending().count,1)
+    }
+
+
 }

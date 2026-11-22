@@ -4,6 +4,9 @@ import CryptoKit
 
 public enum ArchiveAuditMode: String, Codable, CaseIterable, Sendable {
     case quick, intelligent, deep
+    /// Only these modes are available to operators. Keep .deep internally
+    /// for historical reports and safety/regression diagnostics.
+    public static let selectableModes: [ArchiveAuditMode] = [.quick, .intelligent]
     public var label: String {
         switch self {
         case .quick: return "Rapida (metadati)"
@@ -22,6 +25,31 @@ public struct ArchiveAuditSettings: Codable, Equatable, Sendable {
     public var hour = 3
     public var minute = 0
     public init() {}
+
+    /// Migrate only the operator selection; legacy DEEP reports and the
+    /// internal SHA-256 code remain decodable and available for diagnostics.
+    /// Return whether the stored selection actually changed.
+    @discardableResult public mutating func migrateLegacyDeepSelection() -> Bool {
+        guard mode == .deep else { return false }
+        mode = .intelligent
+        return true
+    }
+
+    /// Restore the existing settings object without discarding schedule,
+    /// repair and enabled flags. Write back immediately only on migration.
+    /// Invalid/unknown settings retain the established default fallback.
+    public static func loadMigratingLegacyDeep(from defaults: UserDefaults, key: String,
+                                               at date: Date = Date()) -> Self {
+        guard let data = defaults.data(forKey: key),
+              var restored = try? JSONDecoder().decode(Self.self, from: data),
+              restored.next(after: date) != nil else { return Self() }
+        if restored.migrateLegacyDeepSelection(),
+           let encoded = try? JSONEncoder().encode(restored) {
+            defaults.set(encoded, forKey: key)
+        }
+        return restored
+    }
+
     public func next(after date: Date, calendar: Calendar = .current) -> Date? {
         guard (0...23).contains(hour), (0...59).contains(minute),
               (1...7).contains(weekday), (1...28).contains(monthDay) else { return nil }
@@ -264,19 +292,27 @@ public final class ArchiveAudit {
                     diagnostic: (ArchiveAuditProgress) -> Void = { _ in },
                     progress: (ArchiveAuditProgress) -> Void = { _ in }) throws -> ArchiveAuditReport {
         var state = ArchiveAuditProgress()
+        // One indexed read of the already-approved SQLite rename plan.
+        // Its relationships are NOT inferred from equal size or timestamps.
+        let pendingRenames = try NameRectification.pendingProtection(journal: journal)
         state.deletionCandidates = deletionCandidates
         let startTick = ProcessInfo.processInfo.systemUptime
         var published: Double = 0
+        var lastDiagnostic: Double = 0
         func check() throws { if cancellation.isCancelled { throw SeedVerificationError.cancelled } }
-        func diagnosticSnapshot() {
-            // Do not keep a shared reference to the growing findings array on
-            // every file event (would trigger copy-on-write on each append).
+        func diagnosticSnapshot(force: Bool = false) {
+            // Diagnostic snapshots previously copied even the large report
+            // structure on every item/visit. Rate-limit only these optional
+            // snapshots; all items still affect counts and safety checks.
+            let now=ProcessInfo.processInfo.systemUptime
+            guard force || now-lastDiagnostic >= 0.2 else { return }
+            lastDiagnostic=now
             var lightweight = state
             lightweight.differences = []; lightweight.deletionCandidates = []
             diagnostic(lightweight)
         }
         func report(force: Bool = false) {
-            diagnosticSnapshot()
+            diagnosticSnapshot(force:force)
             let now = ProcessInfo.processInfo.systemUptime
             if force || now-published >= 1 { published=now; progress(state) }
         }
@@ -406,7 +442,13 @@ public final class ArchiveAudit {
                             pair.source[name]?.kind != pair.target[name]?.kind) ||
                         pair.source[name]?.kind == "symlink" || pair.target[name]?.kind == "symlink"
                     }
-                    if collision || item.kind == "symlink" {
+                    if pendingRenames.protects(rootID: mapping.rootID, path: path) {
+                        // A known outstanding rename can present as a missing
+                        // source-name and an extra old destination-name. Do
+                        // not hash, enqueue repairs or authorize deletion.
+                        kind = .uncertain
+                        detail = "Rettifica nomi registrata e ancora pendente: copia e cancellazione sospese"
+                    } else if collision || item.kind == "symlink" {
                         detail = "Percorso ambiguo, tipo incompatibile o collegamento simbolico"
                     } else if src == nil { kind = .extra }
                     else if dst == nil {
@@ -416,13 +458,25 @@ public final class ArchiveAudit {
                     else if item.kind == "directory" {
                         kind = .matching
                         if collectMetadataMatches && shouldCollectMetadataMatch(mapping.rootID,path) {
-                            let a = try Self.safeURL(path,mapping:mapping,destination:false,listingCache:listingCache)
-                            let b = try Self.safeURL(path,mapping:mapping,destination:true,listingCache:listingCache)
-                            let beforeA = try SeededArchiveVerifier.fingerprint(a,directory:true)
-                            let beforeB = try SeededArchiveVerifier.fingerprint(b,directory:true)
-                            guard try SeededArchiveVerifier.fingerprint(a,directory:true) == beforeA,
-                                  try SeededArchiveVerifier.fingerprint(b,directory:true) == beforeB else {
-                                throw SeedVerificationError.changedDuringRead
+                            let beforeA: SeedFileFingerprint
+                            let beforeB: SeedFileFingerprint
+                            if mode == .quick,
+                               let scannedSource = src!.verificationFingerprint,
+                               let scannedTarget = dst!.verificationFingerprint {
+                                // Directory metadata was already collected as
+                                // part of the two complete inventories. Live
+                                // validation is required before SQLite ACK.
+                                beforeA = scannedSource
+                                beforeB = scannedTarget
+                            } else {
+                                let a = try Self.safeURL(path,mapping:mapping,destination:false,listingCache:listingCache)
+                                let b = try Self.safeURL(path,mapping:mapping,destination:true,listingCache:listingCache)
+                                beforeA = try SeededArchiveVerifier.fingerprint(a,directory:true)
+                                beforeB = try SeededArchiveVerifier.fingerprint(b,directory:true)
+                                guard try SeededArchiveVerifier.fingerprint(a,directory:true) == beforeA,
+                                      try SeededArchiveVerifier.fingerprint(b,directory:true) == beforeB else {
+                                    throw SeedVerificationError.changedDuringRead
+                                }
                             }
                             onVerifiedDirectory(mapping.rootID,path,beforeA,beforeB)
                         }
@@ -448,10 +502,23 @@ public final class ArchiveAudit {
                         kind = abs(src!.modifiedAt-dst!.modifiedAt) <= 2 ? .matching : .different
                         if kind == .different { detail = "Data di modifica diversa" }
                         else if collectMetadataMatches && shouldCollectMetadataMatch(mapping.rootID,path) {
-                            let a = try Self.safeURL(path,mapping:mapping,destination:false,listingCache:listingCache)
-                            let b = try Self.safeURL(path,mapping:mapping,destination:true,listingCache:listingCache)
-                            let beforeA = try SeededArchiveVerifier.fingerprint(a)
-                            let beforeB = try SeededArchiveVerifier.fingerprint(b)
+                            let beforeA: SeedFileFingerprint
+                            let beforeB: SeedFileFingerprint
+                            if mode == .quick,
+                               let scannedSource = src!.verificationFingerprint,
+                               let scannedTarget = dst!.verificationFingerprint {
+                                // The scanner already obtained both no-follow stat records.
+                                // Keep the complete fingerprints for live pre-commit validation.
+                                // This removes two redundant SMB metadata requests and exact
+                                // parent listing walks for every pending quick-match candidate.
+                                beforeA = scannedSource
+                                beforeB = scannedTarget
+                            } else {
+                                let a = try Self.safeURL(path,mapping:mapping,destination:false,listingCache:listingCache)
+                                let b = try Self.safeURL(path,mapping:mapping,destination:true,listingCache:listingCache)
+                                beforeA = try SeededArchiveVerifier.fingerprint(a)
+                                beforeB = try SeededArchiveVerifier.fingerprint(b)
+                            }
                             guard beforeA.size == src!.size, beforeB.size == dst!.size,
                                   abs(beforeA.modifiedAt-src!.modifiedAt) < 0.002,
                                   abs(beforeB.modifiedAt-dst!.modifiedAt) < 0.002,
@@ -550,6 +617,9 @@ public final class ArchiveAudit {
         state.phase = "Finalizzazione"; state.currentPath = ""; report(force:true)
         var repairs: [(rootID:String, sourcePath:String, item:TrackedItem)] = []
         if repair {
+            // A malformed or newly recorded plan is an integrity fault, not
+            // a reason to silently schedule a conflicting UPSERT.
+            let latestProtection = try NameRectification.pendingProtection(journal: journal)
             // Revalidate local candidates just before one atomic enqueuing.
             // No network copy occurs until the normal sync engine runs.
             for (map,item,stamp,fingerprint) in candidates {
@@ -560,6 +630,9 @@ public final class ArchiveAudit {
                     if let fingerprint {
                         guard try SeededArchiveVerifier.fingerprint(url) == fingerprint else { continue }
                     } else { _ = try Self.rootStamp(url) }
+                    // Recheck the durable plan before any audit UPSERT: a
+                    // recently recorded rename must win over a stale finding.
+                    guard !latestProtection.protects(rootID: map.rootID, path: item.relativePath) else { continue }
                     repairs.append((map.rootID,map.source.path,item))
                 } catch { continue }
             }
