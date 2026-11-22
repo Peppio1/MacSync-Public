@@ -12,6 +12,14 @@ final class SignedUpdatePolicyTests: XCTestCase {
         XCTAssertFalse(SignedUpdatePolicy.accepts(installed: "0.16.0", requested: "0.16.1", offered: "0.16.1", channel: nil, asset: URL(string: "https://example.com/update.zip")))
         XCTAssertNil(SignedUpdatePolicy.assetURL(version: "0.16.1-rc.1"))
         XCTAssertNil(SignedUpdatePolicy.assetURL(version: "v0.16.1"))
+        // An installed 0.18.13 discovers only the published stable 0.18.15
+        // with the exact canonical ZIP, never a pre-release or alternate URL.
+        let release = SignedUpdatePolicy.assetURL(version: "0.18.15")
+        XCTAssertTrue(SignedUpdatePolicy.accepts(installed: "0.18.13", requested: "0.18.15",
+            offered: "0.18.15", channel: nil, asset: release))
+        XCTAssertFalse(SignedUpdatePolicy.accepts(installed: "0.18.13", requested: "0.18.15",
+            offered: "0.18.15", channel: "beta", asset: release))
+        XCTAssertNil(SignedUpdatePolicy.assetURL(version: "0.18.15-rc.1"))
         XCTAssertEqual(Data(base64Encoded: SignedUpdatePolicy.publicKey)?.count, 32)
     }
 
