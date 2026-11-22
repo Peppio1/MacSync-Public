@@ -1016,6 +1016,9 @@ final class MountedCopyController: ObservableObject {
                     worker?.onTransferProgress = nil
                     mirrorWorker?.onEvent = nil
                     mirrorWorker?.onJobStarted = nil
+                    // Cycle-level diagnostics must not inherit the last
+                    // file's job identity in the activity log.
+                    log.currentJob=nil
                     if cancellation.endCycle() { outcomeState = "interrupted"
                         try? log.record(level: .info, rootID: "app", action: "cycle", message: "Ciclo interrotto su richiesta; operazioni in coda preservate")
                     }
@@ -1037,7 +1040,6 @@ final class MountedCopyController: ObservableObject {
                     let warning = historyError
                     let finalOutcome = outcomeState
                     TechnicalFallbackLog.record(databasePath:database.path,cycleID:cycleID,action:"cycle_end",message:finalOutcome)
-                    log.currentJob=nil
                     log.cycleID=nil
                     if !automatic { timer.cancel() }
                     DispatchQueue.main.async { [weak self] in
