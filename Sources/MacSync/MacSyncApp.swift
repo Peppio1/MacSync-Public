@@ -918,6 +918,11 @@ struct MacSyncConfigurationView: View {
                                 Text(URL(fileURLWithPath:plan.parent).lastPathComponent).font(.subheadline.weight(.semibold))
                                 Text(plan.parent).font(.caption).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
                                 healthLabel(destinationHealth)
+                                if !runtime.remountRecoveryStatus.isEmpty {
+                                    Text(runtime.remountRecoveryStatus)
+                                        .font(.caption).foregroundStyle(.secondary)
+                                        .fixedSize(horizontal:false,vertical:true)
+                                }
                                 if runtime.parentHealth.isReady {
                                     ForEach(Array(plan.sources.filter{runtime.targetHealth[$0.id]?.isError == true}.prefix(4))) { item in
                                         Text(item.name + ": " + (runtime.targetHealth[item.id]?.description ?? "")).font(.caption).foregroundStyle(.red)
