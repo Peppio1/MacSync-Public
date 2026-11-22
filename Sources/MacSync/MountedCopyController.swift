@@ -1838,7 +1838,7 @@ final class MountedCopyController: ObservableObject {
         // The save dialog is interactive, but SQLite reads and file writes
         // must never occupy the main actor, especially while a scan runs.
         let panel = NSSavePanel()
-        panel.nameFieldString = "MacSync_sync_log.tsv"
+        panel.nameFieldStringValue = "MacSync_sync_log.tsv"
         panel.title = "Esporta registro sincronizzazioni"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         exportingLog = true
