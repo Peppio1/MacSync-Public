@@ -183,11 +183,13 @@ public struct IncompatibleNameListPage: Sendable {
     public let destinationFolders: Int
     public let destinationFiles: Int
     public let selectableIDs: [String]
+    /// Every selectable result matching the filter, including nonvisible pages.
+    public let matchingSelectableIDs: [String]
 
     public init(rows: [IncompatibleName], total: Int,
                 sourceFolders: Int, sourceFiles: Int,
                 destinationFolders: Int, destinationFiles: Int,
-                selectableIDs: [String]) {
+                selectableIDs: [String], matchingSelectableIDs: [String]) {
         self.rows = rows
         self.total = total
         self.sourceFolders = sourceFolders
@@ -195,6 +197,7 @@ public struct IncompatibleNameListPage: Sendable {
         self.destinationFolders = destinationFolders
         self.destinationFiles = destinationFiles
         self.selectableIDs = selectableIDs
+        self.matchingSelectableIDs = matchingSelectableIDs
     }
 }
 
@@ -211,11 +214,13 @@ public enum IncompatibleNameListing {
         rows.reserveCapacity(size)
         var matches = 0
         var selectableIDs: [String] = []
+        var matchingSelectableIDs: [String] = []
         var sourceFolders = 0, sourceFiles = 0
         var destinationFolders = 0, destinationFiles = 0
         for (index, item) in items.enumerated() {
             if index % 128 == 0 && !shouldContinue() { return nil }
-            if NameRectification.proposedName(item.name) != nil { selectableIDs.append(item.id) }
+            let selectable = NameRectification.proposedName(item.name) != nil
+            if selectable { selectableIDs.append(item.id) }
             if item.side == .source {
                 if item.isDirectory { sourceFolders += 1 } else { sourceFiles += 1 }
             } else {
@@ -227,6 +232,7 @@ public enum IncompatibleNameListing {
                    item.relativePath.localizedCaseInsensitiveContains(search) ||
                    item.rootPath.localizedCaseInsensitiveContains(search) ||
                    item.reason.localizedCaseInsensitiveContains(search)) else { continue }
+            if selectable { matchingSelectableIDs.append(item.id) }
             if matches >= start && rows.count < size { rows.append(item) }
             matches += 1
         }
@@ -234,7 +240,7 @@ public enum IncompatibleNameListing {
         return IncompatibleNameListPage(rows: rows, total: matches,
             sourceFolders: sourceFolders, sourceFiles: sourceFiles,
             destinationFolders: destinationFolders, destinationFiles: destinationFiles,
-            selectableIDs: selectableIDs)
+            selectableIDs: selectableIDs, matchingSelectableIDs: matchingSelectableIDs)
     }
 }
 
