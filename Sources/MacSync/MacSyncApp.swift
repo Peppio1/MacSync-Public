@@ -103,6 +103,30 @@ final class MacSyncViewModel: ObservableObject {
         ]
     }
 
+    /// Existing persisted common-root configuration only. Automatic recovery
+    /// is deliberately unavailable for ambiguous legacy folder pairs.
+    var remountRecoveryPlan: CommonFolderPlan? { commonPlan }
+
+    /// Adopt a different Finder mount point only after the core has matched
+    /// the immutable directory identities and atomically rebound SQLite.
+    @discardableResult
+    func acceptVerifiedSMBRemount(oldParent: String, newParent: String,
+                                  newVolume: VolumeFingerprint) -> Bool {
+        guard var plan = commonPlan, plan.parent == oldParent,
+              let expected = plan.expected,
+              expected.fileSystem.lowercased() == "smbfs",
+              expected.isStrongIdentity,
+              newVolume.fileSystem.lowercased() == "smbfs",
+              newVolume.mountSource == expected.mountSource,
+              newVolume.mountPath != expected.mountPath else { return false }
+        plan.parent = newParent
+        plan.expected = newVolume
+        guard plan.isValid, let encoded = try? JSONEncoder().encode(plan) else { return false }
+        UserDefaults.standard.set(encoded, forKey:"MacSync.commonFolders.v1")
+        commonPlan = plan
+        return true
+    }
+
     var editableCommonPlan: CommonFolderPlan {
         if let commonPlan { return commonPlan }
         let legacy = configuredPairs().filter { !$0.path.isEmpty }
