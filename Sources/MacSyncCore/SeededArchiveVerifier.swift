@@ -539,12 +539,13 @@ public struct SeededArchiveSession: Sendable {
         return report
     }
 
-    /// QUICK/INTELLIGENT operational audit: perform one metadata inventory on
-    /// each side, classify matches from the acquired snapshot and enqueue only
-    /// genuinely missing/different paths. Crucially, NEVER acknowledge existing
-    /// UPsert jobs: FSEvents and durable queued changes always win even when
-    /// snapshot metadata happen to match. INTELLIGENT keeps its selective hash.
-    /// Unlike auditAndRecognize, this method never starts mass SMB revalidation.
+    /// QUICK/INTELLIGENT operational audit: one metadata inventory per side,
+    /// then local SQLite reconciliation. Only proven INITIAL inventory jobs
+    /// may be completed from corresponding metadata; monitor, audit, rebind
+    /// and legacy-unknown jobs are NEVER acknowledged. A newer FSEvents event
+    /// replaces the initial job and takes precedence during the SQLite commit.
+    /// INTELLIGENT keeps its selective SHA-256 checks; neither mode starts
+    /// the old mass SMB approval/revalidation phase.
     public func auditPreservingQueuedChanges(
         mode: ArchiveAuditMode,
         repair: Bool = true,
@@ -554,11 +555,21 @@ public struct SeededArchiveSession: Sendable {
         deletionCandidates: Set<String> = []
     ) throws -> ArchiveAuditReport {
         let journal = try openJournal()
-        let result = try ArchiveAudit(journal: journal, mappings: mappings).run(
+        var result = try ArchiveAudit(journal: journal, mappings: mappings).run(
             mode: mode, repair: repair, cancellation: cancellation,
             deletionCandidates: deletionCandidates, diagnostic: diagnostic, progress: progress
         )
         try checkFileIdentity()
+        if repair {
+            guard cancellation.mayCommit else { throw SeedVerificationError.cancelled }
+            // The audit's findings already carry the metadata snapshot.
+            // Reconcile exclusively in SQLite: NO destination/network re-read.
+            let counts = try journal.acknowledgeInitialInventoryMatches(
+                result.findings,shouldContinue:{ cancellation.mayCommit }
+            )
+            result.recognizedFiles = counts.files
+            result.recognizedDirectories = counts.directories
+        }
         return result
     }
 
