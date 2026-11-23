@@ -539,6 +539,40 @@ public struct SeededArchiveSession: Sendable {
         return report
     }
 
+    /// QUICK/INTELLIGENT operational audit: one metadata inventory per side,
+    /// then local SQLite reconciliation. Only proven INITIAL inventory jobs
+    /// may be completed from corresponding metadata; monitor, audit, rebind
+    /// and legacy-unknown jobs are NEVER acknowledged. A newer FSEvents event
+    /// replaces the initial job and takes precedence during the SQLite commit.
+    /// INTELLIGENT keeps its selective SHA-256 checks; neither mode starts
+    /// the old mass SMB approval/revalidation phase.
+    public func auditPreservingQueuedChanges(
+        mode: ArchiveAuditMode,
+        repair: Bool = true,
+        cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
+        diagnostic: (ArchiveAuditProgress) -> Void = { _ in },
+        progress: (ArchiveAuditProgress) -> Void = { _ in },
+        deletionCandidates: Set<String> = []
+    ) throws -> ArchiveAuditReport {
+        let journal = try openJournal()
+        var result = try ArchiveAudit(journal: journal, mappings: mappings).run(
+            mode: mode, repair: repair, cancellation: cancellation,
+            deletionCandidates: deletionCandidates, diagnostic: diagnostic, progress: progress
+        )
+        try checkFileIdentity()
+        if repair {
+            guard cancellation.mayCommit else { throw SeedVerificationError.cancelled }
+            // The audit's findings already carry the metadata snapshot.
+            // Reconcile exclusively in SQLite: NO destination/network re-read.
+            let counts = try journal.acknowledgeInitialInventoryMatches(
+                result.findings,shouldContinue:{ cancellation.mayCommit }
+            )
+            result.recognizedFiles = counts.files
+            result.recognizedDirectories = counts.directories
+        }
+        return result
+    }
+
     /// Use one complete archive scan and reuse its verified fingerprints.
     /// Only job IDs captured before the scan can become approval candidates.
     /// No queue acknowledgement happens until a guarded commit is requested.

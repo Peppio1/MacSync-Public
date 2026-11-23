@@ -438,7 +438,7 @@ final class MountedCopyController: ObservableObject {
         if effectiveSettings.migrateLegacyDeepSelection() { auditSettings = effectiveSettings }
         if queueRebuildRequired && effectiveSettings.mode == .quick { effectiveSettings.mode = .intelligent }
         let settings = effectiveSettings
-        guard !active && liveProgress == nil && !interruptionRequested else { auditStatus = "Sospendi le copie prima del riconoscimento"; return }
+        guard !active && liveProgress == nil && !interruptionRequested else { auditStatus = "Sospendi le copie prima della verifica"; return }
         let authorization = mirrorEnabled ? mirrorAuthorization : nil
         let configured = sources.filter { !$0.path.isEmpty || !$0.destination.isEmpty }
         guard !configured.isEmpty,
@@ -450,8 +450,9 @@ final class MountedCopyController: ObservableObject {
             alert.informativeText = (settings.mode == .intelligent
                 ? "Confronta percorsi, dimensioni e date (tolleranza 2 secondi); utilizza SHA-256 selettivo sui file dubbi. "
                 : "La verifica rapida confronta percorsi, dimensioni e date (tolleranza 2 secondi), senza leggere il contenuto. ")
-                + "I file corrispondenti saranno riconosciuti e le differenze sicure accodate automaticamente dopo un backup del database. Nessuna scrittura sulle destinazioni."
-                + " Nessun file presente soltanto sul server verrà cancellato."
+                + "I file con metadati corrispondenti saranno segnalati come allineati. Solo le copie del primo inventario riconoscibili con certezza potranno essere considerate soddisfatte; gli eventi FSEvents e i job storici ambigui rimangono in coda. "
+                + "Le differenze sicure saranno accodate senza duplicare job pendenti, dopo un backup del database. "
+                + "Nessuna scrittura sulle destinazioni e nessuna cancellazione dei file presenti soltanto sul server."
             alert.addButton(withTitle:"Avvia verifica"); alert.addButton(withTitle:"Annulla")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
@@ -478,7 +479,7 @@ final class MountedCopyController: ObservableObject {
             var last=ArchiveAuditProgress(started:started)
             last.phase="Preparazione verifica"
             var currentRoot="app"
-            try? auditLog?.record(level:.info,rootID:"app",action:"audit_start",message:"ID \(auditID) — " + settings.mode.label + " avviata; riconoscimento e accodamento automatici")
+            try? auditLog?.record(level:.info,rootID:"app",action:"audit_start",message:"ID \(auditID) — " + settings.mode.label + " avviata; inventario unico e conferma locale dei soli job iniziali")
             do {
                 if cancel.isCancelled { throw SeedVerificationError.cancelled }
                 let journal = try ChangeJournal(path:db.path)
@@ -512,41 +513,15 @@ final class MountedCopyController: ObservableObject {
                 guard cancel.mayCommit else { throw SeedVerificationError.cancelled }
                 let candidates = (try? authorization?.auditDeletionCandidates(journal:journal,mappings:maps,shouldContinue:{ !cancel.isCancelled })) ?? []
                 let local = try SeededArchiveSession(database:db,mappings:maps)
-                let result = try local.auditAndRecognize(mode:settings.mode,repair:true,cancellation:cancel,diagnostic:diagnostic,progress:progress,deletionCandidates:candidates)
-                var report = result.audit
-                let recognition = result.recognition
-                var recognitionProgress = last
-                recognitionProgress.differences = report.findings.filter { $0.objectKind == "file" && $0.kind != .matching }
-                recognitionProgress.deletionCandidates = report.deletionCandidates ?? []
-                recognitionProgress.counts = report.displayCounts ?? .calculate(report.findings,deletionCandidates:recognitionProgress.deletionCandidates)
-                recognitionProgress.phase = "Riconoscimento automatico"
-                recognitionProgress.comparisonStarted = Date()
-                recognitionProgress.total = recognition.matches.count
-                recognitionProgress.compared = 0
-                recognitionProgress.currentPath = ""
-                diagnostic(recognitionProgress); progress(recognitionProgress)
-                var recognizedFiles = 0, recognizedDirectories = 0
-                let approvalStarted = ProcessInfo.processInfo.systemUptime
-                let acknowledged: Int
-                do {
-                    // Record this phase even when approval is cancelled or fails.
-                    defer {
-                        try? auditLog?.record(level:.info,rootID:"app",action:"metric_audit_recognition",
-                                              durationSeconds:ProcessInfo.processInfo.systemUptime-approvalStarted,
-                                              message:"Durata riconoscimento automatico")
-                    }
-                    acknowledged = try local.approve(report:recognition,cancellation:cancel,progress:{ processed,total in
-                        recognitionProgress.compared = processed
-                        recognitionProgress.total = total
-                        diagnostic(recognitionProgress); progress(recognitionProgress)
-                    },onCommit:{
-                        recognitionProgress.phase = "Finalizzazione database"
-                        recognitionProgress.comparisonStarted = nil
-                        diagnostic(recognitionProgress); progress(recognitionProgress)
-                    },onCounts:{ files,directories in recognizedFiles = files; recognizedDirectories = directories })
-                }
-                report.recognizedFiles = recognizedFiles
-                report.recognizedDirectories = recognizedDirectories
+                // QUICK reads each destination item's metadata only in the
+                // inventory. INTELLIGENT may additionally hash doubtful files.
+                // No second mass-recognition pass, and no acknowledgment of
+                // existing FSEvents or other pending SQLite jobs.
+                var report = try local.auditPreservingQueuedChanges(
+                    mode:settings.mode,repair:true,cancellation:cancel,
+                    diagnostic:diagnostic,progress:progress,deletionCandidates:candidates
+                )
+                var summaryProgress = last
                 if let rebuildToken {
                     guard cancel.mayCommit else { throw SeedVerificationError.cancelled }
                     if let authorization {
@@ -559,11 +534,11 @@ final class MountedCopyController: ObservableObject {
                     report.deletionCandidates = freshCandidates
                     report.displayCounts = .calculate(report.findings,deletionCandidates:freshCandidates)
                 }
-                recognitionProgress.phase = "Salvataggio report"
-                recognitionProgress.comparisonStarted = nil
-                progress(recognitionProgress)
+                summaryProgress.phase = "Salvataggio report"
+                summaryProgress.comparisonStarted = nil
+                progress(summaryProgress)
                 let savedReport = report
-                try? auditLog?.record(level:.info,rootID:"app",action:"seed_recognized",message:settings.mode.label + ": " + String(recognizedFiles) + " file e " + String(recognizedDirectories) + " cartelle riconosciuti automaticamente; nessuna scrittura sul server")
+                try? auditLog?.record(level:.info,rootID:"app",action:"audit_queue_preserved",message:settings.mode.label + ": completati solo " + String((report.recognizedFiles ?? 0) + (report.recognizedDirectories ?? 0)) + " job iniziali corrispondenti; conservati tutti i job FSEvents, audit e legacy; accodate " + String(report.queuedRepairs) + " differenze sicure; nessuna scrittura sul server")
  
                 var storageWarning = ""
                 do {
@@ -593,10 +568,10 @@ final class MountedCopyController: ObservableObject {
                     self.finishAuditCancellationMetric(cycleID: auditID)
                     self.auditReport = savedReport
                     if rebuildToken != nil { self.queueRebuildRequired = false }
-                    self.seedReady = false; self.seedVerifiedCount = acknowledged
-                    self.seedInspectedCount = recognition.inspected; self.seedReadBytes = recognition.bytesRead
-                    self.seedStatus = "Allineamento automatico: \(acknowledged) elementi riconosciuti su \(recognition.verifiedCount) candidati"
-                    self.auditStatus = "Verifica conclusa: " + String(savedReport.queuedRepairs) + " riparazioni accodate; \(savedReport.recognizedFiles ?? 0) file e \(savedReport.recognizedDirectories ?? 0) cartelle riconosciuti" + warning
+                    self.seedReady = false; self.seedVerifiedCount = 0
+                    self.seedInspectedCount = 0; self.seedReadBytes = savedReport.bytesRead
+                    self.seedStatus = "Verifica completata: FSEvents e job storici conservati; " + String((savedReport.recognizedFiles ?? 0) + (savedReport.recognizedDirectories ?? 0)) + " job iniziali soddisfatti"
+                    self.auditStatus = "Verifica conclusa: " + String(savedReport.queuedRepairs) + " nuove operazioni accodate; " + String((savedReport.recognizedFiles ?? 0) + (savedReport.recognizedDirectories ?? 0)) + " job iniziali già soddisfatti" + warning
                     self.auditProgress = nil
                     self.auditBusy = false
                     self.maintaining = false

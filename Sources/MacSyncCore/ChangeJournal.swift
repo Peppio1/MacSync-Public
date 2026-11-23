@@ -6,6 +6,16 @@ public enum ChangeKind: String, Codable, Sendable {
     case delete
 }
 
+/// Persistent origin of a queue operation. Older databases remain explicitly
+/// unknown; never guess that an old job was an initial inventory job.
+public enum QueuedChangeOrigin: String, Sendable {
+    case initialInventory = "initial_inventory"
+    case sourceMonitor = "source_monitor"
+    case archiveAudit = "archive_audit"
+    case destinationRebind = "destination_rebind"
+    case legacyUnknown = "legacy_unknown"
+}
+
 public struct QueuedChange: Equatable, Sendable {
     public let id: Int64
     public let rootID: String
@@ -69,9 +79,32 @@ public final class ChangeJournal {
                     relative_path TEXT NOT NULL,
                     kind TEXT NOT NULL CHECK(kind IN ('upsert','delete')),
                     recorded_at REAL NOT NULL,
-                    completed INTEGER NOT NULL DEFAULT 0
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    origin TEXT NOT NULL DEFAULT 'legacy_unknown'
                 );
                 """)
+            // Additive, local-only migration. Old pending rows retain their
+            // original IDs and remain unclassified, never retroactively marked
+            // as initial/verified by an audit.
+            try execute("BEGIN IMMEDIATE TRANSACTION;")
+            do {
+                let queueColumns = try prepare("PRAGMA table_info(change_queue);")
+                var hasQueueOrigin = false
+                var queueResult = sqlite3_step(queueColumns)
+                while queueResult == SQLITE_ROW {
+                    if columnText(queueColumns, at: 1) == "origin" { hasQueueOrigin = true }
+                    queueResult = sqlite3_step(queueColumns)
+                }
+                sqlite3_finalize(queueColumns)
+                guard queueResult == SQLITE_DONE else { throw databaseFailure() }
+                if !hasQueueOrigin {
+                    try execute("ALTER TABLE change_queue ADD COLUMN origin TEXT NOT NULL DEFAULT 'legacy_unknown';")
+                }
+                try execute("COMMIT;")
+            } catch {
+                try? execute("ROLLBACK;")
+                throw error
+            }
             try execute("CREATE TABLE IF NOT EXISTS name_rectification_batch(singleton INTEGER PRIMARY KEY CHECK(singleton=1), plan TEXT NOT NULL, next_move INTEGER NOT NULL DEFAULT 0, progress TEXT NOT NULL DEFAULT '[]');")
             // Child completion index, not another rename plan: identities and
             // old/new names remain exclusively in name_rectification_batch.
@@ -101,6 +134,7 @@ public final class ChangeJournal {
             try execute("CREATE TABLE IF NOT EXISTS verified_content_cache(root_id TEXT NOT NULL, relative_path TEXT NOT NULL, binding TEXT NOT NULL, source_stamp TEXT NOT NULL, target_stamp TEXT NOT NULL, PRIMARY KEY(root_id,relative_path));")
             try execute("CREATE TABLE IF NOT EXISTS directory_bindings(root_id TEXT NOT NULL, role TEXT NOT NULL, stamp TEXT NOT NULL, PRIMARY KEY(root_id,role));")
             try execute("CREATE INDEX IF NOT EXISTS idx_queue_pending ON change_queue(completed, id);")
+            try execute("CREATE INDEX IF NOT EXISTS idx_queue_origin ON change_queue(origin, completed, kind);")
             try execute("CREATE INDEX IF NOT EXISTS idx_queue_uploads ON change_queue(completed, kind, id);")
             try execute("CREATE INDEX IF NOT EXISTS idx_queue_current_path ON change_queue(root_id, relative_path, completed, id);")
             try execute("CREATE INDEX IF NOT EXISTS idx_queue_delete_pages ON change_queue(completed, kind, length(relative_path) DESC, id);")
@@ -259,8 +293,8 @@ public final class ChangeJournal {
             // publication paths for live SHA-256 reconciliation; existing
             // audit/monitor jobs win. No physical files are touched here.
             try execute("""
-                INSERT INTO change_queue(root_id,relative_path,kind,recorded_at)
-                SELECT DISTINCT q.root_id,q.relative_path,'upsert',strftime('%s','now')
+                INSERT INTO change_queue(root_id,relative_path,kind,recorded_at,origin)
+                SELECT DISTINCT q.root_id,q.relative_path,'upsert',strftime('%s','now'),'legacy_unknown'
                 FROM retired_publication_evidence e
                 JOIN change_queue q ON q.id=e.job_id
                 JOIN publication_intents p ON p.job_id=q.id
@@ -278,7 +312,8 @@ public final class ChangeJournal {
     }
 
     @discardableResult
-    public func enqueue(rootID: String, relativePath: String, kind: ChangeKind) throws -> Int64 {
+    public func enqueue(rootID: String, relativePath: String, kind: ChangeKind,
+                        origin: QueuedChangeOrigin = .sourceMonitor) throws -> Int64 {
         guard !rootID.isEmpty, !relativePath.isEmpty, !relativePath.hasPrefix("/"),
               !relativePath.split(separator: "/").contains(".."),
               !relativePath.contains("\0") else {
@@ -286,8 +321,8 @@ public final class ChangeJournal {
         }
 
         let statement = try prepare("""
-            INSERT INTO change_queue(root_id, relative_path, kind, recorded_at)
-            VALUES (?, ?, ?, ?);
+            INSERT INTO change_queue(root_id, relative_path, kind, recorded_at, origin)
+            VALUES (?, ?, ?, ?, ?);
             """)
         defer { sqlite3_finalize(statement) }
 
@@ -297,6 +332,7 @@ public final class ChangeJournal {
         guard sqlite3_bind_double(statement, 4, Date().timeIntervalSince1970) == SQLITE_OK else {
             throw databaseFailure()
         }
+        try bind(origin.rawValue, at: 5, in: statement)
         guard sqlite3_step(statement) == SQLITE_DONE else {
             throw databaseFailure()
         }
@@ -1022,8 +1058,8 @@ public final class ChangeJournal {
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
             let stmt = try prepare("""
-                INSERT INTO change_queue(root_id,relative_path,kind,recorded_at)
-                SELECT ?1,?2,'upsert',?3
+                INSERT INTO change_queue(root_id,relative_path,kind,recorded_at,origin)
+                SELECT ?1,?2,'upsert',?3,'archive_audit'
                 WHERE EXISTS(SELECT 1 FROM watched_roots WHERE root_id=?1 AND absolute_path=?4)
                   AND NOT EXISTS(SELECT 1 FROM change_queue WHERE root_id=?1 AND relative_path=?2 AND completed=0)
                   AND NOT EXISTS(SELECT 1 FROM file_inventory WHERE root_id=?1 AND relative_path=?2
@@ -1055,6 +1091,114 @@ public final class ChangeJournal {
             try execute("COMMIT;")
             return count
         } catch { try? execute("ROLLBACK;"); throw error }
+    }
+
+    /// Local-only query for diagnostics/tests. A migrated job is always
+    /// legacy_unknown unless it was explicitly created after the migration.
+    public func originOfJob(id: Int64) throws -> QueuedChangeOrigin? {
+        let statement = try prepare("SELECT origin FROM change_queue WHERE id=?;")
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_bind_int64(statement, 1, id) == SQLITE_OK else { throw databaseFailure() }
+        switch sqlite3_step(statement) {
+        case SQLITE_DONE: return nil
+        case SQLITE_ROW:
+            guard let origin = QueuedChangeOrigin(rawValue: columnText(statement, at: 0)) else {
+                throw JournalError.database("Invalid job origin stored in database")
+            }
+            return origin
+        default: throw databaseFailure()
+        }
+    }
+
+    /// Complete ONLY confirmed initial-inventory jobs using the matching
+    /// entries of an already acquired archive snapshot. This does not access
+    /// source or destination files, and never marks monitor/audit/legacy jobs
+    /// completed. Source root, exact current inventory and newer-job guards
+    /// are checked within one atomic SQLite transaction.
+    public func acknowledgeInitialInventoryMatches(
+        _ findings: [AuditFinding],
+        shouldContinue: () -> Bool = { true }
+    ) throws -> (files: Int, directories: Int) {
+        guard !findings.isEmpty else { return (0,0) }
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            // A queue rebuild or interrupted publication is NOT evidence of
+            // completed delivery; never use a snapshot to clear such jobs.
+            if try queueRebuildToken() != nil {
+                try execute("COMMIT;")
+                return (0,0)
+            }
+            let candidates = try prepare("""
+                SELECT root_id,relative_path
+                FROM change_queue
+                WHERE completed=0 AND kind='upsert' AND origin='initial_inventory';
+                """)
+            var initialPaths: Set<String> = []
+            var step = sqlite3_step(candidates)
+            while step == SQLITE_ROW {
+                guard shouldContinue() else {
+                    sqlite3_finalize(candidates)
+                    throw SeedVerificationError.cancelled
+                }
+                initialPaths.insert(columnText(candidates,at:0) + "\0" + columnText(candidates,at:1))
+                step = sqlite3_step(candidates)
+            }
+            sqlite3_finalize(candidates)
+            guard step == SQLITE_DONE else { throw databaseFailure() }
+            if initialPaths.isEmpty {
+                try execute("COMMIT;")
+                return (0,0)
+            }
+            let sql = """
+                UPDATE change_queue SET completed=1
+                WHERE completed=0 AND kind='upsert' AND origin='initial_inventory'
+                  AND root_id=?1 AND relative_path=?2
+                  AND NOT EXISTS (SELECT 1 FROM queue_rebuild_hold)
+                  AND EXISTS (SELECT 1 FROM watched_roots w
+                              WHERE w.root_id=change_queue.root_id AND w.absolute_path=?3)
+                  AND EXISTS (SELECT 1 FROM file_inventory f
+                              WHERE f.root_id=change_queue.root_id
+                                AND f.relative_path=change_queue.relative_path AND f.kind=?4
+                                AND (f.kind='directory' OR
+                                    (f.file_size=?5 AND ABS(f.modified_at-?6)<0.002)))
+                  AND NOT EXISTS (SELECT 1 FROM change_queue newer
+                                  WHERE newer.root_id=change_queue.root_id
+                                    AND newer.relative_path=change_queue.relative_path
+                                    AND newer.id>change_queue.id)
+                  AND NOT EXISTS (SELECT 1 FROM publication_intents i WHERE i.job_id=change_queue.id)
+                  AND NOT EXISTS (SELECT 1 FROM transfer_recovery t WHERE t.job_id=change_queue.id)
+                  AND NOT EXISTS (SELECT 1 FROM blocked_name_jobs b WHERE b.job_id=change_queue.id)
+                  AND NOT EXISTS (SELECT 1 FROM upload_retry r WHERE r.job_id=change_queue.id);
+                """
+            let update = try prepare(sql)
+            defer { sqlite3_finalize(update) }
+            var files=0, directories=0
+            for finding in findings {
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                guard finding.kind == .matching,
+                      finding.objectKind == "file" || finding.objectKind == "directory",
+                      WindowsPathSafety.validRelativePath(finding.relativePath),
+                      initialPaths.contains(finding.id) else { continue }
+                sqlite3_reset(update); sqlite3_clear_bindings(update)
+                try bind(finding.rootID, at:1, in:update)
+                try bind(finding.relativePath, at:2, in:update)
+                try bind(finding.sourceRoot, at:3, in:update)
+                try bind(finding.objectKind, at:4, in:update)
+                guard sqlite3_bind_int64(update,5,finding.sourceBytes ?? -1) == SQLITE_OK,
+                      sqlite3_bind_double(update,6,finding.sourceModifiedAt ?? -1) == SQLITE_OK,
+                      sqlite3_step(update) == SQLITE_DONE else { throw databaseFailure() }
+                let changed=Int(sqlite3_changes(connection))
+                if finding.objectKind == "file" { files += changed }
+                else { directories += changed }
+            }
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            try execute("COMMIT;")
+            return (files,directories)
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
     }
 
     public func plannedUploadCount(throughID: Int64 = Int64.max) throws -> Int {

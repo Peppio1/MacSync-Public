@@ -482,19 +482,26 @@ public final class ArchiveAudit {
                         }
                     }
                     else if src!.size != dst!.size {
-                        // Independently re-read both sides before declaring a size mismatch.
-                        let a = try Self.safeURL(path,mapping:mapping,destination:false,listingCache:listingCache)
-                        let b = try Self.safeURL(path,mapping:mapping,destination:true,listingCache:listingCache)
-                        let beforeA = try SeededArchiveVerifier.fingerprint(a)
-                        let beforeB = try SeededArchiveVerifier.fingerprint(b)
-                        guard beforeA.size == src!.size, beforeB.size == dst!.size,
-                              abs(beforeA.modifiedAt-src!.modifiedAt)<0.002,
-                              abs(beforeB.modifiedAt-dst!.modifiedAt)<0.002,
-                              try SeededArchiveVerifier.fingerprint(a) == beforeA,
-                              try SeededArchiveVerifier.fingerprint(b) == beforeB else {
-                            throw SeedVerificationError.changedDuringRead
+                        // QUICK/INTELLIGENT report this mismatch from the single
+                        // destination inventory. Re-statting every remote mismatch
+                        // would defeat the one-pass metadata policy. The transfer
+                        // worker independently validates paths and target safety
+                        // before any write; the audit itself never writes there.
+                        // Retain the internal DEEP mode's exact legacy checks.
+                        if mode == .deep {
+                            let a = try Self.safeURL(path,mapping:mapping,destination:false,listingCache:listingCache)
+                            let b = try Self.safeURL(path,mapping:mapping,destination:true,listingCache:listingCache)
+                            let beforeA = try SeededArchiveVerifier.fingerprint(a)
+                            let beforeB = try SeededArchiveVerifier.fingerprint(b)
+                            guard beforeA.size == src!.size, beforeB.size == dst!.size,
+                                  abs(beforeA.modifiedAt-src!.modifiedAt)<0.002,
+                                  abs(beforeB.modifiedAt-dst!.modifiedAt)<0.002,
+                                  try SeededArchiveVerifier.fingerprint(a) == beforeA,
+                                  try SeededArchiveVerifier.fingerprint(b) == beforeB else {
+                                throw SeedVerificationError.changedDuringRead
+                            }
+                            fingerprint = beforeA
                         }
-                        fingerprint = beforeA
                         kind = .different; detail = "Dimensione diversa"
                     }
                     else if mode == .quick || (mode == .intelligent && abs(src!.modifiedAt-dst!.modifiedAt) <= 2) {

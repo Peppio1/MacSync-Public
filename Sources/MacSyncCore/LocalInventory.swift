@@ -318,9 +318,31 @@ public final class LocalInventory {
                     relative_path TEXT NOT NULL,
                     kind TEXT NOT NULL CHECK(kind IN ('upsert','delete')),
                     recorded_at REAL NOT NULL,
-                    completed INTEGER NOT NULL DEFAULT 0
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    origin TEXT NOT NULL DEFAULT 'legacy_unknown'
                 );
                 """)
+            // LocalInventory can be opened before ChangeJournal on startup,
+            // so it must support the same additive, fail-closed migration.
+            try execute("BEGIN IMMEDIATE TRANSACTION;")
+            do {
+                let queueCols = try prepare("PRAGMA table_info(change_queue);")
+                var hasOrigin = false
+                var queueStep = sqlite3_step(queueCols)
+                while queueStep == SQLITE_ROW {
+                    if column(queueCols,1) == "origin" { hasOrigin = true }
+                    queueStep = sqlite3_step(queueCols)
+                }
+                sqlite3_finalize(queueCols)
+                guard queueStep == SQLITE_DONE else { throw failure() }
+                if !hasOrigin {
+                    try execute("ALTER TABLE change_queue ADD COLUMN origin TEXT NOT NULL DEFAULT 'legacy_unknown';")
+                }
+                try execute("COMMIT;")
+            } catch {
+                try? execute("ROLLBACK;")
+                throw error
+            }
             try execute("CREATE TABLE IF NOT EXISTS directory_bindings(root_id TEXT NOT NULL, role TEXT NOT NULL, stamp TEXT NOT NULL, PRIMARY KEY(root_id,role));")
             // Compatible migration: old rows learn the new stamp on their next scan.
             let columns = try prepare("PRAGMA table_info(file_inventory);")
@@ -414,8 +436,8 @@ public final class LocalInventory {
             guard sqlite3_step(delete) == SQLITE_DONE else { throw failure() }
 
             let insert = try prepare("""
-                INSERT INTO change_queue(root_id,relative_path,kind,recorded_at,completed)
-                SELECT root_id,relative_path,'upsert',?,0 FROM file_inventory
+                INSERT INTO change_queue(root_id,relative_path,kind,recorded_at,completed,origin)
+                SELECT root_id,relative_path,'upsert',?,0,'destination_rebind' FROM file_inventory
                 WHERE root_id=? AND kind IN ('file','directory');
                 """)
             defer { sqlite3_finalize(insert) }
@@ -507,6 +529,7 @@ public final class LocalInventory {
         root: URL,
         subtree: URL? = nil,
         eventID: UInt64? = nil,
+        origin: QueuedChangeOrigin = .sourceMonitor,
         shouldContinue: () -> Bool = { true },
         onItem: (TrackedItem) -> Void = { _ in }
     ) throws -> ReconciliationResult {
@@ -522,7 +545,8 @@ public final class LocalInventory {
 
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
-            if let knownPath = try rootPath(rootID: rootID), knownPath != root.path {
+            let previousRootPath = try rootPath(rootID: rootID)
+            if let previousRootPath, previousRootPath != root.path {
                 throw JournalError.database("Source root moved; refusing to reconcile against a different path")
             }
 
@@ -538,6 +562,20 @@ public final class LocalInventory {
             try bind(rootID,at:1,statement:pin); try bind(binding,at:2,statement:pin)
             guard sqlite3_step(pin) == SQLITE_DONE else { throw failure() }
             let before = try readEntries(rootID: rootID, scope: fullScan ? nil : scope)
+            // FSEvents jobs and restart-recovery scans must never masquerade as
+            // disposable bootstrap work. Decide atomically under the writer
+            // lock, including old queue history without a watched_roots row.
+            var pristine = false
+            if origin == .initialInventory && fullScan && eventID == nil &&
+               previousRootPath == nil && bindingResult == SQLITE_DONE && before.isEmpty {
+                let history = try prepare("SELECT 1 FROM change_queue WHERE root_id=? LIMIT 1;")
+                try bind(rootID, at: 1, statement: history)
+                let check = sqlite3_step(history)
+                sqlite3_finalize(history)
+                guard check == SQLITE_ROW || check == SQLITE_DONE else { throw failure() }
+                pristine = check == SQLITE_DONE
+            }
+            let jobOrigin: QueuedChangeOrigin = pristine ? .initialInventory : .sourceMonitor
             let affected = before
             let seen = Dictionary(uniqueKeysWithValues: rows.map { ($0.relativePath, $0) })
             var upserts = 0
@@ -549,7 +587,7 @@ public final class LocalInventory {
                     // Upgrade legacy metadata without re-uploading the entire archive.
                     let old = before[row.relativePath]
                     if old == nil || old?.changeStamp != nil || old?.kind != row.kind || old?.size != row.size || old?.modifiedAt != row.modifiedAt {
-                        try enqueue(rootID: rootID, relativePath: row.relativePath, kind: .upsert)
+                        try enqueue(rootID: rootID, relativePath: row.relativePath, kind: .upsert, origin: jobOrigin)
                         upserts += 1
                     }
                 }
@@ -559,7 +597,7 @@ public final class LocalInventory {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 try remove(rootID: rootID, relativePath: path)
                 if FileExclusionPolicy.excludes(path,enabled:ignoreDSStore) { continue }
-                try enqueue(rootID: rootID, relativePath: path, kind: .delete)
+                try enqueue(rootID: rootID, relativePath: path, kind: .delete, origin: .sourceMonitor)
                 deletes += 1
             }
 
@@ -663,7 +701,8 @@ public final class LocalInventory {
         guard sqlite3_step(statement) == SQLITE_DONE else { throw failure() }
     }
 
-    private func enqueue(rootID: String, relativePath: String, kind: ChangeKind) throws {
+    private func enqueue(rootID: String, relativePath: String, kind: ChangeKind,
+                         origin: QueuedChangeOrigin) throws {
         // Coalesce multiple pending changes for the same path. Do not lose
         // successful operations (completed=1) from the audit table.
         let delete = try prepare("""
@@ -675,12 +714,13 @@ public final class LocalInventory {
         guard sqlite3_step(delete) == SQLITE_DONE else { throw failure() }
 
         let insert = try prepare("""
-            INSERT INTO change_queue(root_id,relative_path,kind,recorded_at) VALUES(?,?,?,?);
+            INSERT INTO change_queue(root_id,relative_path,kind,recorded_at,origin) VALUES(?,?,?,?,?);
             """)
         defer { sqlite3_finalize(insert) }
         try bind(rootID, at: 1, statement: insert)
         try bind(relativePath, at: 2, statement: insert)
         try bind(kind.rawValue, at: 3, statement: insert)
+        try bind(origin.rawValue, at: 5, statement: insert)
         guard sqlite3_bind_double(insert, 4, Date().timeIntervalSince1970) == SQLITE_OK,
               sqlite3_step(insert) == SQLITE_DONE else { throw failure() }
     }

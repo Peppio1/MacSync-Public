@@ -536,7 +536,7 @@ struct ArchiveAuditPanel: View {
                 : "Confronta i metadati (tolleranza 2 secondi) e usa SHA-256 selettivo per le date discordanti a parità di dimensione.")
                 .font(detailFont).foregroundStyle(.secondary)
             Divider()
-            Text("Riconoscimento e accodamento automatici, con backup del database. I metadati non provano l'identità del contenuto. Nessuna modifica al server.")
+            Text("Confronto e accodamento delle differenze con backup del database. Solo i job del primo inventario già corrispondenti possono essere considerati soddisfatti; FSEvents e job storici ambigui restano in coda. Nessuna modifica al server.")
                 .font(detailFont).foregroundStyle(.secondary)
             Divider()
             MacSyncSwitchRow("Programma verifica automatica", isOn: $copy.auditSettings.enabled)

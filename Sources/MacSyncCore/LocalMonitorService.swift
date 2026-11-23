@@ -84,7 +84,11 @@ public final class LocalMonitorService {
                 let scanTick = ProcessInfo.processInfo.systemUptime
                 self.update(MonitorUpdate(message:scan.phase,monitoring:false,pendingChanges:0,scanProgress:scan))
                 for root in checked {
-                    _ = try store.reconcile(rootID:root.id,root:root.url,shouldContinue:{ !request.isCancelled },onItem:{ item in
+                    // The inventory itself checks under its SQLite transaction that
+                    // this is a truly pristine root before tagging bootstrap
+                    // jobs. Existing roots/restarts become source_monitor.
+                    _ = try store.reconcile(rootID:root.id,root:root.url,
+                        origin:.initialInventory,shouldContinue:{ !request.isCancelled },onItem:{ item in
                         if item.kind == "file" {
                             scan.scannedFiles += 1
                             let sum = scan.detectedBytes.addingReportingOverflow(max(0,item.size))
