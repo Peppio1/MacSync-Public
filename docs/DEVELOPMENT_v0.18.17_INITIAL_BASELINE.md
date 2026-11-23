@@ -35,5 +35,5 @@ Su un profilo nuovo, con un archivio locale già popolato e una destinazione pre
 2. Conservare copia esterna dei dati MacSync che si vogliono poter consultare; poi chiudere i processi in modo coordinato.
 3. Utilizzare `Azzera tutti i dati`, riaprire l'app, configurare le cartelle e lasciare copie automatiche e mirror disattivati.
 4. Attendere **Inventario locale iniziale**. La coda deve risultare 0 salvo eventuali eventi FSEvents effettivi.
-5. Avviare una sola verifica archivio **QUICK** per determinare differenze sorgente/destinazione. L'ordine di grandezza previsto per i dati dell'ultimo controllo dell'utente era inferiore a 1000 UPSERT relativi a file, ma non è una garanzia: possono esserci differenze nuove, cartelle e operazioni locali successive.
+5. Avviare una sola verifica archivio **QUICK** per determinare differenze sorgente/destinazione. Non stimare un numero preciso di UPSERT senza una verifica: il totale dipende da file mancanti/differenti, nuove cartelle e modifiche locali successive.
 6. Controllare report, log e numero di job; abilitare copie/mirror solo dopo verifica dei percorsi e delle differenze e su dati di prova.
