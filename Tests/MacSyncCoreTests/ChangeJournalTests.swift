@@ -1,8 +1,58 @@
 import Foundation
 import XCTest
+import SQLite3
 @testable import MacSyncCore
 
 final class ChangeJournalTests: XCTestCase {
+    func testLegacyQueueSchemaMigrationRetainsAllUnknownJobsAndIDs() throws {
+        let base=FileManager.default.temporaryDirectory.appendingPathComponent("MacSync-origin-migration-"+UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at:base) }
+        try FileManager.default.createDirectory(at:base,withIntermediateDirectories:true)
+        for (i,firstOpener) in ["journal","inventory"].enumerated() {
+            let path=base.appendingPathComponent("legacy-\(i).sqlite").path
+            var handle: OpaquePointer?
+            XCTAssertEqual(sqlite3_open(path,&handle),SQLITE_OK)
+            guard let handle else { XCTFail("Cannot open legacy fixture"); return }
+            let setup = """
+                CREATE TABLE change_queue(
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  root_id TEXT NOT NULL, relative_path TEXT NOT NULL,
+                  kind TEXT NOT NULL, recorded_at REAL NOT NULL,
+                  completed INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO change_queue(id,root_id,relative_path,kind,recorded_at,completed)
+                VALUES(42,'photos','legacy.jpg','upsert',1700000000,0);
+                """
+            XCTAssertEqual(sqlite3_exec(handle,setup,nil,nil,nil),SQLITE_OK)
+            XCTAssertEqual(sqlite3_close(handle),SQLITE_OK)
+            if firstOpener == "inventory" { _ = try LocalInventory(path:path) }
+            let journal=try ChangeJournal(path:path)
+            let pending=try journal.pending()
+            XCTAssertEqual(pending.count,1)
+            XCTAssertEqual(pending[0].id,42)
+            XCTAssertEqual(try journal.originOfJob(id:42),.legacyUnknown)
+            let newID=try journal.enqueue(rootID:"photos",relativePath:"new.jpg",kind:.upsert)
+            XCTAssertEqual(try journal.originOfJob(id:newID),.sourceMonitor)
+            XCTAssertEqual(try journal.pending().count,2)
+        }
+    }
+
+    func testDestinationRebindJobsCannotMasqueradeAsInitialInventory() throws {
+        let base=FileManager.default.temporaryDirectory.appendingPathComponent("MacSync-origin-rebind-"+UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at:base) }
+        let source=base.appendingPathComponent("source")
+        try FileManager.default.createDirectory(at:source,withIntermediateDirectories:true)
+        try Data("same".utf8).write(to:source.appendingPathComponent("same.jpg"))
+        let db=base.appendingPathComponent("db.sqlite").path
+        let inventory=try LocalInventory(path:db)
+        _ = try inventory.reconcile(rootID:"photos",root:source,origin:.initialInventory)
+        try inventory.requeueAllForNewDestination(rootID:"photos")
+        let journal=try ChangeJournal(path:db)
+        let pending=try journal.pending()
+        XCTAssertEqual(pending.count,1)
+        XCTAssertEqual(try journal.originOfJob(id:pending[0].id),.destinationRebind)
+    }
+
     func testQueuePersistsAcrossOpenAndMarkCompleted() throws {
         let path = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
