@@ -567,7 +567,7 @@ public final class LocalInventory {
             // lock, including old queue history without a watched_roots row.
             var pristine = false
             if origin == .initialInventory && fullScan && eventID == nil &&
-               previousRootPath == nil && before.isEmpty {
+               previousRootPath == nil && bindingResult == SQLITE_DONE && before.isEmpty {
                 let history = try prepare("SELECT 1 FROM change_queue WHERE root_id=? LIMIT 1;")
                 try bind(rootID, at: 1, statement: history)
                 let check = sqlite3_step(history)
