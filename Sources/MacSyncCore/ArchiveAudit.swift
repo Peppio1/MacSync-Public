@@ -622,36 +622,65 @@ public final class ArchiveAudit {
         try check()
         let comparisonSeconds = ProcessInfo.processInfo.systemUptime - comparisonTick
         state.phase = "Finalizzazione"; state.currentPath = ""; report(force:true)
-        var repairs: [(rootID:String, sourcePath:String, item:TrackedItem)] = []
-        if repair {
-            // A malformed or newly recorded plan is an integrity fault, not
-            // a reason to silently schedule a conflicting UPSERT.
-            let latestProtection = try NameRectification.pendingProtection(journal: journal)
-            // Revalidate local candidates just before one atomic enqueuing.
-            // No network copy occurs until the normal sync engine runs.
+        // Candidate confirmation touches ONLY the local source and SQLite,
+        // never the SMB destination. Re-check source metadata and a newly
+        // recorded rename plan after each transient FSEvents interruption:
+        // the old snapshot is not authority to upload a changed/deleted file.
+        func safeLocalRepairs() throws -> [(rootID:String,sourcePath:String,item:TrackedItem)] {
+            var safe: [(rootID:String,sourcePath:String,item:TrackedItem)] = []
+            let latestProtection = try NameRectification.pendingProtection(journal:journal)
             for (map,item,stamp,fingerprint) in candidates {
                 try check()
                 guard try Self.rootStamp(map.source) == stamp else { throw MountedCopyError.sourceRootChanged }
                 do {
-                    let url = try Self.safeURL(item.relativePath,mapping:map,destination:false)
+                    let url=try Self.safeURL(item.relativePath,mapping:map,destination:false)
                     if let fingerprint {
                         guard try SeededArchiveVerifier.fingerprint(url) == fingerprint else { continue }
                     } else { _ = try Self.rootStamp(url) }
-                    // Recheck the durable plan before any audit UPSERT: a
-                    // recently recorded rename must win over a stale finding.
-                    guard !latestProtection.protects(rootID: map.rootID, path: item.relativePath) else { continue }
-                    repairs.append((map.rootID,map.source.path,item))
+                    guard !latestProtection.protects(rootID:map.rootID,path:item.relativePath) else { continue }
+                    safe.append((map.rootID,map.source.path,item))
                 } catch { continue }
             }
+            return safe
         }
-        try check()
-        // Queue repairs retain the strict gate, including every SQL step.
-        if !repairs.isEmpty && !cancellation.mayCommit {
-            throw JournalError.database("Riparazioni non accodate: inventario non pronto durante la finalizzazione")
+        var repairs = repair ? try safeLocalRepairs() : []
+        var queued = 0
+        var retries = 0
+        while !repairs.isEmpty {
+            try check()
+            // beginReconciliation sets ready=false transiently. The audit's
+            // read-only comparison is still valid, but committing while the
+            // monitor has not persisted newer FSEvents is prohibited.
+            // Never wait inside an active SQLite transaction.
+            guard cancellation.awaitCommitWindow(onWaiting:{
+                state.phase="Attesa completamento inventario locale"; report(force:true)
+            }) else { throw SeedVerificationError.cancelled }
+            if retries > 0 {
+                repairs = try safeLocalRepairs()
+                if repairs.isEmpty { break }
+            }
+            state.phase = "Salvataggio operazioni nel database"; state.comparisonStarted = nil
+            report(force:true)
+            do {
+                queued = try journal.enqueueAuditRepairs(repairs,
+                    shouldContinue:{ cancellation.mayCommit },
+                    onProgress:{ done,total in
+                        state.phase = "Salvataggio operazioni nel database · \(done)/\(total)"
+                        report(force: done == 0 || done == total)
+                    })
+                break
+            } catch SeedVerificationError.cancelled {
+                // The journal has already ROLLED BACK. Another brief source
+                // reconciliation may have started within the transaction.
+                // Retry at most 3 times using the same remote snapshot and
+                // fresh LOCAL safety checks; never silently bypass Stop.
+                guard !cancellation.isCancelled, retries < 3 else { throw SeedVerificationError.cancelled }
+                retries += 1
+                state.phase="Attesa sicurezza coda dopo eventi locali"
+                report(force:true)
+            }
         }
-        state.phase = "Salvataggio operazioni nel database"; state.comparisonStarted = nil; report(force:true)
-        let queued = try journal.enqueueAuditRepairs(repairs, shouldContinue:{ cancellation.mayCommit })
-        report(force:true)
+        state.phase="Salvataggio operazioni nel database · completato"; report(force:true)
         return ArchiveAuditReport(mode:mode,started:state.started,ended:Date(),
             seconds:ProcessInfo.processInfo.systemUptime-startTick,findings:findings,
             bytesRead:state.bytesRead,queuedRepairs:queued,repairRequested:repair,

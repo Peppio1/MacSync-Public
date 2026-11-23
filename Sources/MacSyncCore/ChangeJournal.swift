@@ -1053,7 +1053,8 @@ public final class ChangeJournal {
     /// Explicit audit repair: only UPSERTs, never replace a live queue job
     /// or rebind a source. A concurrent monitor event wins.
     public func enqueueAuditRepairs(_ items: [(rootID:String, sourcePath:String, item:TrackedItem)],
-                                    shouldContinue: () -> Bool = { true }) throws -> Int {
+                                    shouldContinue: () -> Bool = { true },
+                                    onProgress: (Int,Int) -> Void = { _,_ in }) throws -> Int {
         guard !items.isEmpty else { return 0 }
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
@@ -1067,8 +1068,16 @@ public final class ChangeJournal {
                 """)
             defer { sqlite3_finalize(stmt) }
             var count = 0
-            for entry in items {
+            let started=ProcessInfo.processInfo.systemUptime
+            var lastProgress=started
+            onProgress(0,items.count)
+            for (index,entry) in items.enumerated() {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                let now=ProcessInfo.processInfo.systemUptime
+                if now-lastProgress >= 0.5 {
+                    lastProgress=now
+                    onProgress(index,items.count)
+                }
                 let item = entry.item
                 guard item.kind == "file" || item.kind == "directory",
                       !FileExclusionPolicy.excludes(item.relativePath,enabled:FileExclusionPolicy.ignoreDSStore),
@@ -1089,6 +1098,7 @@ public final class ChangeJournal {
             }
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             try execute("COMMIT;")
+            onProgress(items.count,items.count)
             return count
         } catch { try? execute("ROLLBACK;"); throw error }
     }
@@ -1117,7 +1127,8 @@ public final class ChangeJournal {
     /// are checked within one atomic SQLite transaction.
     public func acknowledgeInitialInventoryMatches(
         _ findings: [AuditFinding],
-        shouldContinue: () -> Bool = { true }
+        shouldContinue: () -> Bool = { true },
+        onProgress: (Int,Int) -> Void = { _,_ in }
     ) throws -> (files: Int, directories: Int) {
         guard !findings.isEmpty else { return (0,0) }
         try execute("BEGIN IMMEDIATE TRANSACTION;")
@@ -1174,8 +1185,15 @@ public final class ChangeJournal {
             let update = try prepare(sql)
             defer { sqlite3_finalize(update) }
             var files=0, directories=0
-            for finding in findings {
+            let total=findings.count
+            var lastProgress=ProcessInfo.processInfo.systemUptime
+            onProgress(0,total)
+            for (index,finding) in findings.enumerated() {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                let now=ProcessInfo.processInfo.systemUptime
+                if now-lastProgress >= 0.5 {
+                    onProgress(index,total); lastProgress=now
+                }
                 guard finding.kind == .matching,
                       finding.objectKind == "file" || finding.objectKind == "directory",
                       WindowsPathSafety.validRelativePath(finding.relativePath),
@@ -1194,6 +1212,7 @@ public final class ChangeJournal {
             }
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             try execute("COMMIT;")
+            onProgress(total,total)
             return (files,directories)
         } catch {
             try? execute("ROLLBACK;")

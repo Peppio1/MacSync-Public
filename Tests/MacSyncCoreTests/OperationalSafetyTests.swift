@@ -130,6 +130,66 @@ final class OperationalSafetyTests: XCTestCase {
         gate.setReady(true,generation:next)
         XCTAssertTrue(gate.isReady)
     }
+    func testAuditWaitsForTransientFSEventsAndNeverTreatsActiveMonitoringAsBusy() throws {
+        let gate=MonitorSafetyGate()
+        let generation=gate.invalidate()
+        gate.setReady(true,generation:generation)
+        let auditToken=try XCTUnwrap(gate.beginAudit())
+        let cancellation=SeedVerificationCancellation(
+            shouldContinue:{ gate.auditBlockReason(auditToken) == nil },
+            commitAllowed:{ gate.auditCommitAllowed(auditToken) })
+        // An ACTIVE but IDLE FSEvents monitor must not delay audit commits.
+        let idleStart=ProcessInfo.processInfo.systemUptime
+        XCTAssertTrue(cancellation.awaitCommitWindow(maxSeconds:0.5))
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime-idleStart,0.2)
+
+        gate.beginReconciliation(generation:generation)
+        XCTAssertFalse(gate.isReady)
+        XCTAssertFalse(cancellation.mayCommit)
+        XCTAssertFalse(cancellation.isCancelled)
+        DispatchQueue.global(qos:.utility).asyncAfter(deadline:.now()+0.08) {
+            gate.setReady(true,generation:generation)
+        }
+        let started=ProcessInfo.processInfo.systemUptime
+        XCTAssertTrue(cancellation.awaitCommitWindow(maxSeconds:1))
+        XCTAssertGreaterThanOrEqual(ProcessInfo.processInfo.systemUptime-started,0.05)
+        XCTAssertTrue(gate.isReady)
+        XCTAssertTrue(cancellation.mayCommit)
+    }
+
+    func testAuditWaitStopsOnExpiredGateAndPermanentInvalidation() throws {
+        let gate=MonitorSafetyGate()
+        let generation=gate.invalidate()
+        gate.setReady(true,generation:generation)
+        let token=try XCTUnwrap(gate.beginAudit())
+        let cancellation=SeedVerificationCancellation(
+            shouldContinue:{ gate.auditBlockReason(token) == nil },
+            commitAllowed:{ gate.auditCommitAllowed(token) })
+        gate.beginReconciliation(generation:generation)
+        XCTAssertFalse(cancellation.awaitCommitWindow(maxSeconds:0.04))
+        XCTAssertFalse(cancellation.isCancelled)
+        // Changing the root configuration revokes the old audit token:
+        // it must never be retried, even if a later generation is ready.
+        let next=gate.invalidate()
+        gate.setReady(true,generation:next)
+        XCTAssertTrue(cancellation.isCancelled)
+        XCTAssertFalse(cancellation.awaitCommitWindow(maxSeconds:0.5))
+    }
+
+    func testExplicitAuditCancelInterruptsGateWait() throws {
+        let gate=MonitorSafetyGate()
+        let generation=gate.invalidate()
+        gate.setReady(true,generation:generation)
+        let token=try XCTUnwrap(gate.beginAudit())
+        let cancellation=SeedVerificationCancellation(
+            shouldContinue:{ gate.auditBlockReason(token) == nil },
+            commitAllowed:{ gate.auditCommitAllowed(token) })
+        gate.beginReconciliation(generation:generation)
+        cancellation.cancel()
+        XCTAssertTrue(cancellation.wasExplicitlyCancelled)
+        XCTAssertFalse(cancellation.awaitCommitWindow(maxSeconds:1))
+    }
+
     func testWindowsPathSafetyRefusesIncompatibleAndAliasNames() throws {
         XCTAssertFalse(WindowsPathSafety.validRelativePath("Photos/CON.jpg"))
         XCTAssertFalse(WindowsPathSafety.validRelativePath("Photos/file."))

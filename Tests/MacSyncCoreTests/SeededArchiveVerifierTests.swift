@@ -49,6 +49,193 @@ final class SeededArchiveVerifierTests: XCTestCase {
         }
     }
 
+    func testQuickRepairTransactionRollsBackAndRetriesAfterTransientMonitorEvent() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let fixed=Date(timeIntervalSince1970:1_700_000_000)
+        try write("missing on destination",to:f.source.appendingPathComponent("photo.jpg"),date:fixed)
+        _ = try LocalInventory(path:f.db.path).reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        let gate=MonitorSafetyGate()
+        let generation=gate.invalidate()
+        gate.setReady(true,generation:generation)
+        let auditToken=try XCTUnwrap(gate.beginAudit())
+        let cancellation=SeedVerificationCancellation(
+            shouldContinue:{ gate.auditBlockReason(auditToken) == nil },
+            commitAllowed:{ gate.auditCommitAllowed(auditToken) })
+        let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        var interrupted=false
+        let report=try session.auditPreservingQueuedChanges(
+            mode:.quick,repair:true,cancellation:cancellation,progress:{ p in
+                // This progress callback runs INSIDE the SQLite transaction,
+                // after BEGIN IMMEDIATE and before the first INSERT.
+                guard p.phase == "Salvataggio operazioni nel database · 0/1" && !interrupted else { return }
+                interrupted=true
+                gate.beginReconciliation(generation:generation)
+                DispatchQueue.global(qos:.utility).asyncAfter(deadline:.now()+0.08) {
+                    gate.setReady(true,generation:generation)
+                }
+            })
+        XCTAssertTrue(interrupted,"The monitor must interrupt the live enqueue transaction")
+        XCTAssertEqual(report.queuedRepairs,1)
+        XCTAssertEqual(report.bytesRead,0)
+        let pending=try f.journal.pending()
+        XCTAssertEqual(pending.count,1,"SQL rollback and retry must not duplicate a job")
+        XCTAssertEqual(pending.first?.relativePath,"photo.jpg")
+        XCTAssertEqual(try f.journal.originOfJob(id:pending[0].id),.archiveAudit)
+        XCTAssertTrue(gate.isReady)
+    }
+
+    func testOldInitialJobAcknowledgementRetriesAfterTransientMonitorEvent() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let fixed=Date(timeIntervalSince1970:1_700_000_000)
+        try write("matching",to:f.source.appendingPathComponent("matching.jpg"),date:fixed)
+        try write("matching",to:f.target.appendingPathComponent("matching.jpg"),date:fixed)
+        try write("protected",to:f.source.appendingPathComponent("monitor.jpg"),date:fixed)
+        try write("protected",to:f.target.appendingPathComponent("monitor.jpg"),date:fixed)
+        _ = try LocalInventory(path:f.db.path).reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        let historical=try f.journal.enqueue(rootID:"photos",relativePath:"matching.jpg",
+                                            kind:.upsert,origin:.initialInventory)
+        let protected=try f.journal.enqueue(rootID:"photos",relativePath:"monitor.jpg",
+                                           kind:.upsert,origin:.sourceMonitor)
+        let gate=MonitorSafetyGate()
+        let generation=gate.invalidate()
+        gate.setReady(true,generation:generation)
+        let token=try XCTUnwrap(gate.beginAudit())
+        let cancellation=SeedVerificationCancellation(
+            shouldContinue:{ gate.auditBlockReason(token) == nil },
+            commitAllowed:{ gate.auditCommitAllowed(token) })
+        let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        var interrupted=false
+        let report=try session.auditPreservingQueuedChanges(
+            mode:.quick,repair:true,cancellation:cancellation,progress:{ p in
+                guard p.phase == "Riconciliazione coda iniziale · 0/2" && !interrupted else { return }
+                interrupted=true
+                gate.beginReconciliation(generation:generation)
+                DispatchQueue.global(qos:.utility).asyncAfter(deadline:.now()+0.08) {
+                    gate.setReady(true,generation:generation)
+                }
+            })
+        XCTAssertTrue(interrupted)
+        XCTAssertEqual(report.recognizedFiles,1)
+        XCTAssertEqual(try f.journal.pending().map(\.id),[protected],
+                       "Legacy monitor work must remain pending after retry")
+        XCTAssertEqual(try f.journal.originOfJob(id:historical),.initialInventory)
+        XCTAssertTrue(gate.isReady)
+    }
+
+    func testPristineInventoryScale200000OptIn() throws {
+        guard ProcessInfo.processInfo.environment["MACSYNC_PRISTINE_BASELINE_STRESS"] == "1" else {
+            throw XCTSkip("Opt-in local initial-baseline stress test")
+        }
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let start=ProcessInfo.processInfo.systemUptime
+        let empty=Data()
+        let folders=2_000
+        let filesPerFolder=100
+        for i in 0..<folders {
+            let folder=f.source.appendingPathComponent("set-\(i)")
+            try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true)
+            for j in 0..<filesPerFolder {
+                try empty.write(to:folder.appendingPathComponent("photo-\(j).dng"))
+            }
+        }
+        let generated=ProcessInfo.processInfo.systemUptime
+        let inventory=try LocalInventory(path:f.db.path)
+        let first=try inventory.reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        let indexed=ProcessInfo.processInfo.systemUptime
+        XCTAssertEqual(first.inspected,folders*(filesPerFolder+1))
+        XCTAssertEqual(first.queuedUpserts,0)
+        XCTAssertEqual(try inventory.itemCount(rootID:"photos"),folders*(filesPerFolder+1))
+        XCTAssertEqual(try f.journal.pending().count,0)
+        print("PRISTINE_200K: create=\(generated-start)s inventory=\(indexed-generated)s queued=\(first.queuedUpserts)")
+    }
+
+    func testPristineInventoryIsBaselineOnlyAndReplaysSubsequentLocalChanges() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let fixed=Date(timeIntervalSince1970:1_700_000_000)
+        for i in 0..<800 {
+            try write("original",to:f.source.appendingPathComponent("group-\(i / 40)/item-\(i).jpg"),date:fixed)
+        }
+        let inventory=try LocalInventory(path:f.db.path)
+        let first=try inventory.reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        XCTAssertEqual(first.inspected,820)
+        XCTAssertEqual(first.queuedUpserts,0)
+        XCTAssertTrue(try f.journal.pending().isEmpty)
+        XCTAssertEqual(try inventory.itemCount(rootID:"photos"),820)
+
+        // Unchanged restart makes no uploads, and editing during downtime
+        // is detected without any destination read.
+        let unchanged=try inventory.reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        XCTAssertEqual(unchanged.queuedUpserts,0)
+        let changed=f.source.appendingPathComponent("group-0/item-0.jpg")
+        try write("changed after MacSync was closed",to:changed,date:fixed.addingTimeInterval(80))
+        let resumed=try inventory.reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        XCTAssertEqual(resumed.queuedUpserts,1)
+        let job=try XCTUnwrap(f.journal.pending().first)
+        XCTAssertEqual(job.relativePath,"group-0/item-0.jpg")
+        XCTAssertEqual(try f.journal.originOfJob(id:job.id),.sourceMonitor)
+    }
+
+    func testLocalChangeDuringFirstInventoryIsReplayedAsMonitorEvent() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let original=Date(timeIntervalSince1970:1_700_000_000)
+        let source=f.source.appendingPathComponent("changed-during-start.jpg")
+        try write("before scan",to:source,date:original)
+        let store=try LocalInventory(path:f.db.path)
+        var changed=false
+        let initial=try store.reconcile(rootID:"photos",root:f.source,origin:.initialInventory,
+            onItem:{ item in
+                guard item.relativePath == "changed-during-start.jpg" && !changed else { return }
+                changed=true
+                do {
+                    try self.write("after scan metadata",to:source,date:original.addingTimeInterval(90))
+                } catch { XCTFail("Synthetic change during inventory: \(error)") }
+            })
+        XCTAssertTrue(changed)
+        XCTAssertEqual(initial.queuedUpserts,0)
+        XCTAssertTrue(try f.journal.pending().isEmpty)
+        // Startup watches from a checkpoint acquired BEFORE the scan; its
+        // replay is represented by this eventID-bound local reconcile.
+        let replay=try store.reconcile(rootID:"photos",root:f.source,
+                                       subtree:source,eventID:777)
+        XCTAssertEqual(replay.queuedUpserts,1)
+        let job=try XCTUnwrap(f.journal.pending().first)
+        XCTAssertEqual(job.relativePath,"changed-during-start.jpg")
+        XCTAssertEqual(try f.journal.originOfJob(id:job.id),.sourceMonitor)
+    }
+
+    func testPristineInventoryFollowedByQuickQueuesOnlyRealDifferences() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let fixed=Date(timeIntervalSince1970:1_700_000_000)
+        for i in 0..<100 {
+            let name="set/file-\(i).dng"
+            try write("identical",to:f.source.appendingPathComponent(name),date:fixed)
+            if i < 97 {
+                try write(i == 96 ? "different size and content" : "identical",
+                          to:f.target.appendingPathComponent(name),date:fixed)
+            }
+        }
+        _ = try LocalInventory(path:f.db.path).reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        XCTAssertTrue(try f.journal.pending().isEmpty)
+        let report=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+            .auditPreservingQueuedChanges(mode:.quick,repair:true)
+        XCTAssertEqual(report.count(.matching),97) // 96 files + matching parent directory
+        XCTAssertEqual(report.count(.different),1)
+        XCTAssertEqual(report.count(.missing),3)
+        XCTAssertEqual(report.queuedRepairs,4)
+        XCTAssertEqual(report.bytesRead,0)
+        let jobs=try f.journal.pending()
+        XCTAssertEqual(jobs.count,4)
+        for job in jobs {
+            XCTAssertEqual(try f.journal.originOfJob(id:job.id),.archiveAudit)
+        }
+    }
+
     func testFirstInventoryMatchingJobsAreAcknowledgedWithoutAnotherRemoteRead() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at:f.base) }
@@ -58,17 +245,15 @@ final class SeededArchiveVerifierTests: XCTestCase {
         try write("needs copy",to:f.source.appendingPathComponent("missing.jpg"),date:date)
         let store = try LocalInventory(path:f.db.path)
         _ = try store.reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
-        let initialJobs=try f.journal.pending()
-        XCTAssertEqual(initialJobs.count,3)
-        for job in initialJobs {
-            XCTAssertEqual(try f.journal.originOfJob(id:job.id),.initialInventory)
-        }
+        // The first local inventory is only a baseline, not 3 uploads.
+        XCTAssertTrue(try f.journal.pending().isEmpty)
+        XCTAssertEqual(try store.itemCount(rootID:"photos"),3)
         let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
         let report=try session.auditPreservingQueuedChanges(mode:.quick,repair:true)
         XCTAssertEqual(report.bytesRead,0)
-        XCTAssertEqual(report.recognizedFiles,1)
-        XCTAssertEqual(report.recognizedDirectories,1)
-        XCTAssertEqual(report.queuedRepairs,0)
+        XCTAssertEqual(report.recognizedFiles,0)
+        XCTAssertEqual(report.recognizedDirectories,0)
+        XCTAssertEqual(report.queuedRepairs,1)
         XCTAssertEqual(try f.journal.pending().map(\.relativePath),["missing.jpg"])
         let second=try session.auditPreservingQueuedChanges(mode:.quick,repair:true)
         XCTAssertEqual(second.recognizedFiles,0)
@@ -85,7 +270,7 @@ final class SeededArchiveVerifierTests: XCTestCase {
         try write("same",to:f.target.appendingPathComponent("photo.psd"),date:date)
         let store=try LocalInventory(path:f.db.path)
         _ = try store.reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
-        XCTAssertEqual(try f.journal.originOfJob(id:try XCTUnwrap(f.journal.pending().first).id),.initialInventory)
+        XCTAssertTrue(try f.journal.pending().isEmpty)
         let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
         var changed=false
         let report=try session.auditPreservingQueuedChanges(mode:.quick,repair:true,progress:{ current in
@@ -119,7 +304,7 @@ final class SeededArchiveVerifierTests: XCTestCase {
         let result=try session.auditPreservingQueuedChanges(mode:.intelligent,repair:true)
         XCTAssertEqual(result.count(.matching),1)
         XCTAssertEqual(result.bytesRead,8)
-        XCTAssertEqual(result.recognizedFiles,1)
+        XCTAssertEqual(result.recognizedFiles,0)
         XCTAssertTrue(try f.journal.pending().isEmpty)
     }
 
@@ -131,12 +316,10 @@ final class SeededArchiveVerifierTests: XCTestCase {
         try write("first",to:source,date:date)
         let inventory=try LocalInventory(path:f.db.path)
         _ = try inventory.reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
-        let first=try XCTUnwrap(f.journal.pending().first)
-        XCTAssertEqual(try f.journal.originOfJob(id:first.id),.initialInventory)
+        XCTAssertTrue(try f.journal.pending().isEmpty)
         try write("later",to:source,date:date.addingTimeInterval(10))
         _ = try inventory.reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
         let current=try XCTUnwrap(f.journal.pending().first)
-        XCTAssertNotEqual(first.id,current.id)
         XCTAssertEqual(try f.journal.originOfJob(id:current.id),.sourceMonitor)
     }
 
@@ -165,7 +348,10 @@ final class SeededArchiveVerifierTests: XCTestCase {
         try write("same",to:f.source.appendingPathComponent("pending.psd"),date:date)
         try write("same",to:f.target.appendingPathComponent("pending.psd"),date:date)
         _ = try LocalInventory(path:f.db.path).reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
-        let job=try XCTUnwrap(f.journal.pending().first)
+        // The v0.18.16 path may still have legacy initial jobs on upgrade.
+        let id=try f.journal.enqueue(rootID:"photos",relativePath:"pending.psd",
+                                     kind:.upsert,origin:.initialInventory)
+        let job=try XCTUnwrap(f.journal.pending().first { $0.id == id })
         try f.journal.recordPublicationIntent(job)
         let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
         let report=try session.auditPreservingQueuedChanges(mode:.quick,repair:true)
