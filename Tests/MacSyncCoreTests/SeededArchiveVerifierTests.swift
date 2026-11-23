@@ -49,6 +49,81 @@ final class SeededArchiveVerifierTests: XCTestCase {
         }
     }
 
+    func testQuickRepairTransactionRollsBackAndRetriesAfterTransientMonitorEvent() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let fixed=Date(timeIntervalSince1970:1_700_000_000)
+        try write("missing on destination",to:f.source.appendingPathComponent("photo.jpg"),date:fixed)
+        _ = try LocalInventory(path:f.db.path).reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        let gate=MonitorSafetyGate()
+        let generation=gate.invalidate()
+        gate.setReady(true,generation:generation)
+        let auditToken=try XCTUnwrap(gate.beginAudit())
+        let cancellation=SeedVerificationCancellation(
+            shouldContinue:{ gate.auditBlockReason(auditToken) == nil },
+            commitAllowed:{ gate.auditCommitAllowed(auditToken) })
+        let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        var interrupted=false
+        let report=try session.auditPreservingQueuedChanges(
+            mode:.quick,repair:true,cancellation:cancellation,progress:{ p in
+                // This progress callback runs INSIDE the SQLite transaction,
+                // after BEGIN IMMEDIATE and before the first INSERT.
+                guard p.phase == "Salvataggio operazioni nel database · 0/1" && !interrupted else { return }
+                interrupted=true
+                gate.beginReconciliation(generation:generation)
+                DispatchQueue.global(qos:.utility).asyncAfter(deadline:.now()+0.08) {
+                    gate.setReady(true,generation:generation)
+                }
+            })
+        XCTAssertTrue(interrupted,"The monitor must interrupt the live enqueue transaction")
+        XCTAssertEqual(report.queuedRepairs,1)
+        XCTAssertEqual(report.bytesRead,0)
+        let pending=try f.journal.pending()
+        XCTAssertEqual(pending.count,1,"SQL rollback and retry must not duplicate a job")
+        XCTAssertEqual(pending.first?.relativePath,"photo.jpg")
+        XCTAssertEqual(try f.journal.originOfJob(id:pending[0].id),.archiveAudit)
+        XCTAssertTrue(gate.isReady)
+    }
+
+    func testOldInitialJobAcknowledgementRetriesAfterTransientMonitorEvent() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let fixed=Date(timeIntervalSince1970:1_700_000_000)
+        try write("matching",to:f.source.appendingPathComponent("matching.jpg"),date:fixed)
+        try write("matching",to:f.target.appendingPathComponent("matching.jpg"),date:fixed)
+        try write("protected",to:f.source.appendingPathComponent("monitor.jpg"),date:fixed)
+        try write("protected",to:f.target.appendingPathComponent("monitor.jpg"),date:fixed)
+        _ = try LocalInventory(path:f.db.path).reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        let historical=try f.journal.enqueue(rootID:"photos",relativePath:"matching.jpg",
+                                            kind:.upsert,origin:.initialInventory)
+        let protected=try f.journal.enqueue(rootID:"photos",relativePath:"monitor.jpg",
+                                           kind:.upsert,origin:.sourceMonitor)
+        let gate=MonitorSafetyGate()
+        let generation=gate.invalidate()
+        gate.setReady(true,generation:generation)
+        let token=try XCTUnwrap(gate.beginAudit())
+        let cancellation=SeedVerificationCancellation(
+            shouldContinue:{ gate.auditBlockReason(token) == nil },
+            commitAllowed:{ gate.auditCommitAllowed(token) })
+        let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        var interrupted=false
+        let report=try session.auditPreservingQueuedChanges(
+            mode:.quick,repair:true,cancellation:cancellation,progress:{ p in
+                guard p.phase == "Riconciliazione coda iniziale · 0/2" && !interrupted else { return }
+                interrupted=true
+                gate.beginReconciliation(generation:generation)
+                DispatchQueue.global(qos:.utility).asyncAfter(deadline:.now()+0.08) {
+                    gate.setReady(true,generation:generation)
+                }
+            })
+        XCTAssertTrue(interrupted)
+        XCTAssertEqual(report.recognizedFiles,1)
+        XCTAssertEqual(try f.journal.pending().map(\.id),[protected],
+                       "Legacy monitor work must remain pending after retry")
+        XCTAssertEqual(try f.journal.originOfJob(id:historical),.initialInventory)
+        XCTAssertTrue(gate.isReady)
+    }
+
     func testPristineInventoryScale200000OptIn() throws {
         guard ProcessInfo.processInfo.environment["MACSYNC_PRISTINE_BASELINE_STRESS"] == "1" else {
             throw XCTSkip("Opt-in local initial-baseline stress test")
