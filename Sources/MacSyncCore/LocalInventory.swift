@@ -575,7 +575,13 @@ public final class LocalInventory {
                 guard check == SQLITE_ROW || check == SQLITE_DONE else { throw failure() }
                 pristine = check == SQLITE_DONE
             }
-            let jobOrigin: QueuedChangeOrigin = pristine ? .initialInventory : .sourceMonitor
+            // A truly new archive has no known destination baseline. Store
+            // its source inventory, but do NOT interpret every existing file
+            // as a pending upload. A subsequent explicit QUICK/INTELLIGENT audit
+            // will enqueue only genuine destination differences. FSEvents
+            // started at a checkpoint taken before this scan are replayed
+            // afterwards as source_monitor and MUST remain authoritative.
+            let jobOrigin: QueuedChangeOrigin = .sourceMonitor
             let affected = before
             let seen = Dictionary(uniqueKeysWithValues: rows.map { ($0.relativePath, $0) })
             var upserts = 0
@@ -586,7 +592,7 @@ public final class LocalInventory {
                     try store(rootID: rootID, item: row)
                     // Upgrade legacy metadata without re-uploading the entire archive.
                     let old = before[row.relativePath]
-                    if old == nil || old?.changeStamp != nil || old?.kind != row.kind || old?.size != row.size || old?.modifiedAt != row.modifiedAt {
+                    if !pristine && (old == nil || old?.changeStamp != nil || old?.kind != row.kind || old?.size != row.size || old?.modifiedAt != row.modifiedAt) {
                         try enqueue(rootID: rootID, relativePath: row.relativePath, kind: .upsert, origin: jobOrigin)
                         upserts += 1
                     }
