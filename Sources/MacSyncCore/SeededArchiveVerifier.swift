@@ -34,6 +34,24 @@ public final class SeedVerificationCancellation: @unchecked Sendable {
         return cancelled
     }
     public var mayCommit: Bool { !isCancelled && commitAllowed() }
+
+    /// A monitor reconciliation temporarily closes the commit gate without
+    /// cancelling the already-authorized read-only archive snapshot. Wait on
+    /// the worker thread OUTSIDE any SQLite transaction, so FSEvents can
+    /// finish persisting the newer changes before audit UPSERTs are committed.
+    /// Permanent gate invalidation and explicit Stop still cancel immediately.
+    public func awaitCommitWindow(maxSeconds: Double = 120,
+                                  onWaiting: () -> Void = {}) -> Bool {
+        let deadline = ProcessInfo.processInfo.systemUptime + max(0,maxSeconds)
+        var announced = false
+        while !isCancelled {
+            if mayCommit { return true }
+            if !announced { announced = true; onWaiting() }
+            guard ProcessInfo.processInfo.systemUptime < deadline else { return false }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        return false
+    }
     public func cancel() {
         lock.lock()
         cancelled = true
@@ -561,27 +579,45 @@ public struct SeededArchiveSession: Sendable {
         )
         try checkFileIdentity()
         if repair {
-            guard cancellation.mayCommit else { throw SeedVerificationError.cancelled }
-            // The audit's findings already carry the metadata snapshot.
-            // Reconcile exclusively in SQLite: NO destination/network re-read.
-            var lastLocalProgress=ProcessInfo.processInfo.systemUptime
-            let counts = try journal.acknowledgeInitialInventoryMatches(
-                result.findings,
-                shouldContinue:{ cancellation.mayCommit },
-                onProgress:{ completed,total in
-                    let now=ProcessInfo.processInfo.systemUptime
-                    guard completed == 0 || completed == total || now-lastLocalProgress >= 0.5 else { return }
-                    lastLocalProgress=now
-                    var snapshot=ArchiveAuditProgress(started:result.started)
-                    snapshot.phase="Riconciliazione coda iniziale · \(completed)/\(total)"
-                    snapshot.source=result.sourceMetrics ?? AuditSideMetrics()
-                    snapshot.destination=result.destinationMetrics ?? AuditSideMetrics()
-                    snapshot.compared=completed; snapshot.total=total
-                    progress(snapshot)
+            // No destination scan/read during reconciliation. An FSEvents
+            // cycle can briefly set ready=false after the expensive audit;
+            // do not discard its snapshot simply because the commit gate
+            // temporarily closes. Never wait while holding a SQLite lock.
+            var retries=0
+            while true {
+                guard cancellation.awaitCommitWindow(onWaiting:{
+                    var p=ArchiveAuditProgress(started:result.started)
+                    p.phase="Attesa completamento inventario locale"
+                    progress(p)
+                }) else { throw SeedVerificationError.cancelled }
+                var lastLocalProgress=ProcessInfo.processInfo.systemUptime
+                do {
+                    let counts = try journal.acknowledgeInitialInventoryMatches(
+                        result.findings,
+                        shouldContinue:{ cancellation.mayCommit },
+                        onProgress:{ completed,total in
+                            let now=ProcessInfo.processInfo.systemUptime
+                            guard completed == 0 || completed == total || now-lastLocalProgress >= 0.5 else { return }
+                            lastLocalProgress=now
+                            var snapshot=ArchiveAuditProgress(started:result.started)
+                            snapshot.phase="Riconciliazione coda iniziale · \(completed)/\(total)"
+                            snapshot.source=result.sourceMetrics ?? AuditSideMetrics()
+                            snapshot.destination=result.destinationMetrics ?? AuditSideMetrics()
+                            snapshot.compared=completed; snapshot.total=total
+                            progress(snapshot)
+                        }
+                    )
+                    result.recognizedFiles = counts.files
+                    result.recognizedDirectories = counts.directories
+                    break
+                } catch SeedVerificationError.cancelled {
+                    // acknowledgeInitialInventoryMatches has already rolled
+                    // back. Retry locally only if the SAME audit token is
+                    // still valid (no Stop, failure or root reconfiguration).
+                    guard !cancellation.isCancelled, retries < 3 else { throw SeedVerificationError.cancelled }
+                    retries += 1
                 }
-            )
-            result.recognizedFiles = counts.files
-            result.recognizedDirectories = counts.directories
+            }
         }
         return result
     }
