@@ -650,7 +650,12 @@ public final class ArchiveAudit {
             throw JournalError.database("Riparazioni non accodate: inventario non pronto durante la finalizzazione")
         }
         state.phase = "Salvataggio operazioni nel database"; state.comparisonStarted = nil; report(force:true)
-        let queued = try journal.enqueueAuditRepairs(repairs, shouldContinue:{ cancellation.mayCommit })
+        let queued = try journal.enqueueAuditRepairs(repairs,
+            shouldContinue:{ cancellation.mayCommit },
+            onProgress:{ done,total in
+                state.phase = "Salvataggio operazioni nel database · \(done)/\(total)"
+                report()
+            })
         report(force:true)
         return ArchiveAuditReport(mode:mode,started:state.started,ended:Date(),
             seconds:ProcessInfo.processInfo.systemUptime-startTick,findings:findings,
