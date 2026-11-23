@@ -76,6 +76,35 @@ final class SeededArchiveVerifierTests: XCTestCase {
         XCTAssertEqual(try f.journal.originOfJob(id:job.id),.sourceMonitor)
     }
 
+    func testLocalChangeDuringFirstInventoryIsReplayedAsMonitorEvent() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let original=Date(timeIntervalSince1970:1_700_000_000)
+        let source=f.source.appendingPathComponent("changed-during-start.jpg")
+        try write("before scan",to:source,date:original)
+        let store=try LocalInventory(path:f.db.path)
+        var changed=false
+        let initial=try store.reconcile(rootID:"photos",root:f.source,origin:.initialInventory,
+            onItem:{ item in
+                guard item.relativePath == "changed-during-start.jpg" && !changed else { return }
+                changed=true
+                do {
+                    try self.write("after scan metadata",to:source,date:original.addingTimeInterval(90))
+                } catch { XCTFail("Synthetic change during inventory: \(error)") }
+            })
+        XCTAssertTrue(changed)
+        XCTAssertEqual(initial.queuedUpserts,0)
+        XCTAssertTrue(try f.journal.pending().isEmpty)
+        // Startup watches from a checkpoint acquired BEFORE the scan; its
+        // replay is represented by this eventID-bound local reconcile.
+        let replay=try store.reconcile(rootID:"photos",root:f.source,
+                                       subtree:source,eventID:777)
+        XCTAssertEqual(replay.queuedUpserts,1)
+        let job=try XCTUnwrap(f.journal.pending().first)
+        XCTAssertEqual(job.relativePath,"changed-during-start.jpg")
+        XCTAssertEqual(try f.journal.originOfJob(id:job.id),.sourceMonitor)
+    }
+
     func testPristineInventoryFollowedByQuickQueuesOnlyRealDifferences() throws {
         let f=try fixture()
         defer { try? FileManager.default.removeItem(at:f.base) }
@@ -92,7 +121,7 @@ final class SeededArchiveVerifierTests: XCTestCase {
         XCTAssertTrue(try f.journal.pending().isEmpty)
         let report=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
             .auditPreservingQueuedChanges(mode:.quick,repair:true)
-        XCTAssertEqual(report.count(.matching),96)
+        XCTAssertEqual(report.count(.matching),97) // 96 files + matching parent directory
         XCTAssertEqual(report.count(.different),1)
         XCTAssertEqual(report.count(.missing),3)
         XCTAssertEqual(report.queuedRepairs,4)
