@@ -21,7 +21,7 @@ Questa versione è un **aggiornamento di collaudo**. Non è una certificazione d
 
 ## Test e limiti
 
-La suite Swift/macOS, i test di migrazione SQLite, di FSEvents e di primo inventario, il benchmark sintetico locale con 200.000 file, i pacchetti universali Intel/Apple Silicon e Sparkle devono essere verificati dal relativo workflow GitHub prima del rilascio firmato. I benchmark misurano il filesystem del runner, **non** la velocità della condivisione SMB o dei 350 GB reali.
+La suite Swift/macOS, i test di migrazione SQLite, di FSEvents e di primo inventario, il benchmark sintetico locale con 200.000 file, i pacchetti universali Intel/Apple Silicon e Sparkle devono essere verificati dal relativo workflow GitHub prima del rilascio firmato. I benchmark misurano il filesystem del runner, **non** la velocità della condivisione SMB o deun archivio remoto reale.
 
 La v0.18.17 non modifica o svuota automaticamente le code preesistenti: soltanto il ripristino completo, eseguito dall'utente dopo la conservazione dei backup necessari, ricrea il database da zero. Non ripristinare un vecchio SQLite sopra nuove operazioni.
 
