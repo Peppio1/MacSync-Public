@@ -539,6 +539,29 @@ public struct SeededArchiveSession: Sendable {
         return report
     }
 
+    /// QUICK/INTELLIGENT operational audit: perform one metadata inventory on
+    /// each side, classify matches from the acquired snapshot and enqueue only
+    /// genuinely missing/different paths. Crucially, NEVER acknowledge existing
+    /// UPsert jobs: FSEvents and durable queued changes always win even when
+    /// snapshot metadata happen to match. INTELLIGENT keeps its selective hash.
+    /// Unlike auditAndRecognize, this method never starts mass SMB revalidation.
+    public func auditPreservingQueuedChanges(
+        mode: ArchiveAuditMode,
+        repair: Bool = true,
+        cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
+        diagnostic: (ArchiveAuditProgress) -> Void = { _ in },
+        progress: (ArchiveAuditProgress) -> Void = { _ in },
+        deletionCandidates: Set<String> = []
+    ) throws -> ArchiveAuditReport {
+        let journal = try openJournal()
+        let result = try ArchiveAudit(journal: journal, mappings: mappings).run(
+            mode: mode, repair: repair, cancellation: cancellation,
+            deletionCandidates: deletionCandidates, diagnostic: diagnostic, progress: progress
+        )
+        try checkFileIdentity()
+        return result
+    }
+
     /// Use one complete archive scan and reuse its verified fingerprints.
     /// Only job IDs captured before the scan can become approval candidates.
     /// No queue acknowledgement happens until a guarded commit is requested.
