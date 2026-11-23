@@ -82,7 +82,7 @@ final class SeededArchiveVerifierTests: XCTestCase {
             do {
                 try self.write("new contents",to:src,date:date.addingTimeInterval(30))
                 _ = try LocalInventory(path:f.db.path).reconcile(rootID:"photos",root:f.source,subtree:src)
-            } catch { XCTFail("Synthetic FSEvents reconciliation failed: \\(error)") }
+            } catch { XCTFail("Synthetic FSEvents reconciliation failed: \(error)") }
         })
         XCTAssertTrue(eventInjected)
         XCTAssertEqual(report.count(.matching),1, "The audit reports its original snapshot, not a new server read")
