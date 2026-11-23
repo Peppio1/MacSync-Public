@@ -36,7 +36,7 @@ cat > signing-output/appcast.xml <<XML
 <sparkle:version>197</sparkle:version>
 <sparkle:shortVersionString>0.18.17</sparkle:shortVersionString>
 <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-<description>Verifica archivio rapida a snapshot e intelligente senza riconoscimento SMB massivo; coda FSEvents conservata. Aggiornamento di collaudo.</description>
+<description>Primo inventario locale senza copie iniziali in coda; QUICK e INTELLIGENT accodano solo le differenze. Avanzamento SQLite e FSEvents protetti. Aggiornamento di collaudo.</description>
 <enclosure url="https://github.com/Peppio1/MacSync-Public/releases/download/v0.18.17/$name" sparkle:edSignature="$sig" length="$length" type="application/octet-stream"/>
 </item></channel></rss>
 XML
