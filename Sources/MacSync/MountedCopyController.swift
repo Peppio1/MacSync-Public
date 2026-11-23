@@ -450,7 +450,7 @@ final class MountedCopyController: ObservableObject {
             alert.informativeText = (settings.mode == .intelligent
                 ? "Confronta percorsi, dimensioni e date (tolleranza 2 secondi); utilizza SHA-256 selettivo sui file dubbi. "
                 : "La verifica rapida confronta percorsi, dimensioni e date (tolleranza 2 secondi), senza leggere il contenuto. ")
-                + "I file con metadati corrispondenti saranno segnalati come allineati nella verifica, senza completare né rimuovere operazioni FSEvents già in coda. "
+                + "I file con metadati corrispondenti saranno segnalati come allineati. Solo le copie del primo inventario riconoscibili con certezza potranno essere considerate soddisfatte; gli eventi FSEvents e i job storici ambigui rimangono in coda. "
                 + "Le differenze sicure saranno accodate senza duplicare job pendenti, dopo un backup del database. "
                 + "Nessuna scrittura sulle destinazioni e nessuna cancellazione dei file presenti soltanto sul server."
             alert.addButton(withTitle:"Avvia verifica"); alert.addButton(withTitle:"Annulla")
@@ -479,7 +479,7 @@ final class MountedCopyController: ObservableObject {
             var last=ArchiveAuditProgress(started:started)
             last.phase="Preparazione verifica"
             var currentRoot="app"
-            try? auditLog?.record(level:.info,rootID:"app",action:"audit_start",message:"ID \(auditID) — " + settings.mode.label + " avviata; inventario unico e accodamento conservativo senza completare job già pendenti")
+            try? auditLog?.record(level:.info,rootID:"app",action:"audit_start",message:"ID \(auditID) — " + settings.mode.label + " avviata; inventario unico e conferma locale dei soli job iniziali")
             do {
                 if cancel.isCancelled { throw SeedVerificationError.cancelled }
                 let journal = try ChangeJournal(path:db.path)
@@ -521,8 +521,6 @@ final class MountedCopyController: ObservableObject {
                     mode:settings.mode,repair:true,cancellation:cancel,
                     diagnostic:diagnostic,progress:progress,deletionCandidates:candidates
                 )
-                report.recognizedFiles = 0
-                report.recognizedDirectories = 0
                 var summaryProgress = last
                 if let rebuildToken {
                     guard cancel.mayCommit else { throw SeedVerificationError.cancelled }
@@ -540,7 +538,7 @@ final class MountedCopyController: ObservableObject {
                 summaryProgress.comparisonStarted = nil
                 progress(summaryProgress)
                 let savedReport = report
-                try? auditLog?.record(level:.info,rootID:"app",action:"audit_queue_preserved",message:settings.mode.label + ": nessuna operazione pendente confermata automaticamente; accodate " + String(report.queuedRepairs) + " differenze sicure; nessuna scrittura sul server")
+                try? auditLog?.record(level:.info,rootID:"app",action:"audit_queue_preserved",message:settings.mode.label + ": completati solo " + String((report.recognizedFiles ?? 0) + (report.recognizedDirectories ?? 0)) + " job iniziali corrispondenti; conservati tutti i job FSEvents, audit e legacy; accodate " + String(report.queuedRepairs) + " differenze sicure; nessuna scrittura sul server")
  
                 var storageWarning = ""
                 do {
@@ -572,8 +570,8 @@ final class MountedCopyController: ObservableObject {
                     if rebuildToken != nil { self.queueRebuildRequired = false }
                     self.seedReady = false; self.seedVerifiedCount = 0
                     self.seedInspectedCount = 0; self.seedReadBytes = savedReport.bytesRead
-                    self.seedStatus = "Verifica completata: operazioni già pendenti conservate"
-                    self.auditStatus = "Verifica conclusa: " + String(savedReport.queuedRepairs) + " nuove operazioni accodate; coda preesistente conservata" + warning
+                    self.seedStatus = "Verifica completata: FSEvents e job storici conservati; " + String((savedReport.recognizedFiles ?? 0) + (savedReport.recognizedDirectories ?? 0)) + " job iniziali soddisfatti"
+                    self.auditStatus = "Verifica conclusa: " + String(savedReport.queuedRepairs) + " nuove operazioni accodate; " + String((savedReport.recognizedFiles ?? 0) + (savedReport.recognizedDirectories ?? 0)) + " job iniziali già soddisfatti" + warning
                     self.auditProgress = nil
                     self.auditBusy = false
                     self.maintaining = false
