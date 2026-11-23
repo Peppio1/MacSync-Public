@@ -564,8 +564,21 @@ public struct SeededArchiveSession: Sendable {
             guard cancellation.mayCommit else { throw SeedVerificationError.cancelled }
             // The audit's findings already carry the metadata snapshot.
             // Reconcile exclusively in SQLite: NO destination/network re-read.
+            var lastLocalProgress=ProcessInfo.processInfo.systemUptime
             let counts = try journal.acknowledgeInitialInventoryMatches(
-                result.findings,shouldContinue:{ cancellation.mayCommit }
+                result.findings,
+                shouldContinue:{ cancellation.mayCommit },
+                onProgress:{ completed,total in
+                    let now=ProcessInfo.processInfo.systemUptime
+                    guard completed == 0 || completed == total || now-lastLocalProgress >= 0.5 else { return }
+                    lastLocalProgress=now
+                    var snapshot=ArchiveAuditProgress(started:result.started)
+                    snapshot.phase="Riconciliazione coda iniziale · \(completed)/\(total)"
+                    snapshot.source=result.sourceMetrics ?? AuditSideMetrics()
+                    snapshot.destination=result.destinationMetrics ?? AuditSideMetrics()
+                    snapshot.compared=completed; snapshot.total=total
+                    progress(snapshot)
+                }
             )
             result.recognizedFiles = counts.files
             result.recognizedDirectories = counts.directories
