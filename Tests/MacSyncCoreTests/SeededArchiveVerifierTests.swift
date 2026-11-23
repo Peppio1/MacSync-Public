@@ -140,6 +140,40 @@ final class SeededArchiveVerifierTests: XCTestCase {
         XCTAssertEqual(try f.journal.originOfJob(id:current.id),.sourceMonitor)
     }
 
+    func testLegacyUnknownMatchingJobIsNeverAcknowledgedByQuickSnapshot() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let date=Date(timeIntervalSince1970:1_700_000_000)
+        try write("same",to:f.source.appendingPathComponent("legacy.jpg"),date:date)
+        try write("same",to:f.target.appendingPathComponent("legacy.jpg"),date:date)
+        try initializeInventory(f)
+        let id=try f.journal.enqueue(rootID:"photos",relativePath:"legacy.jpg",
+                                      kind:.upsert,origin:.legacyUnknown)
+        let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let before=try f.journal.pending()
+        let report=try session.auditPreservingQueuedChanges(mode:.quick,repair:true)
+        XCTAssertEqual(report.count(.matching),1)
+        XCTAssertEqual(report.recognizedFiles,0)
+        XCTAssertEqual(try f.journal.pending(),before)
+        XCTAssertEqual(try f.journal.originOfJob(id:id),.legacyUnknown)
+    }
+
+    func testInterruptedInitialPublicationIsNeverAcknowledgedFromMatchingMetadata() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let date=Date(timeIntervalSince1970:1_700_000_000)
+        try write("same",to:f.source.appendingPathComponent("pending.psd"),date:date)
+        try write("same",to:f.target.appendingPathComponent("pending.psd"),date:date)
+        _ = try LocalInventory(path:f.db.path).reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        let job=try XCTUnwrap(f.journal.pending().first)
+        try f.journal.recordPublicationIntent(job)
+        let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let report=try session.auditPreservingQueuedChanges(mode:.quick,repair:true)
+        XCTAssertEqual(report.count(.matching),1)
+        XCTAssertEqual(report.recognizedFiles,0)
+        XCTAssertEqual(try f.journal.pending().map(\.id),[job.id])
+    }
+
     func testOperationalQuickSnapshotLeavesMatchingFSEventsJobsPending() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }
@@ -203,6 +237,8 @@ final class SeededArchiveVerifierTests: XCTestCase {
         let pending = try f.journal.pending()
         XCTAssertTrue(pending.contains { $0.relativePath == "same.dng" && $0.kind == .upsert })
         XCTAssertEqual(pending.filter { $0.relativePath == "new.jpg" && $0.kind == .upsert }.count,1)
+        let created=try XCTUnwrap(pending.first { $0.relativePath == "new.jpg" })
+        XCTAssertEqual(try f.journal.originOfJob(id:created.id),.archiveAudit)
     }
 
     func testQuickAuditReusesNoFollowScanFingerprints() throws {
