@@ -49,6 +49,97 @@ final class SeededArchiveVerifierTests: XCTestCase {
         }
     }
 
+    func testFirstInventoryMatchingJobsAreAcknowledgedWithoutAnotherRemoteRead() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        try write("same",to:f.source.appendingPathComponent("roll/same.jpg"),date:date)
+        try write("same",to:f.target.appendingPathComponent("roll/same.jpg"),date:date)
+        try write("needs copy",to:f.source.appendingPathComponent("missing.jpg"),date:date)
+        let store = try LocalInventory(path:f.db.path)
+        _ = try store.reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        let initialJobs=try f.journal.pending()
+        XCTAssertEqual(initialJobs.count,3)
+        for job in initialJobs {
+            XCTAssertEqual(try f.journal.originOfJob(id:job.id),.initialInventory)
+        }
+        let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let report=try session.auditPreservingQueuedChanges(mode:.quick,repair:true)
+        XCTAssertEqual(report.bytesRead,0)
+        XCTAssertEqual(report.recognizedFiles,1)
+        XCTAssertEqual(report.recognizedDirectories,1)
+        XCTAssertEqual(report.queuedRepairs,0)
+        XCTAssertEqual(try f.journal.pending().map(\.relativePath),["missing.jpg"])
+        let second=try session.auditPreservingQueuedChanges(mode:.quick,repair:true)
+        XCTAssertEqual(second.recognizedFiles,0)
+        XCTAssertEqual(second.recognizedDirectories,0)
+        XCTAssertEqual(try f.journal.pending().map(\.relativePath),["missing.jpg"])
+    }
+
+    func testFirstInventoryEventReplacesInitialJobAndCanNeverBeClearedBySnapshot() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let source=f.source.appendingPathComponent("photo.psd")
+        try write("same",to:source,date:date)
+        try write("same",to:f.target.appendingPathComponent("photo.psd"),date:date)
+        let store=try LocalInventory(path:f.db.path)
+        _ = try store.reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        XCTAssertEqual(try f.journal.originOfJob(id:try XCTUnwrap(f.journal.pending().first).id),.initialInventory)
+        let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        var changed=false
+        let report=try session.auditPreservingQueuedChanges(mode:.quick,repair:true,progress:{ current in
+            guard current.phase == "Confronto metadati", !changed else { return }
+            changed=true
+            do {
+                try self.write("updated on Mac",to:source,date:date.addingTimeInterval(20))
+                _ = try LocalInventory(path:f.db.path).reconcile(
+                    rootID:"photos",root:f.source,subtree:source,eventID:12345
+                )
+            } catch { XCTFail("Source monitor update failed: \(error)") }
+        })
+        XCTAssertTrue(changed)
+        XCTAssertEqual(report.count(.matching),1)
+        XCTAssertEqual(report.recognizedFiles,0)
+        let pending=try f.journal.pending()
+        XCTAssertEqual(pending.count,1)
+        XCTAssertEqual(pending[0].relativePath,"photo.psd")
+        XCTAssertEqual(try f.journal.originOfJob(id:pending[0].id),.sourceMonitor)
+    }
+
+    func testIntelligentCanRecognizeInitialJobsOnlyAfterSelectiveHash() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        try write("ABCD",to:f.source.appendingPathComponent("photo.dng"),date:date)
+        try write("ABCD",to:f.target.appendingPathComponent("photo.dng"),date:date.addingTimeInterval(20))
+        let store=try LocalInventory(path:f.db.path)
+        _ = try store.reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        let result=try session.auditPreservingQueuedChanges(mode:.intelligent,repair:true)
+        XCTAssertEqual(result.count(.matching),1)
+        XCTAssertEqual(result.bytesRead,8)
+        XCTAssertEqual(result.recognizedFiles,1)
+        XCTAssertTrue(try f.journal.pending().isEmpty)
+    }
+
+    func testExistingRootNeverMislabelsRestartOrRecoveryEventsAsInitial() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let source=f.source.appendingPathComponent("same.jpg")
+        try write("first",to:source,date:date)
+        let inventory=try LocalInventory(path:f.db.path)
+        _ = try inventory.reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        let first=try XCTUnwrap(f.journal.pending().first)
+        XCTAssertEqual(try f.journal.originOfJob(id:first.id),.initialInventory)
+        try write("later",to:source,date:date.addingTimeInterval(10))
+        _ = try inventory.reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        let current=try XCTUnwrap(f.journal.pending().first)
+        XCTAssertNotEqual(first.id,current.id)
+        XCTAssertEqual(try f.journal.originOfJob(id:current.id),.sourceMonitor)
+    }
+
     func testOperationalQuickSnapshotLeavesMatchingFSEventsJobsPending() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }
