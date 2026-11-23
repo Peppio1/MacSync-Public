@@ -12,6 +12,7 @@ public enum QueuedChangeOrigin: String, Sendable {
     case initialInventory = "initial_inventory"
     case sourceMonitor = "source_monitor"
     case archiveAudit = "archive_audit"
+    case destinationRebind = "destination_rebind"
     case legacyUnknown = "legacy_unknown"
 }
 
@@ -85,17 +86,24 @@ public final class ChangeJournal {
             // Additive, local-only migration. Old pending rows retain their
             // original IDs and remain unclassified, never retroactively marked
             // as initial/verified by an audit.
-            let queueColumns = try prepare("PRAGMA table_info(change_queue);")
-            var hasQueueOrigin = false
-            var queueResult = sqlite3_step(queueColumns)
-            while queueResult == SQLITE_ROW {
-                if columnText(queueColumns, at: 1) == "origin" { hasQueueOrigin = true }
-                queueResult = sqlite3_step(queueColumns)
-            }
-            sqlite3_finalize(queueColumns)
-            guard queueResult == SQLITE_DONE else { throw databaseFailure() }
-            if !hasQueueOrigin {
-                try execute("ALTER TABLE change_queue ADD COLUMN origin TEXT NOT NULL DEFAULT 'legacy_unknown';")
+            try execute("BEGIN IMMEDIATE TRANSACTION;")
+            do {
+                let queueColumns = try prepare("PRAGMA table_info(change_queue);")
+                var hasQueueOrigin = false
+                var queueResult = sqlite3_step(queueColumns)
+                while queueResult == SQLITE_ROW {
+                    if columnText(queueColumns, at: 1) == "origin" { hasQueueOrigin = true }
+                    queueResult = sqlite3_step(queueColumns)
+                }
+                sqlite3_finalize(queueColumns)
+                guard queueResult == SQLITE_DONE else { throw databaseFailure() }
+                if !hasQueueOrigin {
+                    try execute("ALTER TABLE change_queue ADD COLUMN origin TEXT NOT NULL DEFAULT 'legacy_unknown';")
+                }
+                try execute("COMMIT;")
+            } catch {
+                try? execute("ROLLBACK;")
+                throw error
             }
             try execute("CREATE TABLE IF NOT EXISTS name_rectification_batch(singleton INTEGER PRIMARY KEY CHECK(singleton=1), plan TEXT NOT NULL, next_move INTEGER NOT NULL DEFAULT 0, progress TEXT NOT NULL DEFAULT '[]');")
             // Child completion index, not another rename plan: identities and
