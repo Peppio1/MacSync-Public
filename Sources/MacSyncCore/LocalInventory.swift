@@ -541,16 +541,12 @@ public final class LocalInventory {
         let rows = try LocalScanner.scan(root: root, subtree: subtree, ignoreDSStore:ignoreDSStore, shouldContinue: shouldContinue, onItem: onItem)
         guard shouldContinue() else { throw SeedVerificationError.cancelled }
         let fullScan = target.path == root.path
-        // Only an explicit first-time full inventory can be treated as
-        // disposable baseline work. All FSEvents/recovery/periodic scans
-        // retain their higher-priority durable queue operations.
-        let jobOrigin: QueuedChangeOrigin = (origin == .initialInventory && fullScan && eventID == nil)
-            ? .initialInventory : .sourceMonitor
         let scope = fullScan ? "" : String(target.path.dropFirst(root.path.count + 1))
 
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
-            if let knownPath = try rootPath(rootID: rootID), knownPath != root.path {
+            let previousRootPath = try rootPath(rootID: rootID)
+            if let previousRootPath, previousRootPath != root.path {
                 throw JournalError.database("Source root moved; refusing to reconcile against a different path")
             }
 
@@ -566,6 +562,20 @@ public final class LocalInventory {
             try bind(rootID,at:1,statement:pin); try bind(binding,at:2,statement:pin)
             guard sqlite3_step(pin) == SQLITE_DONE else { throw failure() }
             let before = try readEntries(rootID: rootID, scope: fullScan ? nil : scope)
+            // FSEvents jobs and restart-recovery scans must never masquerade as
+            // disposable bootstrap work. Decide atomically under the writer
+            // lock, including old queue history without a watched_roots row.
+            var pristine = false
+            if origin == .initialInventory && fullScan && eventID == nil &&
+               previousRootPath == nil && before.isEmpty {
+                let history = try prepare("SELECT 1 FROM change_queue WHERE root_id=? LIMIT 1;")
+                try bind(rootID, at: 1, statement: history)
+                let check = sqlite3_step(history)
+                sqlite3_finalize(history)
+                guard check == SQLITE_ROW || check == SQLITE_DONE else { throw failure() }
+                pristine = check == SQLITE_DONE
+            }
+            let jobOrigin: QueuedChangeOrigin = pristine ? .initialInventory : .sourceMonitor
             let affected = before
             let seen = Dictionary(uniqueKeysWithValues: rows.map { ($0.relativePath, $0) })
             var upserts = 0
