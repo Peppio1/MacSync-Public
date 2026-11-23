@@ -49,6 +49,34 @@ final class SeededArchiveVerifierTests: XCTestCase {
         }
     }
 
+    func testPristineInventoryScale200000OptIn() throws {
+        guard ProcessInfo.processInfo.environment["MACSYNC_PRISTINE_BASELINE_STRESS"] == "1" else {
+            throw XCTSkip("Opt-in local initial-baseline stress test")
+        }
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let start=ProcessInfo.processInfo.systemUptime
+        let empty=Data()
+        let folders=2_000
+        let filesPerFolder=100
+        for i in 0..<folders {
+            let folder=f.source.appendingPathComponent("set-\(i)")
+            try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true)
+            for j in 0..<filesPerFolder {
+                try empty.write(to:folder.appendingPathComponent("photo-\(j).dng"))
+            }
+        }
+        let generated=ProcessInfo.processInfo.systemUptime
+        let inventory=try LocalInventory(path:f.db.path)
+        let first=try inventory.reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        let indexed=ProcessInfo.processInfo.systemUptime
+        XCTAssertEqual(first.inspected,folders*(filesPerFolder+1))
+        XCTAssertEqual(first.queuedUpserts,0)
+        XCTAssertEqual(try inventory.itemCount(rootID:"photos"),folders*(filesPerFolder+1))
+        XCTAssertEqual(try f.journal.pending().count,0)
+        print("PRISTINE_200K: create=\(generated-start)s inventory=\(indexed-generated)s queued=\(first.queuedUpserts)")
+    }
+
     func testPristineInventoryIsBaselineOnlyAndReplaysSubsequentLocalChanges() throws {
         let f=try fixture()
         defer { try? FileManager.default.removeItem(at:f.base) }
