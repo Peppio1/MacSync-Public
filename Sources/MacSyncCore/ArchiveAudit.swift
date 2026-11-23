@@ -666,7 +666,7 @@ public final class ArchiveAudit {
                     shouldContinue:{ cancellation.mayCommit },
                     onProgress:{ done,total in
                         state.phase = "Salvataggio operazioni nel database · \(done)/\(total)"
-                        report()
+                        report(force: done == 0 || done == total)
                     })
                 break
             } catch SeedVerificationError.cancelled {
