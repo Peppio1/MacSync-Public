@@ -16,6 +16,15 @@ password="MacSyncCI$(openssl rand -hex 14)"
 printf '::add-mask::%s\n' "$password"
 chmod 700 "$base" "$base/private"
 chmod 770 "$share"
+# Seed the exact case before starting Samba or mounting smbfs. Also
+# seed a compatible sibling, so an empty listing is never misdiagnosed
+# as evidence of name mangling rather than a missing parent or denial.
+server_parent="macsync-ci-preexisting"
+mkdir -m 770 "$share/$server_parent"
+mkdir -m 770 "$share/$server_parent/server-created - "
+mkdir -m 770 "$share/$server_parent/compatible-control"
+printf '%s' 'synthetic checked rename' > "$share/$server_parent/server-created - /child.jpg"
+chmod 660 "$share/$server_parent/server-created - /child.jpg"
 prefix="$(brew --prefix)"
 smbd="$prefix/sbin/samba-dot-org-smbd"
 test -x "$smbd"
@@ -95,6 +104,15 @@ if ! "$prefix/bin/smbclient" "//127.0.0.1/MacSyncCI" -A "$authfile" -c "ls" > "$
   exit 1
 fi
 echo "Samba SMB authentication verified"
+# Read-only diagnostic through a different SMB client. Only the synthetic
+# parent is enumerated; never print auth files or raw server logs.
+if "$prefix/bin/smbclient" "//127.0.0.1/MacSyncCI" -A "$authfile" -c "cd $server_parent; ls" > "$base/preexisting-smbclient.log" 2>&1; then
+  echo "Direct SMB listing of preexisting synthetic names:"
+  cat "$base/preexisting-smbclient.log"
+else
+  echo "::warning::Direct SMB preexisting parent listing failed"
+  tail -n 8 "$base/preexisting-smbclient.log"
+fi
 if ! "$prefix/bin/smbclient" "//127.0.0.1/MacSyncCI" -A "$authfile" -c "mkdir macsync-ci-probe; rmdir macsync-ci-probe" > "$base/server-write.log" 2>&1; then
   echo "::error::Samba server refuses writes even for its ephemeral SMB account"
   tail -n 10 "$base/server-write.log" || true

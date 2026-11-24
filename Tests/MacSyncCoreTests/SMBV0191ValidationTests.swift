@@ -27,12 +27,10 @@ final class SMBV0191ValidationTests: XCTestCase {
         // Separate fresh parents prevent the first case from populating
         // the macOS directory cache before the server-created case.
         for directoryCase in [false,true] {
-            let label = prefix + (directoryCase ? "-server" : "-client")
+            let label = directoryCase ? "macsync-ci-preexisting" : prefix+"-client"
             let root = mount.appendingPathComponent(label)
             let server = URL(fileURLWithPath:serverPath).appendingPathComponent(label)
-            if directoryCase {
-                try fm.createDirectory(at:server,withIntermediateDirectories:false)
-            } else {
+            if !directoryCase {
                 try fm.createDirectory(at:root,withIntermediateDirectories:true)
             }
             defer { try? fm.removeItem(at:server) }
@@ -48,24 +46,31 @@ final class SMBV0191ValidationTests: XCTestCase {
         let serverOld=server.appendingPathComponent(oldName), serverNew=server.appendingPathComponent(newName)
         let bytes=Data("synthetic checked rename".utf8)
         if directoryCase {
-            // Create this directory directly in the server filesystem, not
-            // through the macOS SMB client; preserve the literal final space.
-            try fm.createDirectory(at:serverOld,withIntermediateDirectories:false)
-            try bytes.write(to:serverOld.appendingPathComponent("child.jpg"))
-            let deadline=ProcessInfo.processInfo.systemUptime+5
+            // Fixture created before the server and the mount exist; the
+            // first client lookup cannot be a stale cached negative lookup.
+            XCTAssertEqual(try Data(contentsOf:serverOld.appendingPathComponent("child.jpg")),bytes)
+            let deadline=ProcessInfo.processInfo.systemUptime+8
             var exactVisible=false
             var clientNames:[String]=[]
+            var listingError:String?
             repeat {
-                clientNames=(try? fm.contentsOfDirectory(atPath:root.path)) ?? []
+                do {
+                    clientNames=try fm.contentsOfDirectory(atPath:root.path)
+                    listingError=nil
+                } catch {
+                    let ns=error as NSError
+                    listingError=ns.domain+" ("+String(ns.code)+")"
+                }
                 exactVisible=clientNames.contains { $0.utf8.elementsEqual(oldName.utf8) }
-                if exactVisible { break }
+                if exactVisible && clientNames.contains("compatible-control") { break }
                 Thread.sleep(forTimeInterval:0.125)
             } while ProcessInfo.processInfo.systemUptime<deadline
-            guard exactVisible else {
-                // Synthetic fixture names only; never emit credentials.
+            guard exactVisible,clientNames.contains("compatible-control") else {
+                // Distinguish an unreadable parent from a hidden name. Only
+                // fixture names and error domain/code are logged.
                 let client=clientNames.map { name in name.unicodeScalars.map { String(format:"U+%04X",$0.value) }.joined(separator:" ") }
                 let raw=try fm.contentsOfDirectory(atPath:server.path).map { name in name.unicodeScalars.map { String(format:"U+%04X",$0.value) }.joined(separator:" ") }
-                XCTFail("Server-created trailing space not exposed literally. Client: "+client.joined(separator:";")+" server: "+raw.joined(separator:";"))
+                XCTFail("Preexisting case not visible. Parent listing error: "+(listingError ?? "none")+"; compatible sibling: "+String(clientNames.contains("compatible-control"))+"; client: "+client.joined(separator:";")+" server: "+raw.joined(separator:";"))
                 return
             }
         } else {
