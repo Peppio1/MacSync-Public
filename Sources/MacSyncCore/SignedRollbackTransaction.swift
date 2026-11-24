@@ -96,9 +96,17 @@ public enum SignedRollbackTransaction {
         }
     }
     public static func install(root:URL,snapshot:URL,target:URL,defaults:UserDefaults) throws {
+        try install(root:root,snapshot:snapshot,target:target,defaults:defaults,
+            allowsLocation:ApplicationRollback.allowedInstallLocation)
+    }
+
+    // Internal boundary for an isolated filesystem laboratory. The public
+    // installer always applies the production install-location restriction.
+    static func install(root:URL,snapshot:URL,target:URL,defaults:UserDefaults,
+                        allowsLocation:(URL)->Bool) throws {
         let coordinator=UpdateRecoveryCoordinator(root:root)
         let backupRoot=coordinator.backupRoot
-        guard ApplicationRollback.allowedInstallLocation(target),
+        guard allowsLocation(target),
               snapshot.deletingLastPathComponent().path==backupRoot.path,
               snapshot.lastPathComponent.hasPrefix("update-backup-"),
               let uuid=UUID(uuidString:String(snapshot.lastPathComponent.dropFirst("update-backup-".count))),
