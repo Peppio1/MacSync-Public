@@ -581,6 +581,41 @@ public final class AnchoredDirectory {
               final.st_mode & mode_t(S_IFMT)==original.st_mode & mode_t(S_IFMT) else { throw MountedCopyError.destinationChanging }
     }
 
+    /// Only a checked compensating rename to the original incompatible
+    /// name is permitted, on a LOCAL volume. Never overwrite, and never
+    /// use this method as a fallback for a remote rename.
+    func restoreRectifiedName(_ current:String, originalName:String, matching original:stat,
+                              shouldContinue:()->Bool) throws {
+        guard !binding.volume.isNetworkVolume,
+              NameRectification.proposedName(originalName)==current,
+              !originalName.contains("/"), !originalName.contains("\0") else {
+            throw MountedCopyError.unsafeFile
+        }
+        try verify()
+        let names = try FileManager.default.contentsOfDirectory(atPath:url.path)
+        guard names.contains(where:{ $0.utf8.elementsEqual(current.utf8) }),
+              !names.contains(where:{ !$0.utf8.elementsEqual(current.utf8) &&
+                   WindowsPathSafety.comparisonFold($0)==WindowsPathSafety.comparisonFold(originalName) }),
+              Self.sameFile(try leaf(current),original) else {
+            throw MountedCopyError.destinationConflict
+        }
+        guard shouldContinue() else { throw SeedVerificationError.cancelled }
+        let rc = current.withCString { a in originalName.withCString { b in
+            renameatx_np(fd,a,fd,b,UInt32(RENAME_EXCL))
+        }}
+        let code = errno
+        guard rc==0 else { throw MountedCopyError.copyFailed(Int(code)) }
+        try verify()
+        let final = try leaf(originalName)
+        let listed = try FileManager.default.contentsOfDirectory(atPath:url.path)
+        guard final.st_dev==original.st_dev, final.st_ino==original.st_ino,
+              final.st_mode==original.st_mode,
+              listed.contains(where:{ $0.utf8.elementsEqual(originalName.utf8) }),
+              !listed.contains(where:{ $0.utf8.elementsEqual(current.utf8) }) else {
+            throw MountedCopyError.destinationChanging
+        }
+    }
+
     public func remove(_ name:String, matching original: stat, directory: Bool = false,
                        shouldContinue: () -> Bool = { true }) throws {
         try verify()

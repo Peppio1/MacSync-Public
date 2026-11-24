@@ -80,6 +80,29 @@ public enum NameRectification {
         }
     }
 
+    private enum CoordinatedStage: String, Codable {
+        case prepared, sourceAttempt, sourceDone, destinationAttempt, destinationDone, rollbackSource
+    }
+
+    private struct CoordinatedGroup: Codable {
+        var moves: [Move]
+        var stage: CoordinatedStage = .prepared
+        var source: Move? { moves.first { $0.item.side == .source } }
+        var destination: Move? { moves.first { $0.item.side == .destination } }
+    }
+
+    private static func coordinatedGroups(journal:ChangeJournal) throws -> [CoordinatedGroup] {
+        try journal.coordinatedNameGroups().map { row in
+            let plan = try JSONDecoder().decode(CoordinatedGroup.self,from:row.data)
+            guard !plan.moves.isEmpty, plan.moves.count<=2,
+                  Set(plan.moves.map { $0.item.side }).count==plan.moves.count,
+                  plan.moves.allSatisfy({ $0.item.rootID==row.rootID && $0.item.relativePath==row.path }) else {
+                throw JournalError.database("Gruppo rettifica pendente non valido")
+            }
+            return plan
+        }
+    }
+
     /// Read-only projection of the existing durable name_rectification_batch.
     /// No second registry, no content reads and no authorization to rename.
     /// Both names and every descendant of a pending directory are protected,
@@ -155,15 +178,17 @@ public enum NameRectification {
     /// Decoding failure is a global database-integrity fault: never downgrade
     /// a missing/invalid plan into "no protection".
     public static func pendingProtection(journal: ChangeJournal) throws -> PendingProtection {
-        guard let batch = try journal.pendingNameRectification() else {
-            return PendingProtection(relations: [])
+        var pendingMoves: [Move] = []
+        if let batch = try journal.pendingNameRectification() {
+            let moves = try JSONDecoder().decode([Move].self, from: batch.data)
+            guard !moves.isEmpty, (0..<moves.count).contains(batch.offset) else {
+                throw JournalError.database("Stato rettifiche pendenti non valido")
+            }
+            pendingMoves.append(contentsOf:moves.dropFirst(batch.offset))
         }
-        let moves = try JSONDecoder().decode([Move].self, from: batch.data)
-        guard !moves.isEmpty, (0..<moves.count).contains(batch.offset) else {
-            throw JournalError.database("Stato rettifiche pendenti non valido")
-        }
+        pendingMoves.append(contentsOf:try coordinatedGroups(journal:journal).flatMap(\.moves))
         var relations: [PendingProtection.Relation] = []
-        for move in moves.dropFirst(batch.offset) {
+        for move in pendingMoves {
             let item = move.item
             let parts = item.relativePath.split(separator: "/", omittingEmptySubsequences: false)
             guard !item.rootID.isEmpty, !parts.isEmpty,
@@ -194,7 +219,8 @@ public enum NameRectification {
         let pending = try pendingProtection(journal: journal)
         guard let batch = try journal.pendingNameRectification() else {
             return PendingSideSummary(sourceCompleted: 0, destinationCompleted: 0,
-                                      sourcePending: 0, destinationPending: 0)
+                                      sourcePending:pending.relations.filter { $0.side == .source }.count,
+                                      destinationPending:pending.relations.filter { $0.side == .destination }.count)
         }
         let records = try JSONDecoder().decode([NameRectificationProgressRecord].self, from: batch.progress)
         var completed = try journal.nameRectificationCompleted()
@@ -270,7 +296,7 @@ public enum NameRectification {
         if let smb = error as? SMBNameRectificationError {
             switch smb {
             case .mountUnavailable, .credentialUnavailable, .timedOut: return true
-            case .helperFailed: return false
+            case .helperFailed, .notAttempted: return false
             }
         }
         if let copy = error as? MountedCopyError {

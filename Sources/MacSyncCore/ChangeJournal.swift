@@ -111,6 +111,9 @@ public final class ChangeJournal {
             // Constant-time upserts avoid re-encoding thousands of statuses
             // after every successful rename.
             try execute("CREATE TABLE IF NOT EXISTS name_rectification_completed(root_id TEXT NOT NULL, relative_path TEXT NOT NULL, side TEXT NOT NULL CHECK(side IN ('source','destination')), PRIMARY KEY(root_id,relative_path,side));")
+            // New coordinated operations have independent durable records.
+            // Never rewrite an older batch or lose its recorded protection.
+            try execute("CREATE TABLE IF NOT EXISTS name_rectification_groups(root_id TEXT NOT NULL, relative_path TEXT NOT NULL, plan TEXT NOT NULL, PRIMARY KEY(root_id,relative_path));")
             // Existing profiles retain their approved plan, next_move and
             // exact fingerprints. Adding a column never rewrites the plan.
             let columns = try prepare("PRAGMA table_info(name_rectification_batch);")
@@ -553,7 +556,78 @@ public final class ChangeJournal {
     }
 
     public func hasPendingNameRectification() throws -> Bool {
-        try pendingNameRectification() != nil
+        if try pendingNameRectification() != nil { return true }
+        let stmt = try prepare("SELECT 1 FROM name_rectification_groups LIMIT 1;")
+        defer { sqlite3_finalize(stmt) }
+        let rc = sqlite3_step(stmt)
+        guard rc == SQLITE_ROW || rc == SQLITE_DONE else { throw databaseFailure() }
+        return rc == SQLITE_ROW
+    }
+
+    func coordinatedNameGroups() throws -> [(rootID:String,path:String,data:Data)] {
+        let stmt = try prepare("SELECT root_id,relative_path,plan FROM name_rectification_groups ORDER BY length(relative_path) DESC,root_id,relative_path;")
+        defer { sqlite3_finalize(stmt) }
+        var rows: [(String,String,Data)] = []
+        while true {
+            let rc = sqlite3_step(stmt)
+            if rc == SQLITE_DONE { return rows }
+            guard rc == SQLITE_ROW else { throw databaseFailure() }
+            rows.append((columnText(stmt,at:0),columnText(stmt,at:1),Data(columnText(stmt,at:2).utf8)))
+        }
+    }
+
+    func saveCoordinatedNameGroup(rootID:String,path:String,data:Data) throws {
+        let stmt = try prepare("""
+            INSERT INTO name_rectification_groups(root_id,relative_path,plan) VALUES(?,?,?)
+            ON CONFLICT(root_id,relative_path) DO UPDATE SET plan=excluded.plan;
+            """)
+        defer { sqlite3_finalize(stmt) }
+        try bind(rootID,at:1,in:stmt); try bind(path,at:2,in:stmt)
+        try bind(String(decoding:data,as:UTF8.self),at:3,in:stmt)
+        guard sqlite3_step(stmt)==SQLITE_DONE else { throw databaseFailure() }
+    }
+
+    /// Finish one verified group and patch only the cached rows affected by
+    /// its successful rename. Failed/rolled-back rows stay in the list.
+    func finishCoordinatedNameGroup(rootID:String,path:String,
+                                    completed:[(item:IncompatibleName,newName:String)]) throws {
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            for entry in completed {
+                let item = entry.item
+                guard item.rootID==rootID, item.relativePath==path else {
+                    throw JournalError.database("Gruppo rettifica incoerente")
+                }
+                let parent = path.split(separator:"/").dropLast().joined(separator:"/")
+                let renamed = parent.isEmpty ? entry.newName : parent+"/"+entry.newName
+                if item.side == .destination {
+                    let scope = try prepare("""
+                        INSERT OR REPLACE INTO name_rectification_scopes(root_id,path,expires)
+                        VALUES(?,?,strftime('%s','now')+604800);
+                        """)
+                    defer { sqlite3_finalize(scope) }
+                    try bind(rootID,at:1,in:scope); try bind(renamed,at:2,in:scope)
+                    guard sqlite3_step(scope)==SQLITE_DONE else { throw databaseFailure() }
+                }
+                if let cached = try nameScan(rootID:rootID,side:item.side), cached.rootPath==item.rootPath {
+                    let rows = cached.rows.compactMap { row -> IncompatibleName? in
+                        if row.relativePath==path { return nil }
+                        guard item.isDirectory, row.relativePath.hasPrefix(path+"/") else { return row }
+                        return IncompatibleName(rootID:row.rootID,rootPath:row.rootPath,
+                            relativePath:renamed+String(row.relativePath.dropFirst(path.count)),
+                            objectKind:row.objectKind,side:row.side,reason:row.reason,
+                            affectedDescendants:row.affectedDescendants)
+                    }
+                    try saveNameScan(NameScanSnapshot(rootID:cached.rootID,side:cached.side,
+                        rootPath:cached.rootPath,volume:cached.volume,date:cached.date,rows:rows))
+                }
+            }
+            let stmt = try prepare("DELETE FROM name_rectification_groups WHERE root_id=? AND relative_path=?;")
+            defer { sqlite3_finalize(stmt) }
+            try bind(rootID,at:1,in:stmt); try bind(path,at:2,in:stmt)
+            guard sqlite3_step(stmt)==SQLITE_DONE else { throw databaseFailure() }
+            try execute("COMMIT;")
+        } catch { try? execute("ROLLBACK;"); throw error }
     }
 
     func nameRectificationCompleted() throws -> Set<String> {

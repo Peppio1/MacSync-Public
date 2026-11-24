@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"time"
@@ -26,6 +27,11 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	err = smb.MacSyncRename(ctx, request)
 	cancel()
+	if errors.Is(err, smb.ErrMacSyncRenameNotAttempted) {
+		// No SET_INFO rename could have been issued; a local compensation
+		// can be considered by the caller without guessing a remote outcome.
+		os.Exit(3)
+	}
 	if err != nil {
 		// The parent handles this exit status without logging any input data.
 		os.Exit(1)
