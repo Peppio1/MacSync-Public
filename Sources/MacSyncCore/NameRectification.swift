@@ -364,6 +364,15 @@ public enum NameRectification {
         let existing=Dictionary(uniqueKeysWithValues:stored.map { (key($0.moves[0].item),$0) })
         let selected=Dictionary(grouping:items.filter { proposedName($0.name) != nil },by:key)
         let keys=items.isEmpty ? Array(existing.keys) : Array(selected.keys)
+        // A many-to-one normalization is a genuine conflict, even when the
+        // proposed spelling is still free. Do not choose an arbitrary winner.
+        let proposals=Dictionary(grouping:selected.keys.compactMap { k -> (String,String)? in
+            guard existing[k]==nil,let row=selected[k]?.first,
+                  let proposed=proposedName(row.name) else { return nil }
+            let parent=row.relativePath.split(separator:"/").dropLast().joined(separator:"/")
+            return (k,row.rootID+"\0"+parent+"\0"+WindowsPathSafety.comparisonFold(proposed))
+        },by:{$0.1})
+        let colliding=Set(proposals.values.filter{$0.count>1}.flatMap{$0.map{$0.0}})
         func path(_ k:String)->String {
             existing[k]?.moves[0].item.relativePath ?? selected[k]?.first?.relativePath ?? ""
         }
@@ -635,6 +644,7 @@ public enum NameRectification {
                 do {
                     try check()
                     beforeDestination()
+                    try check()
                     parent=try parentFor(target)
                     snapshot=try checkedOriginal(target,parent:parent)
                 } catch {
@@ -674,6 +684,15 @@ public enum NameRectification {
             if let saved=existing[k] { group=saved }
             else {
                 let rows=selected[k] ?? []
+                if colliding.contains(k) {
+                    result.skipped+=rows.count
+                    let reason="Conflitto: più nomi selezionati producono lo stesso nome proposto"
+                    if result.firstFailure==nil { result.firstFailure=reason }
+                    for row in rows {
+                        report(row,action:"name_rectify_skipped",level:.warning,detail:reason)
+                    }
+                    continue
+                }
                 do {
                     group=try makePlan(rows)
                     try persist(group)

@@ -124,12 +124,18 @@ public struct AuditFindingCounts: Codable, Equatable, Sendable {
     public var newFiles = 0
     public var updatedFiles = 0
     public var deletionFiles = 0
+    // Optional for reports saved before full mirror support.
+    public var deletionDirectories: Int? = nil
     public var extra = 0
     public var uncertain = 0
     public init() {}
     public mutating func record(_ finding: AuditFinding, deletionCandidates: Set<String>) {
         if finding.kind == .extra { extra += 1 }
         if finding.kind == .uncertain { uncertain += 1 }
+        if finding.objectKind == "directory", finding.kind == .extra,
+           deletionCandidates.contains(finding.id) {
+            deletionDirectories=(deletionDirectories ?? 0)+1
+        }
         guard finding.objectKind == "file" else { return }
         switch finding.kind {
         case .missing: newFiles += 1
@@ -138,6 +144,7 @@ public struct AuditFindingCounts: Codable, Equatable, Sendable {
         default: break
         }
     }
+    public var deletionItems: Int { deletionFiles+(deletionDirectories ?? 0) }
     public func files(_ kind: AuditFindingKind) -> Int {
         switch kind {
         case .missing: return newFiles

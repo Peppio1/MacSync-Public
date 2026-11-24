@@ -41,7 +41,7 @@ jobs:
       - name: Targeted name maintenance tests
         env:
           MACSYNC_TEST_RCLONE: ${{ runner.temp }}/macsync-rclone/rclone
-        run: swift test -Xswiftc -warnings-as-errors --filter 'NameRectificationTests/(testV019PreflightDistinguishesMissingOriginalAndCollision|testV019CoordinatedRollbackDoesNotBlockIndependentGroup|testV019PendingGroupDoesNotBlockNewIndependentSelection|testPreflightCacheKeepsSiblingListingAndInvalidatesOnCollision|testNestedRenameAndConflictPreserveData|testApprovedRules)'
+        run: swift test -Xswiftc -warnings-as-errors --filter 'NameRectificationTests/(testV019PreflightDistinguishesMissingOriginalAndCollision|testV019CoordinatedRollbackDoesNotBlockIndependentGroup|testV019PendingGroupDoesNotBlockNewIndependentSelection|testV019ManyToOneCollisionLeavesBothOriginals|testPreflightCacheKeepsSiblingListingAndInvalidatesOnCollision|testNestedRenameAndConflictPreserveData|testApprovedRules)'
       - name: Targeted mirror tests
         env:
           MACSYNC_TEST_RCLONE: ${{ runner.temp }}/macsync-rclone/rclone

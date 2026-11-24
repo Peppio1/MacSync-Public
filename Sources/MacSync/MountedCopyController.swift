@@ -261,7 +261,15 @@ final class MountedCopyController: ObservableObject {
                 status="iMac: \(localCompleted) rinominati, \(localPending) pendenti · SMB: \(remoteCompleted) rinominati, \(remotePending) pendenti · \(result.skipped) conflitti · \(result.failed) non verificati"
                 if result.cancelled { status+=" · interrotto" }
                 if let reason = result.firstFailure { status += "\n" + reason }
-            } catch { status="Rettifica interrotta: "+SyncDiagnostic.describe(error)+"; controllare il registro" }
+            } catch {
+                status="Rettifica interrotta: "+SyncDiagnostic.describe(error)+"; controllare il registro"
+                // A failure before creating any durable plan is not a pending
+                // rename. Preserve the conservative state only if DB read fails.
+                if let db=try? Self.databaseURL().path,
+                   let actual=try? ChangeJournal(path:db,readOnly:true).hasPendingNameRectification() {
+                    pending=actual
+                }
+            }
             let finalStatus=status, completedIDs=resolved, needsRetry=pending
             DispatchQueue.main.async { [weak self] in
                 guard let self else { completion(needsRetry);return }

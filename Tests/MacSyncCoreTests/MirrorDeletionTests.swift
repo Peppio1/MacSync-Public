@@ -560,6 +560,8 @@ final class MirrorDeletionTests: XCTestCase {
         let audit = try ArchiveAudit(journal:f.journal,mappings:[f.mapping])
         let report = try audit.run(mode:.quick,repair:true,queueMirrorExtras:true)
         XCTAssertEqual(report.deletionCandidates?.count,3)
+        XCTAssertEqual(report.displayCounts?.deletionFiles,2)
+        XCTAssertEqual(report.displayCounts?.deletionDirectories,1)
         XCTAssertTrue(FileManager.default.fileExists(atPath:dir.path))
         XCTAssertEqual(try f.journal.pending().filter{$0.kind == .delete}.count,3)
         let repeated = try audit.run(mode:.intelligent,repair:true,queueMirrorExtras:true)

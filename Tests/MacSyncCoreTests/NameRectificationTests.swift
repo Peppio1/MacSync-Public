@@ -117,6 +117,40 @@ final class NameRectificationTests:XCTestCase {
         XCTAssertTrue(fm.fileExists(atPath:target.appendingPathComponent("a?.jpg").path))
     }
 
+    func testV019ManyToOneCollisionLeavesBothOriginals() throws {
+        let fm=FileManager.default
+        let base=fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let source=base.appendingPathComponent("source"),target=base.appendingPathComponent("target")
+        try fm.createDirectory(at:source,withIntermediateDirectories:true)
+        try fm.createDirectory(at:target,withIntermediateDirectories:true)
+        defer {try? fm.removeItem(at:base)}
+        for root in [source,target] {
+            try Data("question".utf8).write(to:root.appendingPathComponent("same?.jpg"))
+            try Data("asterisk".utf8).write(to:root.appendingPathComponent("same*.jpg"))
+        }
+        let db=base.appendingPathComponent("fixture.sqlite").path
+        try LocalInventory(path:db).reconcile(rootID:"demo",root:source)
+        let journal=try ChangeJournal(path:db)
+        let map=try MountedFolderMapping(rootID:"demo",source:source,target:target)
+        try journal.verifyDirectoryBindings([map],allowNewTarget:true)
+        let rows=["same?.jpg","same*.jpg"].flatMap { name in
+            IncompatibleName.Side.allCases.map { side in
+                IncompatibleName(rootID:"demo",rootPath:side == .source ? source.path : target.path,
+                    relativePath:name,objectKind:"file",side:side,reason:"Carattere incompatibile")
+            }
+        }
+        let result=try NameRectification.executeCoordinated(items:rows,roots:["demo":source.path],
+            journal:journal,log:SyncActivityLog(path:db),destinations:["demo":map])
+        XCTAssertEqual(result.renamed,0)
+        XCTAssertEqual(result.skipped,4)
+        XCTAssertFalse(try journal.hasPendingNameRectification())
+        for root in [source,target] {
+            XCTAssertEqual(try Data(contentsOf:root.appendingPathComponent("same?.jpg")),Data("question".utf8))
+            XCTAssertEqual(try Data(contentsOf:root.appendingPathComponent("same*.jpg")),Data("asterisk".utf8))
+            XCTAssertFalse(fm.fileExists(atPath:root.appendingPathComponent("same-.jpg").path))
+        }
+    }
+
     func testApprovedRules() {
         XCTAssertEqual(NameRectification.proposedName("photo  . "),"photo")
         XCTAssertEqual(NameRectification.proposedName("Caffè:frontale?.jpg"),"Caffè-frontale-.jpg")
