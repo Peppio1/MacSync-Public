@@ -48,7 +48,7 @@ public struct SyncHistoryRow: Identifiable, Sendable {
     public let cycleID: String
     public let event: SyncCycleEvent
 }
-public struct SyncHistoryTotals: Equatable, Sendable {
+public struct SyncHistoryTotals: Codable, Equatable, Sendable {
     public var stats = SyncDashboardStats()
     public var stageBytes: Int64 = 0
     public var backupBytes: Int64 = 0
@@ -178,7 +178,8 @@ public final class SyncCycleHistory {
                 try execute("PRAGMA busy_timeout=1000; PRAGMA query_only=ON;")
                 return
             }
-            try execute("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+            try SQLiteConnectionSetup.configureWriter(db)
+            try execute("PRAGMA foreign_keys=ON;")
             try execute("""
                 CREATE TABLE IF NOT EXISTS sync_cycles_v1(
                     id TEXT PRIMARY KEY, session_id TEXT NOT NULL, started REAL NOT NULL,
@@ -195,6 +196,10 @@ public final class SyncCycleHistory {
                     root_id TEXT NOT NULL, kind TEXT NOT NULL, relative_path TEXT NOT NULL, payload TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_cycle_events ON sync_cycle_events_v1(cycle_id,kind,id);
+                CREATE TABLE IF NOT EXISTS sync_cycle_totals_v1(
+                    cycle_id TEXT PRIMARY KEY REFERENCES sync_cycles_v1(id) ON DELETE CASCADE,
+                    payload TEXT NOT NULL
+                );
                 """)
         } catch { sqlite3_close(db); db = nil; throw error }
     }
@@ -211,13 +216,28 @@ public final class SyncCycleHistory {
             guard sqlite3_bind_int(m,2,automatic ? 1 : 0) == SQLITE_OK, sqlite3_step(m) == SQLITE_DONE else { throw failure() }
         }
     }
-    public func finish(id: String, at: Date, seconds: Double, state: String) throws {
-        let s = try prepare("UPDATE sync_cycles_v1 SET ended=?,elapsed=?,state=? WHERE id=? AND state='running';")
-        defer { sqlite3_finalize(s) }
-        guard sqlite3_bind_double(s,1,at.timeIntervalSince1970) == SQLITE_OK,
-              sqlite3_bind_double(s,2,max(0,seconds)) == SQLITE_OK else { throw failure() }
-        try bind(state,3,s); try bind(id,4,s)
-        guard sqlite3_step(s) == SQLITE_DONE else { throw failure() }
+    public func finish(id: String, at: Date, seconds: Double, state: String, totals:SyncHistoryTotals? = nil) throws {
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            let s = try prepare("UPDATE sync_cycles_v1 SET ended=?,elapsed=?,state=? WHERE id=? AND state='running';")
+            defer { sqlite3_finalize(s) }
+            guard sqlite3_bind_double(s,1,at.timeIntervalSince1970) == SQLITE_OK,
+                  sqlite3_bind_double(s,2,max(0,seconds)) == SQLITE_OK else { throw failure() }
+            try bind(state,3,s); try bind(id,4,s)
+            guard sqlite3_step(s) == SQLITE_DONE else { throw failure() }
+            if let totals {
+                guard sqlite3_changes(db)==1 else { throw JournalError.database("Ciclo non finalizzabile") }
+                let snapshot=try prepare("INSERT INTO sync_cycle_totals_v1(cycle_id,payload) VALUES(?,?);")
+                defer { sqlite3_finalize(snapshot) }
+                try bind(id,1,snapshot)
+                try bind(String(decoding:try JSONEncoder().encode(totals),as:UTF8.self),2,snapshot)
+                guard sqlite3_step(snapshot)==SQLITE_DONE else { throw failure() }
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
     }
     public func markInterrupted(exceptSession: String) throws {
         let s = try prepare("UPDATE sync_cycles_v1 SET state='interrupted' WHERE state='running' AND session_id<>?;")
@@ -277,6 +297,24 @@ public final class SyncCycleHistory {
         }
     }
     public func totals(cycleID: String? = nil, sessionID: String? = nil) throws -> SyncHistoryTotals {
+        if let cycleID,sessionID==nil {
+            // Preserve observed worker counts even when a detail row failed
+            // to persist. Old read-only histories can still be opened.
+            let table=try prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_cycle_totals_v1';")
+            let rc=sqlite3_step(table)
+            sqlite3_finalize(table)
+            guard rc==SQLITE_ROW || rc==SQLITE_DONE else { throw failure() }
+            if rc==SQLITE_ROW {
+                let snapshot=try prepare("SELECT payload FROM sync_cycle_totals_v1 WHERE cycle_id=?;")
+                defer { sqlite3_finalize(snapshot) }
+                try bind(cycleID,1,snapshot)
+                let status=sqlite3_step(snapshot)
+                if status==SQLITE_ROW {
+                    return try JSONDecoder().decode(SyncHistoryTotals.self,from:Data(col(snapshot,0).utf8))
+                }
+                guard status==SQLITE_DONE else { throw failure() }
+            }
+        }
         var result = SyncHistoryTotals(), cursor: Int64 = 0
         while true {
             let page = try events(cycleID:cycleID,sessionID:sessionID,afterID:cursor,limit:1000)

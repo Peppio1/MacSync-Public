@@ -150,7 +150,7 @@ final class MountedCopyController: ObservableObject {
         guard !active, liveProgress == nil, lastRecordedCycle == nil else { return }
         guard let path = try? historyPath(), FileManager.default.fileExists(atPath:path) else { return }
         let session = historySessionID
-        DispatchQueue.global(qos:.utility).async { [weak self] in
+        logReadQueue.async { [weak self] in
             do {
                 let history = try SyncCycleHistory(path:path)
                 try history.markInterrupted(exceptSession:session)
@@ -269,8 +269,9 @@ final class MountedCopyController: ObservableObject {
                 // A failure before creating any durable plan is not a pending
                 // rename. Preserve the conservative state only if DB read fails.
                 if let db=try? Self.databaseURL().path,
-                   let actual=try? ChangeJournal(path:db,readOnly:true).hasPendingNameRectification() {
-                    pending=actual
+                   let reader=try? ChangeJournal(path:db,readOnly:true) {
+                    if let actual=try? reader.hasPendingNameRectification() { pending=actual }
+                    if let actualHold=try? reader.unilateralNameAuditRequired() { unilateralHold=actualHold }
                 }
             }
             let finalStatus=status, completedIDs=resolved, needsRetry=pending, auditRequired=unilateralHold
@@ -1024,9 +1025,12 @@ final class MountedCopyController: ObservableObject {
                     if !historyError.isEmpty { outcomeState += "_history_incomplete" }
                     let endedAt = Date()
                     do {
-                        try history?.finish(id:cycleID,at:endedAt,seconds:ProcessInfo.processInfo.systemUptime-startUptime,state:outcomeState)
+                        try history?.finish(id:cycleID,at:endedAt,seconds:ProcessInfo.processInfo.systemUptime-startUptime,state:outcomeState,totals:totals)
                         try history?.prune(before:endedAt.addingTimeInterval(-365*86400))
-                    } catch { historyError = "Storico incompleto: " + error.localizedDescription }
+                    } catch {
+                        historyError = "Storico incompleto: " + error.localizedDescription
+                        if !outcomeState.hasSuffix("_history_incomplete") { outcomeState += "_history_incomplete" }
+                    }
                     let saved = (try? history?.cycles(limit:1,finishedOnly:true).first) ?? nil
                     let finalStats = totals.stats
                     let maxUIDeliveryDelay = progressCadence.maximumDeliveryDelay
@@ -1811,9 +1815,11 @@ final class MountedCopyController: ObservableObject {
         // Name scans use an independent lane and can still hold a SQLite
         // writer even after the transfer queue has stopped. Drain both before
         // resetting settings or restarting the monitor.
-        queue.async { [weak self] in
-            guard let self else { DispatchQueue.main.async { completion() }; return }
-            self.namesQueue.async { DispatchQueue.main.async { completion() } }
+        let namesLane=namesQueue,historyLane=logReadQueue
+        queue.async {
+            namesLane.async {
+                historyLane.async { DispatchQueue.main.async { completion() } }
+            }
         }
     }
 

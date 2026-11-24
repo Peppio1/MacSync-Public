@@ -726,7 +726,8 @@ public enum NameRectification {
             defer { onProgress(index+1,ordered.count) }
             var group:CoordinatedGroup
             if let saved=existing[k] {
-                if let onlySide, !(saved.moves.count == 1 && saved.moves[0].item.side == onlySide && saved.moves[0].unilateral == true) {
+                if (onlySide != nil && !(saved.moves.count == 1 && saved.moves[0].item.side == onlySide && saved.moves[0].unilateral == true)) ||
+                    (onlySide == nil && !items.isEmpty && saved.moves.contains { $0.unilateral == true }) {
                     result.skipped += selected[k]?.count ?? 1
                     let reason="Piano pendente di modalità diversa: riprendilo separatamente"
                     if result.firstFailure == nil { result.firstFailure=reason }
