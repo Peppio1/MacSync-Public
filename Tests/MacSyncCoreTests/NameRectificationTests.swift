@@ -28,6 +28,95 @@ final class NameRectificationTests:XCTestCase {
         XCTAssertEqual(try Data(contentsOf: new), Data("occupied".utf8))
     }
 
+    func testV019CoordinatedRollbackDoesNotBlockIndependentGroup() throws {
+        let fm=FileManager.default
+        let base=fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let source=base.appendingPathComponent("source"),target=base.appendingPathComponent("target")
+        try fm.createDirectory(at:source,withIntermediateDirectories:true)
+        try fm.createDirectory(at:target,withIntermediateDirectories:true)
+        defer {try? fm.removeItem(at:base)}
+        let bad="a?.jpg", good="b?.jpg"
+        for root in [source,target] {
+            try Data("a-original".utf8).write(to:root.appendingPathComponent(bad))
+            try Data("b-original".utf8).write(to:root.appendingPathComponent(good))
+        }
+        let db=base.appendingPathComponent("fixture.sqlite").path
+        try LocalInventory(path:db).reconcile(rootID:"demo",root:source)
+        let journal=try ChangeJournal(path:db)
+        let mapping=try MountedFolderMapping(rootID:"demo",source:source,target:target)
+        try journal.verifyDirectoryBindings([mapping],allowNewTarget:true)
+        let rows=[bad,good].flatMap { name in
+            IncompatibleName.Side.allCases.map { side in
+                IncompatibleName(rootID:"demo",rootPath:side == .source ? source.path : target.path,
+                    relativePath:name,objectKind:"file",side:side,reason:"Carattere incompatibile")
+            }
+        }
+        var injected=false
+        let result=try NameRectification.executeCoordinated(items:rows,roots:["demo":source.path],
+            journal:journal,log:SyncActivityLog(path:db),destinations:["demo":mapping],
+            beforeDestination:{
+                if !injected && fm.fileExists(atPath:source.appendingPathComponent("a-.jpg").path) {
+                    injected=true
+                    try? Data("occupied".utf8).write(to:target.appendingPathComponent("a-.jpg"))
+                }
+            })
+        XCTAssertTrue(injected)
+        XCTAssertEqual(result.renamed,2)
+        XCTAssertEqual(result.failed,2)
+        XCTAssertFalse(try journal.hasPendingNameRectification())
+        for root in [source,target] {
+            XCTAssertEqual(try Data(contentsOf:root.appendingPathComponent(bad)),Data("a-original".utf8))
+            XCTAssertEqual(try Data(contentsOf:root.appendingPathComponent("b-.jpg")),Data("b-original".utf8))
+        }
+        XCTAssertFalse(fm.fileExists(atPath:source.appendingPathComponent("a-.jpg").path))
+        XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent("a-.jpg")),Data("occupied".utf8))
+    }
+
+    func testV019PendingGroupDoesNotBlockNewIndependentSelection() throws {
+        let fm=FileManager.default
+        let base=fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let source=base.appendingPathComponent("source"),target=base.appendingPathComponent("target")
+        try fm.createDirectory(at:source,withIntermediateDirectories:true)
+        try fm.createDirectory(at:target,withIntermediateDirectories:true)
+        defer {try? fm.removeItem(at:base)}
+        for root in [source,target] {
+            try Data("a".utf8).write(to:root.appendingPathComponent("a?.jpg"))
+            try Data("b".utf8).write(to:root.appendingPathComponent("b?.jpg"))
+        }
+        let db=base.appendingPathComponent("fixture.sqlite").path
+        try LocalInventory(path:db).reconcile(rootID:"demo",root:source)
+        let journal=try ChangeJournal(path:db)
+        let mapping=try MountedFolderMapping(rootID:"demo",source:source,target:target)
+        try journal.verifyDirectoryBindings([mapping],allowNewTarget:true)
+        func rows(_ name:String)->[IncompatibleName] {
+            IncompatibleName.Side.allCases.map { side in
+                IncompatibleName(rootID:"demo",rootPath:side == .source ? source.path : target.path,
+                    relativePath:name,objectKind:"file",side:side,reason:"Carattere incompatibile")
+            }
+        }
+        var stop=false
+        let first=try NameRectification.executeCoordinated(items:rows("a?.jpg"),roots:["demo":source.path],
+            journal:journal,log:SyncActivityLog(path:db),destinations:["demo":mapping],
+            beforeDestination:{ stop=true },shouldContinue:{!stop})
+        XCTAssertTrue(first.cancelled)
+        XCTAssertTrue(try journal.hasPendingNameRectification())
+        let reopened=try ChangeJournal(path:db)
+        let protection=try NameRectification.pendingProtection(journal:reopened)
+        XCTAssertTrue(protection.protects(rootID:"demo",path:"a?.jpg"))
+        XCTAssertTrue(protection.protects(rootID:"demo",path:"a-.jpg"))
+        XCTAssertFalse(protection.protects(rootID:"demo",path:"b?.jpg"))
+        let next=try NameRectification.executeCoordinated(items:rows("b?.jpg"),roots:["demo":source.path],
+            journal:reopened,log:SyncActivityLog(path:db),destinations:["demo":mapping])
+        XCTAssertEqual(next.renamed,2)
+        XCTAssertTrue(try reopened.hasPendingNameRectification())
+        let resumed=try NameRectification.executeCoordinated(items:rows("a?.jpg"),roots:["demo":source.path],
+            journal:reopened,log:SyncActivityLog(path:db),destinations:["demo":mapping])
+        XCTAssertEqual(resumed.renamed,0)
+        XCTAssertFalse(try reopened.hasPendingNameRectification())
+        XCTAssertTrue(fm.fileExists(atPath:source.appendingPathComponent("a?.jpg").path))
+        XCTAssertTrue(fm.fileExists(atPath:target.appendingPathComponent("a?.jpg").path))
+    }
+
     func testApprovedRules() {
         XCTAssertEqual(NameRectification.proposedName("photo  . "),"photo")
         XCTAssertEqual(NameRectification.proposedName("Caffè:frontale?.jpg"),"Caffè-frontale-.jpg")

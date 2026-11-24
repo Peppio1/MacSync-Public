@@ -474,7 +474,7 @@ final class MacSyncRuntime: ObservableObject {
     /// any rename. A previously authorized automatic-copy setting may be
     /// restored after the monitor is restarted; mirror remains disarmed.
     func rectifyNames(_ items:[IncompatibleName]) {
-        guard !previewOnly,!rectificationPending,!items.isEmpty,!shuttingDown,!folderConfigurationBusy,!savingSchedule,
+        guard !previewOnly,!items.isEmpty,!shuttingDown,!folderConfigurationBusy,!savingSchedule,
               !copy.auditBusy,!copy.seedBusy,!copy.maintaining,!copy.rectifyingNames,!copy.namesBusy,
               !preparingSignedUpdate,!finalShutdownHolding else { return }
         let permitted=Set(copy.incompatibleNames.filter{ NameRectification.proposedName($0.name) != nil }.map(\.id))

@@ -229,7 +229,8 @@ final class MountedCopyController: ObservableObject {
                 let db=try Self.databaseURL().path
                 let journal = try ChangeJournal(path: db)
                 let roots = Dictionary(uniqueKeysWithValues: pairs.filter { !$0.path.isEmpty }.map { ($0.id, $0.path) })
-                let requested = items.isEmpty ? Set(pairs.map(\.id)) : Set(items.filter { $0.side == .destination }.map(\.rootID))
+                // Every selected relative path needs a live check of both sides.
+                let requested = items.isEmpty ? Set(pairs.map(\.id)) : Set(items.map(\.rootID))
                 var destinations: [String: MountedFolderMapping] = [:]
                 for pair in pairs where requested.contains(pair.id) {
                     guard !pair.path.isEmpty, !pair.destination.isEmpty, let expected = pair.expected else { continue }
@@ -240,7 +241,7 @@ final class MountedCopyController: ObservableObject {
                 let log = try SyncActivityLog(path: db)
                 log.cycleID = UUID().uuidString
                 var lastProgress = -Double.infinity
-                let result=try NameRectification.execute(items:items,roots:roots,journal:journal,log:log,
+                let result=try NameRectification.executeCoordinated(items:items,roots:roots,journal:journal,log:log,
                     destinations:destinations, onProgress: { checked, total in
                         let now = ProcessInfo.processInfo.systemUptime
                         guard total > 0, checked == total || now - lastProgress >= 0.15 else { return }
@@ -251,8 +252,8 @@ final class MountedCopyController: ObservableObject {
                 pending = try journal.hasPendingNameRectification()
                 let localPending = sides.sourcePending
                 let remotePending = sides.destinationPending
-                let localCompleted = pending ? sides.sourceCompleted : result.sourceRenamed
-                let remoteCompleted = pending ? sides.destinationCompleted : result.destinationRenamed
+                let localCompleted = result.sourceRenamed
+                let remoteCompleted = result.destinationRenamed
                 try? log.record(level: pending ? .warning : .info, rootID: "app",
                     action: pending ? "name_rectification_waiting" : "name_rectification_finish",
                     durationSeconds: ProcessInfo.processInfo.systemUptime - started, message: "Esito del lotto")
@@ -300,6 +301,7 @@ final class MountedCopyController: ObservableObject {
         namesQueue.async { [weak self] in
             var warnings: [String] = []
             var snapshots: [NameScanSnapshot] = []
+            var pendingRows: [IncompatibleName] = []
             var unavailable = 0
             var examined = 0
             do {
@@ -307,6 +309,7 @@ final class MountedCopyController: ObservableObject {
                 // Cached name-list refresh must not run schema migration/DDL
                 // while a transfer or archive audit is writing to SQLite.
                 let journal = try ChangeJournal(path: db, readOnly: !scan)
+                pendingRows = try NameRectification.pendingCoordinatedRows(journal:journal)
                 let log = scan ? try? SyncActivityLog(path: db) : nil
                 log?.cycleID = UUID().uuidString
                 try? log?.record(level: .info, rootID: "app", action: "name_scan_start", message: "Scansione dei nomi avviata")
@@ -365,7 +368,12 @@ final class MountedCopyController: ObservableObject {
                     }
                 }
             } catch { unavailable += 1 }
-            let rows = snapshots.flatMap(\.rows)
+            // A pending coordinated row stays visible even if the local
+            // side already has its compatible spelling.
+            var indexed = Dictionary(snapshots.flatMap(\.rows).map { ($0.id,$0) },
+                uniquingKeysWith:{first,_ in first})
+            for row in pendingRows { indexed[row.id]=row }
+            let rows = indexed.values.sorted { $0.id<$1.id }
             let dates = Dictionary(grouping: snapshots, by: \.side).compactMapValues { $0.map(\.date).min() }
             let dateSummary = IncompatibleName.Side.allCases.map { side in
                 side.label + ": " + (dates[side]?.formatted(date: .abbreviated, time: .shortened) ?? "nessun esito")

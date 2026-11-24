@@ -309,6 +309,11 @@ public final class AnchoredDirectory {
               try VolumeFingerprint.read(directoryDescriptor:fd) == binding.volume
         else { throw MountedCopyError.volumeChanged }
     }
+    var directoryURL: URL { url }
+    func listedNames() throws -> [String] {
+        try verify()
+        return try FileManager.default.contentsOfDirectory(atPath:url.path)
+    }
     func leaf(_ name:String) throws -> stat {
         guard !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.contains("\0")
         else { throw MountedCopyError.unsafeFile }
