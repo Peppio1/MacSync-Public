@@ -1079,6 +1079,67 @@ public final class ChangeJournal {
         }
     }
 
+    /// Reconcile only IDs captured before the operational audit. Equal
+    /// metadata is a policy-level match, not a guarantee of equal bytes.
+    /// Fresh local fingerprints and the inventory change stamp prevent
+    /// acknowledging a same-size/mtime edit that the monitor has not committed.
+    public func acknowledgeOperationalAuditMatches(_ entries:[SeedVerifiedMatch],
+        mappings:[MountedFolderMapping],shouldContinue:()->Bool) throws -> (files:Int,directories:Int) {
+        guard !entries.isEmpty else { return (0,0) }
+        try verifyDirectoryBindings(mappings)
+        let maps=Dictionary(uniqueKeysWithValues:mappings.map{($0.rootID,$0)})
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            if try queueRebuildToken() != nil {
+                try execute("COMMIT;"); return (0,0)
+            }
+            let protection=try NameRectification.pendingProtection(journal:self)
+            let stmt=try prepare("""
+                UPDATE change_queue SET completed=1
+                WHERE id=?1 AND root_id=?2 AND relative_path=?3 AND completed=0 AND kind='upsert'
+                  AND origin IN ('initial_inventory','source_monitor','archive_audit')
+                  AND EXISTS(SELECT 1 FROM watched_roots w WHERE w.root_id=?2 AND w.absolute_path=?4)
+                  AND EXISTS(SELECT 1 FROM file_inventory f WHERE f.root_id=?2 AND f.relative_path=?3
+                    AND f.kind=?5 AND (f.kind='directory' OR
+                      (f.file_size=?6 AND ABS(f.modified_at-?7)<0.002 AND f.change_stamp=?8)))
+                  AND NOT EXISTS(SELECT 1 FROM change_queue q WHERE q.root_id=?2 AND q.relative_path=?3
+                    AND q.id<>?1 AND (q.completed=0 OR q.id>?1))
+                  AND NOT EXISTS(SELECT 1 FROM publication_intents p WHERE p.root_id=?2 AND p.relative_path=?3)
+                  AND NOT EXISTS(SELECT 1 FROM transfer_recovery p WHERE p.root_id=?2 AND p.relative_path=?3)
+                  AND NOT EXISTS(SELECT 1 FROM blocked_name_jobs b WHERE b.job_id=?1)
+                  AND NOT EXISTS(SELECT 1 FROM upload_retry u WHERE u.root_id=?2 AND (u.job_id=?1 OR u.scope='root'));
+                """)
+            defer { sqlite3_finalize(stmt) }
+            var files=0, directories=0
+            for entry in entries {
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                guard let map=maps[entry.rootID],
+                      entry.objectKind=="file" || entry.objectKind=="directory",
+                      WindowsPathSafety.validRelativePath(entry.relativePath),
+                      !FileExclusionPolicy.excludes(entry.relativePath,enabled:FileExclusionPolicy.ignoreDSStore),
+                      !protection.protects(rootID:entry.rootID,path:entry.relativePath) else { continue }
+                let url=try map.fileURL(relativePath:entry.relativePath,destination:false)
+                guard url.resolvingSymlinksInPath().path==url.path,
+                      let live=try? SeededArchiveVerifier.fingerprint(url,directory:entry.objectKind=="directory"),
+                      live==entry.source else { continue }
+                sqlite3_reset(stmt); sqlite3_clear_bindings(stmt)
+                guard sqlite3_bind_int64(stmt,1,entry.jobID)==SQLITE_OK else { throw databaseFailure() }
+                try bind(entry.rootID,at:2,in:stmt); try bind(entry.relativePath,at:3,in:stmt)
+                try bind(map.source.path,at:4,in:stmt); try bind(entry.objectKind,at:5,in:stmt)
+                guard sqlite3_bind_int64(stmt,6,entry.source.size)==SQLITE_OK,
+                      sqlite3_bind_double(stmt,7,entry.source.modifiedAt)==SQLITE_OK else { throw databaseFailure() }
+                try bind("\(entry.source.inode):\(entry.source.ctimeSeconds):\(entry.source.ctimeNanos)",at:8,in:stmt)
+                guard sqlite3_step(stmt)==SQLITE_DONE else { throw databaseFailure() }
+                let changed=Int(sqlite3_changes(connection))
+                if entry.objectKind=="directory" { directories+=changed } else { files+=changed }
+            }
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            try execute("COMMIT;")
+            return (files,directories)
+        } catch { try? execute("ROLLBACK;"); throw error }
+    }
+
     public func watchedRootPath(rootID: String) throws -> String? {
         let stmt = try prepare("""
             SELECT absolute_path FROM watched_roots WHERE root_id=?;

@@ -469,7 +469,7 @@ public final class ArchiveAudit {
                         if collectMetadataMatches && shouldCollectMetadataMatch(mapping.rootID,path) {
                             let beforeA: SeedFileFingerprint
                             let beforeB: SeedFileFingerprint
-                            if mode == .quick,
+                            if (mode == .quick || mode == .intelligent),
                                let scannedSource = src!.verificationFingerprint,
                                let scannedTarget = dst!.verificationFingerprint {
                                 // Directory metadata was already collected as
@@ -520,7 +520,7 @@ public final class ArchiveAudit {
                         else if collectMetadataMatches && shouldCollectMetadataMatch(mapping.rootID,path) {
                             let beforeA: SeedFileFingerprint
                             let beforeB: SeedFileFingerprint
-                            if mode == .quick,
+                            if (mode == .quick || mode == .intelligent),
                                let scannedSource = src!.verificationFingerprint,
                                let scannedTarget = dst!.verificationFingerprint {
                                 // The scanner already obtained both no-follow stat records.

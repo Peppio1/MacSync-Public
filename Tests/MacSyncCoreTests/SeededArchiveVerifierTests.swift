@@ -49,6 +49,41 @@ final class SeededArchiveVerifierTests: XCTestCase {
         }
     }
 
+    func testV0192OperationalAuditRecognizesOnlySafePreAuditJobs() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let fixed=Date(timeIntervalSince1970:1_700_000_000)
+        for name in ["ordinary.jpg","newer.jpg","uncertain.jpg","legacy.jpg","different.jpg"] {
+            try write("identical",to:f.source.appendingPathComponent(name),date:fixed)
+            try write(name=="different.jpg" ? "different-longer" : "identical",
+                to:f.target.appendingPathComponent(name),date:fixed)
+        }
+        _ = try LocalInventory(path:f.db.path).reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        try f.journal.verifyDirectoryBindings([f.mapping],allowNewTarget:true)
+        for name in ["ordinary.jpg","newer.jpg","uncertain.jpg","legacy.jpg","different.jpg"] {
+            let id=try f.journal.enqueue(rootID:"photos",relativePath:name,kind:.upsert,
+                origin:name=="legacy.jpg" ? .legacyUnknown : .sourceMonitor)
+            if name=="uncertain.jpg" {
+                let job=try XCTUnwrap(f.journal.pending().first{$0.id==id})
+                try f.journal.recordPublicationIntent(job)
+            }
+        }
+        let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        var inserted=false
+        let report=try session.auditPreservingQueuedChanges(mode:.quick,repair:true,progress:{ p in
+            if !inserted && p.phase=="Riconciliazione copie pendenti" {
+                inserted=true
+                _ = try? f.journal.enqueue(rootID:"photos",relativePath:"newer.jpg",kind:.upsert,origin:.sourceMonitor)
+            }
+        },reconcileOrdinaryJobs:true)
+        XCTAssertTrue(inserted)
+        XCTAssertEqual(report.recognizedFiles,1)
+        XCTAssertEqual(report.bytesRead,0)
+        let paths=Set(try f.journal.pending().map(\.relativePath))
+        XCTAssertFalse(paths.contains("ordinary.jpg"))
+        XCTAssertTrue(paths.isSuperset(of:["newer.jpg","uncertain.jpg","legacy.jpg","different.jpg"]))
+    }
+
     func testQuickRepairTransactionRollsBackAndRetriesAfterTransientMonitorEvent() throws {
         let f=try fixture()
         defer { try? FileManager.default.removeItem(at:f.base) }

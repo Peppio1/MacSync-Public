@@ -478,7 +478,7 @@ final class MountedCopyController: ObservableObject {
             alert.informativeText = (settings.mode == .intelligent
                 ? "Confronta percorsi, dimensioni e date (tolleranza 2 secondi); utilizza SHA-256 selettivo sui file dubbi. "
                 : "La verifica rapida confronta percorsi, dimensioni e date (tolleranza 2 secondi), senza leggere il contenuto. ")
-                + "I file con metadati corrispondenti saranno segnalati come allineati. Solo le copie del primo inventario riconoscibili con certezza potranno essere considerate soddisfatte; gli eventi FSEvents e i job storici ambigui rimangono in coda. "
+                + "I file con metadati corrispondenti saranno segnalati come allineati. Le copie pendenti già corrispondenti possono essere chiuse secondo i criteri di verifica scelti; eventi successivi, operazioni incerte e job storici ambigui rimangono in coda. "
                 + "Le differenze sicure saranno accodate senza duplicare job pendenti, dopo un backup del database. "
                 + "File e cartelle validi presenti soltanto sul server saranno accodati per l’eliminazione. Nessuna cancellazione durante la verifica; esecuzione solo con mirror autorizzato."
             alert.addButton(withTitle:"Avvia verifica"); alert.addButton(withTitle:"Annulla")
@@ -507,7 +507,7 @@ final class MountedCopyController: ObservableObject {
             var last=ArchiveAuditProgress(started:started)
             last.phase="Preparazione verifica"
             var currentRoot="app"
-            try? auditLog?.record(level:.info,rootID:"app",action:"audit_start",message:"ID \(auditID) — " + settings.mode.label + " avviata; inventario unico e conferma locale dei soli job iniziali")
+            try? auditLog?.record(level:.info,rootID:"app",action:"audit_start",message:"ID \(auditID) — " + settings.mode.label + " avviata; inventario unico e riconciliazione protetta delle copie pendenti")
             do {
                 if cancel.isCancelled { throw SeedVerificationError.cancelled }
                 let journal = try ChangeJournal(path:db.path)
@@ -543,11 +543,11 @@ final class MountedCopyController: ObservableObject {
                 let local = try SeededArchiveSession(database:db,mappings:maps)
                 // QUICK reads each destination item's metadata only in the
                 // inventory. INTELLIGENT may additionally hash doubtful files.
-                // No second mass-recognition pass, and no acknowledgment of
-                // existing FSEvents or other pending SQLite jobs.
+                // Match only pre-audit job IDs; do not acknowledge newer
+                // FSEvents or uncertain publications.
                 let report = try local.auditPreservingQueuedChanges(
                     mode:settings.mode,repair:true,cancellation:cancel,
-                    diagnostic:diagnostic,progress:progress,deletionCandidates:candidates,queueMirrorExtras:true
+                    diagnostic:diagnostic,progress:progress,deletionCandidates:candidates,queueMirrorExtras:true,reconcileOrdinaryJobs:true
                 )
                 var summaryProgress = last
                 if let rebuildToken {
@@ -565,7 +565,7 @@ final class MountedCopyController: ObservableObject {
                 summaryProgress.comparisonStarted = nil
                 progress(summaryProgress)
                 let savedReport = report
-                try? auditLog?.record(level:.info,rootID:"app",action:"audit_queue_preserved",message:settings.mode.label + ": completati solo " + String((report.recognizedFiles ?? 0) + (report.recognizedDirectories ?? 0)) + " job iniziali corrispondenti; conservati tutti i job FSEvents, audit e legacy; accodate " + String(report.queuedRepairs) + " differenze sicure; nessuna scrittura sul server")
+                try? auditLog?.record(level:.info,rootID:"app",action:"audit_queue_preserved",message:settings.mode.label + ": riconosciute " + String((report.recognizedFiles ?? 0) + (report.recognizedDirectories ?? 0)) + " copie pendenti corrispondenti; conservati eventi successivi e operazioni incerte; accodate " + String(report.queuedRepairs) + " differenze sicure; nessuna scrittura sul server")
  
                 var storageWarning = ""
                 do {
@@ -597,8 +597,8 @@ final class MountedCopyController: ObservableObject {
                     if rebuildToken != nil { self.queueRebuildRequired = false }
                     self.seedReady = false; self.seedVerifiedCount = 0
                     self.seedInspectedCount = 0; self.seedReadBytes = savedReport.bytesRead
-                    self.seedStatus = "Verifica completata: FSEvents e job storici conservati; " + String((savedReport.recognizedFiles ?? 0) + (savedReport.recognizedDirectories ?? 0)) + " job iniziali soddisfatti"
-                    self.auditStatus = "Verifica conclusa: " + String(savedReport.queuedRepairs) + " nuove operazioni accodate; " + String((savedReport.recognizedFiles ?? 0) + (savedReport.recognizedDirectories ?? 0)) + " job iniziali già soddisfatti" + warning
+                    self.seedStatus = "Verifica completata: " + String((savedReport.recognizedFiles ?? 0) + (savedReport.recognizedDirectories ?? 0)) + " copie pendenti corrispondenti"
+                    self.auditStatus = "Verifica conclusa: " + String(savedReport.queuedRepairs) + " nuove operazioni accodate; " + String((savedReport.recognizedFiles ?? 0) + (savedReport.recognizedDirectories ?? 0)) + " copie pendenti già soddisfatte" + warning
                     self.auditProgress = nil
                     self.auditBusy = false
                     self.maintaining = false

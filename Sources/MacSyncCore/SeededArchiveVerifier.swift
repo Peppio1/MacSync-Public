@@ -571,16 +571,50 @@ public struct SeededArchiveSession: Sendable {
         diagnostic: (ArchiveAuditProgress) -> Void = { _ in },
         progress: (ArchiveAuditProgress) -> Void = { _ in },
         deletionCandidates: Set<String> = [],
-        queueMirrorExtras: Bool = false
+        queueMirrorExtras: Bool = false,
+        reconcileOrdinaryJobs: Bool = false
     ) throws -> ArchiveAuditReport {
         let journal = try openJournal()
+        var pending:[String:QueuedChange]=[:]
+        var ambiguous=Set<String>()
+        let operational = repair && reconcileOrdinaryJobs
+        if operational {
+            let upper=try journal.pendingUploadUpperBound() ?? 0
+            var cursor:Int64=0
+            while true {
+                guard !cancellation.isCancelled else { throw SeedVerificationError.cancelled }
+                let page=try journal.pendingUploads(limit:250,afterID:cursor,throughID:upper)
+                if page.isEmpty { break }
+                for job in page {
+                    cursor=job.id
+                    let key=job.rootID+"\0"+job.relativePath
+                    if pending.updateValue(job,forKey:key) != nil { ambiguous.insert(key) }
+                }
+            }
+        }
+        var matches:[SeedVerifiedMatch]=[]
+        func collect(_ root:String,_ path:String,_ source:SeedFileFingerprint,_ target:SeedFileFingerprint,_ kind:String) {
+            let key=root+"\0"+path
+            guard operational,!ambiguous.contains(key),let job=pending[key] else { return }
+            matches.append(SeedVerifiedMatch(jobID:job.id,rootID:root,relativePath:path,
+                source:source,target:target,verifiedBytes:kind=="file" ? source.size : 0,objectKind:kind))
+        }
         var result = try ArchiveAudit(journal: journal, mappings: mappings).run(
             mode: mode, repair: repair, cancellation: cancellation,
-            deletionCandidates: deletionCandidates, queueMirrorExtras: queueMirrorExtras,
+            collectMetadataMatches:operational,shouldCollectMetadataMatch:{root,path in
+                let key=root+"\0"+path
+                return pending[key] != nil && !ambiguous.contains(key)
+            },deletionCandidates: deletionCandidates, queueMirrorExtras: queueMirrorExtras,
+            onVerifiedFile:{collect($0,$1,$2,$3,"file")},
+            onVerifiedDirectory:{collect($0,$1,$2,$3,"directory")},
             diagnostic: diagnostic, progress: progress
         )
         try checkFileIdentity()
         if repair {
+            if operational {
+                let matching=Set(result.findings.lazy.filter{$0.kind == .matching}.map(\.id))
+                matches.removeAll{!matching.contains($0.rootID+"\0"+$0.relativePath)}
+            }
             // No destination scan/read during reconciliation. An FSEvents
             // cycle can briefly set ready=false after the expensive audit;
             // do not discard its snapshot simply because the commit gate
@@ -594,6 +628,18 @@ public struct SeededArchiveSession: Sendable {
                 }) else { throw SeedVerificationError.cancelled }
                 var lastLocalProgress=ProcessInfo.processInfo.systemUptime
                 do {
+                    if operational {
+                        var snapshot=ArchiveAuditProgress(started:result.started)
+                        snapshot.phase="Riconciliazione copie pendenti"
+                        snapshot.source=result.sourceMetrics ?? AuditSideMetrics()
+                        snapshot.destination=result.destinationMetrics ?? AuditSideMetrics()
+                        progress(snapshot)
+                        let counts=try journal.acknowledgeOperationalAuditMatches(matches,mappings:mappings,
+                            shouldContinue:{cancellation.mayCommit})
+                        result.recognizedFiles=counts.files
+                        result.recognizedDirectories=counts.directories
+                        break
+                    }
                     let counts = try journal.acknowledgeInitialInventoryMatches(
                         result.findings,
                         shouldContinue:{ cancellation.mayCommit },
