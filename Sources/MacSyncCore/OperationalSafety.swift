@@ -141,6 +141,42 @@ public enum WindowsPathSafety {
     public static func validRelativePath(_ path: String) -> Bool {
         !path.isEmpty && path.split(separator:"/",omittingEmptySubsequences:false).allSatisfy { validComponent(String($0)) }
     }
+    /// Deletion eligibility is not permission to create a Windows path.
+    /// Allow repairable literal names only, never reserved devices, managed
+    /// paths, traversal, controls or alternate path separators.
+    public static func validDeletionPath(_ path:String) -> Bool {
+        !path.isEmpty && path.split(separator:"/",omittingEmptySubsequences:false).allSatisfy { part in
+            let name=String(part)
+            return validComponent(name) || (!name.contains("\\") && !name.contains(":") &&
+                !name.unicodeScalars.contains(where:{$0.value < 32}) &&
+                NameRectification.proposedName(name) != nil)
+        }
+    }
+    /// Require an exact missing component, with no equivalent spelling
+    /// present and ENOENT from a no-follow stat. No SMB writes are implied.
+    static func confirmLiteralAbsence(_ path:String,under root:URL) throws {
+        guard validDeletionPath(path) else { throw MountedCopyError.unsafeFile }
+        let parts=path.split(separator:"/").map(String.init)
+        var parent=root
+        let cache=AuditDirectoryListingCache()
+        for (index,part) in parts.enumerated() {
+            let aliases=try cache.aliases(for:part,in:parent)
+            let url=parent.appendingPathComponent(part)
+            var info=stat()
+            let rc=url.path.withCString{lstat($0,&info)}
+            if rc != 0 {
+                guard errno==ENOENT,aliases.isEmpty else { throw MountedCopyError.destinationConflict }
+                return
+            }
+            guard index<parts.count-1,aliases.count==1,
+                  aliases[0].utf8.elementsEqual(part.utf8),
+                  info.st_mode & mode_t(S_IFMT)==mode_t(S_IFDIR) else {
+                throw MountedCopyError.destinationConflict
+            }
+            parent=url
+        }
+        throw MountedCopyError.destinationConflict
+    }
     public static func folded(_ name: String) -> String {
         name.precomposedStringWithCanonicalMapping.folding(options:[.caseInsensitive],locale:Locale(identifier:"en_US_POSIX"))
     }

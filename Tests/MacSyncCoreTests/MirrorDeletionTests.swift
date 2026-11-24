@@ -575,6 +575,45 @@ final class MirrorDeletionTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath:f.destination.appendingPathComponent("photo1.dng").path))
     }
 
+    func testV0192LiteralExtrasDeleteOnlyExactVisiblePaths() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let old=f.destination.appendingPathComponent("Foto12345.")
+        try FileManager.default.createDirectory(at:old,withIntermediateDirectories:true)
+        try Data("old".utf8).write(to:old.appendingPathComponent("photo.jpg"))
+        let alias=f.destination.appendingPathComponent("photo0.dng.")
+        try Data("keep alias".utf8).write(to:alias)
+        try f.journal.verifyDirectoryBindings([f.mapping],allowNewTarget:true)
+        let report=try ArchiveAudit(journal:f.journal,mappings:[f.mapping]).run(mode:.quick,repair:true,queueMirrorExtras:true)
+        XCTAssertEqual(report.deletionCandidates,Set(["photos\0Foto12345.","photos\0Foto12345./photo.jpg"]))
+        XCTAssertTrue(FileManager.default.fileExists(atPath:old.path))
+        let consent=try MirrorAuthorization.capture(journal:f.journal,mappings:[f.mapping],includePendingDeletes:true)
+        let result=try persistentWorker(f,authorization:consent).runCycle()
+        XCTAssertEqual(result.removed,1)
+        XCTAssertEqual(result.directories,1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath:old.path))
+        XCTAssertEqual(try Data(contentsOf:alias),Data("keep alias".utf8))
+        XCTAssertTrue(FileManager.default.fileExists(atPath:f.destination.appendingPathComponent("photo0.dng").path))
+    }
+
+    func testV0192LiteralRecoveryAndInvisibleNamesRemainPending() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let old=f.destination.appendingPathComponent("old.")
+        try Data("old".utf8).write(to:old)
+        try f.journal.verifyDirectoryBindings([f.mapping],allowNewTarget:true)
+        _ = try ArchiveAudit(journal:f.journal,mappings:[f.mapping]).run(mode:.quick,repair:true,queueMirrorExtras:true)
+        _ = try f.journal.enqueue(rootID:"photos",relativePath:"invisible.",kind:.delete,origin:.sourceMonitor)
+        let consent=try MirrorAuthorization.capture(journal:f.journal,mappings:[f.mapping],includePendingDeletes:true)
+        let recoveryWorker=try MirrorDeletionWorker(journal:f.journal,manifest:f.manifest,log:f.log,
+            mappings:[f.mapping],policy:MirrorDeletionPolicy(enabled:true,recoveryEnabled:true,retentionDays:nil),authorization:consent)
+        XCTAssertEqual(try recoveryWorker.runCycle().removed,0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath:old.path))
+        let result=try persistentWorker(f,authorization:consent).runCycle()
+        XCTAssertEqual(result.removed,1)
+        XCTAssertTrue(try f.journal.pending().contains{$0.relativePath=="invisible."})
+    }
+
     func testV019RecreatedAuditExtraSupersedesDelete() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at:f.base) }

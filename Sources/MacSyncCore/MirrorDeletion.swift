@@ -197,7 +197,7 @@ public struct MirrorAuthorization: Codable, Equatable, Sendable {
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             let page = try journal.pendingDeletePage(afterID:cutoff,throughID:upper,previousLength:length,previousID:cursor,limit:1000)
             if page.isEmpty { break }
-            for job in page where roots[job.rootID] != nil && WindowsPathSafety.validRelativePath(job.relativePath) {
+            for job in page where roots[job.rootID] != nil && WindowsPathSafety.validDeletionPath(job.relativePath) {
                 result.insert(job.rootID + "\0" + job.relativePath)
             }
             guard let last = page.last else { break }
@@ -678,7 +678,8 @@ public final class MirrorDeletionWorker {
                 emit(.deferred,job:job,mapping:nil,detail:"Coppia non configurata")
                 continue
             }
-            if !WindowsPathSafety.validRelativePath(job.relativePath) {
+            let literalOnly = !WindowsPathSafety.validRelativePath(job.relativePath)
+            if !WindowsPathSafety.validDeletionPath(job.relativePath) || (literalOnly && (authorization == nil || policy.recoveryEnabled)) {
                 result.deferred += 1
                 emit(.deferred,job:job,mapping:mapping,detail:"Nome incompatibile: nessuna cancellazione consentita")
                 if try journal.noteBlockedName(job) {
@@ -702,7 +703,7 @@ public final class MirrorDeletionWorker {
                     id: job.id, rootID: job.rootID, relativePath: job.relativePath
                 ) else { throw MirrorDeletionFailure.pendingTransfer }
 
-                guard WindowsPathSafety.validRelativePath(job.relativePath) else { throw MirrorDeletionFailure.unsafePath }
+                guard WindowsPathSafety.validDeletionPath(job.relativePath) else { throw MirrorDeletionFailure.unsafePath }
                 // Fresh SQLite protection check immediately before any mirror
                 // mutation. It cannot be bypassed by stale plan snapshots.
                 guard try !NameRectification.pendingProtection(journal: journal)
@@ -712,15 +713,26 @@ public final class MirrorDeletionWorker {
                          detail: "Rettifica nomi pendente: cancellazione sospesa")
                     continue
                 }
-                try WindowsPathSafety.checkNames(relativePath:job.relativePath,under:mapping.source)
-                try WindowsPathSafety.checkNames(relativePath:job.relativePath,under:mapping.target)
-                let source = try validatedPath(job.relativePath, under: mapping.source, allowMissingParents: true)
-                let destination = try validatedPath(job.relativePath, under: mapping.target)
+                let source:URL
+                let destination:URL
+                if literalOnly {
+                    try WindowsPathSafety.confirmLiteralAbsence(job.relativePath,under:mapping.source)
+                    source=mapping.source.appendingPathComponent(job.relativePath)
+                    destination=try mapping.verificationURL(relativePath:job.relativePath,destination:true)
+                } else {
+                    try WindowsPathSafety.checkNames(relativePath:job.relativePath,under:mapping.source)
+                    try WindowsPathSafety.checkNames(relativePath:job.relativePath,under:mapping.target)
+                    source=try validatedPath(job.relativePath,under:mapping.source,allowMissingParents:true)
+                    destination=try validatedPath(job.relativePath,under:mapping.target)
+                }
                 // Source leaf must still be absent, including dangling symlinks.
                 guard try Self.statIfPresent(source) == nil else {
                     throw MirrorDeletionFailure.sourceChanged
                 }
                 guard let target = try Self.statIfPresent(destination) else {
+                    // A hidden/vanished incompatible name is not proof of
+                    // removal from SMB. Keep it pending for manual review.
+                    if literalOnly { throw MirrorDeletionFailure.destinationChanged }
                     if try journal.acknowledgeDeletion(
                         id: job.id, rootID: job.rootID, relativePath: job.relativePath
                     ) {
@@ -778,7 +790,9 @@ public final class MirrorDeletionWorker {
                         let parent = try AnchoredDirectory(destination.deletingLastPathComponent(),expectedVolume:mapping.targetVolume)
                         try verifyRoots(mapping,baseline)
                         guard try Self.statIfPresent(source) == nil else { throw MirrorDeletionFailure.sourceChanged }
-                        if transferEngine.isDirect {
+                        if literalOnly {
+                            try removeLiteral(destination,original:target,mapping:mapping,baseline:baseline,job:job,directory:false)
+                        } else if transferEngine.isDirect {
                             try removeUsingRclone(destination,original:target,mapping:mapping,baseline:baseline,source:source,job:job,directory:false)
                         } else {
                             try parent.remove(destination.lastPathComponent,matching:target,shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() })
@@ -799,7 +813,9 @@ public final class MirrorDeletionWorker {
                     let parent = try AnchoredDirectory(destination.deletingLastPathComponent(),expectedVolume:mapping.targetVolume)
                     try verifyRoots(mapping,baseline)
                     guard try Self.statIfPresent(source) == nil else { throw MirrorDeletionFailure.sourceChanged }
-                    if transferEngine.isDirect {
+                    if literalOnly {
+                        try removeLiteral(destination,original:target,mapping:mapping,baseline:baseline,job:job,directory:true)
+                    } else if transferEngine.isDirect {
                         try removeUsingRclone(destination,original:target,mapping:mapping,baseline:baseline,source:source,job:job,directory:true)
                     } else {
                         try parent.remove(destination.lastPathComponent,matching:target,directory:true,shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() })
@@ -871,6 +887,28 @@ public final class MirrorDeletionWorker {
             }
         }
         return removed
+    }
+
+    /// Exceptional mounted-path removal: avoid Rclone's name encoding,
+    /// use a pinned parent descriptor and exact leaf identity. No fallback
+    /// to other spellings or recursive removal if the mount rejects unlink.
+    private func removeLiteral(_ destination:URL,original:stat,mapping:MountedFolderMapping,
+                               baseline:MirrorRootIdentity,job:QueuedChange,directory:Bool) throws {
+        try verifyRoots(mapping,baseline)
+        try WindowsPathSafety.confirmLiteralAbsence(job.relativePath,under:mapping.source)
+        let exact=try mapping.verificationURL(relativePath:job.relativePath,destination:true)
+        guard exact.path.utf8.elementsEqual(destination.path.utf8),
+              try journal.pendingUploads(limit:1).isEmpty,
+              try journal.deletionIsCurrent(id:job.id,rootID:job.rootID,relativePath:job.relativePath)
+        else { throw MirrorDeletionFailure.pendingTransfer }
+        let parent=try AnchoredDirectory(exact.deletingLastPathComponent(),expectedVolume:mapping.targetVolume)
+        let leaf=exact.lastPathComponent
+        let aliases=try parent.listedNames().filter { WindowsPathSafety.comparisonFold($0)==WindowsPathSafety.comparisonFold(leaf) }
+        guard aliases.count==1,aliases[0].utf8.elementsEqual(leaf.utf8) else { throw MirrorDeletionFailure.destinationChanged }
+        try parent.remove(leaf,matching:original,directory:directory,
+            shouldContinue:{!self.cancellation.isCancelled && self.operationAllowed()})
+        try verifyRoots(mapping,baseline)
+        try WindowsPathSafety.confirmLiteralAbsence(job.relativePath,under:mapping.target)
     }
 
     private func removeUsingRclone(_ destination: URL, original: stat, mapping: MountedFolderMapping,

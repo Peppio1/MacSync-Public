@@ -697,7 +697,7 @@ public final class ArchiveAudit {
             // and current SQLite state. Never re-read all remote files.
             let byRoot = Dictionary(grouping:findings.filter {
                 $0.kind == .extra && ($0.objectKind == "file" || $0.objectKind == "directory") &&
-                WindowsPathSafety.validRelativePath($0.relativePath)
+                WindowsPathSafety.validDeletionPath($0.relativePath)
             },by: \.rootID)
             var deleteRetries = 0
             while true {
@@ -716,6 +716,17 @@ public final class ArchiveAudit {
                           try DirectoryBinding.encoded(map.target)==dst else { throw MountedCopyError.volumeChanged }
                     for finding in byRoot[map.rootID] ?? [] {
                         try check()
+                        if !WindowsPathSafety.validRelativePath(finding.relativePath) {
+                            // Only a literal visible extra with no local alias
+                            // is a candidate. Inaccessible/hidden names remain
+                            // unconfirmed rather than guessed.
+                            do {
+                                try WindowsPathSafety.confirmLiteralAbsence(finding.relativePath,under:map.source)
+                                _ = try map.verificationURL(relativePath:finding.relativePath,destination:true)
+                                entries.append((map.rootID,finding.relativePath,map.source.path,src,dst))
+                            } catch { continue }
+                            continue
+                        }
                         let url = map.source.appendingPathComponent(finding.relativePath)
                         var s = stat()
                         // Only absence, not permission denial/ENOTDIR/other

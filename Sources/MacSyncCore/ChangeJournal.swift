@@ -1423,7 +1423,7 @@ public final class ChangeJournal {
             var eligible = Set<String>()
             for e in entries {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
-                guard WindowsPathSafety.validRelativePath(e.path),
+                guard WindowsPathSafety.validDeletionPath(e.path),
                       !FileExclusionPolicy.excludes(e.path,enabled:FileExclusionPolicy.ignoreDSStore),
                       !protection.protects(rootID:e.rootID,path:e.path) else { continue }
                 for stmt in [insert,current] {
