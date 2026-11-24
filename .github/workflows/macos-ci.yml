@@ -157,8 +157,8 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print LSMinimumSystemVersion' "$info")" = 13.0
           test "$(/usr/libexec/PlistBuddy -c 'Print LSUIElement' "$info")" = true
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIconFile' "$info")" = MacSync.icns
-          test "$version" = 0.19.1
-          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$info")" = 199
+          test "$version" = 0.19.2
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$info")" = 200
           test -s dist/MacSync.app/Contents/Resources/MacSync.icns
           test -x "$exe"
           lipo "$exe" -info
@@ -306,12 +306,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          (cd signing-input && shasum -a 256 -c MacSync-v0.19.1-macOS-universal.zip.sha256)
-          (cd signing-input && shasum -a 256 -c MacSync-v0.19.1-macOS-universal.dmg.sha256)
+          (cd signing-input && shasum -a 256 -c MacSync-v0.19.2-macOS-universal.zip.sha256)
+          (cd signing-input && shasum -a 256 -c MacSync-v0.19.2-macOS-universal.dmg.sha256)
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           printf '%s  %s\n' '0dd750be1d060b75f6b4075122e7ef2bf7f59d74090a3872217dc9a417bd5620' 'Packaging/Branding/MacSync-Approved-Original.png' | shasum -a 256 -c -
           mkdir "$RUNNER_TEMP/verify-branded-package"
-          ditto -x -k signing-input/MacSync-v0.19.1-macOS-universal.zip "$RUNNER_TEMP/verify-branded-package"
+          ditto -x -k signing-input/MacSync-v0.19.2-macOS-universal.zip "$RUNNER_TEMP/verify-branded-package"
           python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["approved_original"] is True and d["source_sha256"]=="0dd750be1d060b75f6b4075122e7ef2bf7f59d74090a3872217dc9a417bd5620"' "$RUNNER_TEMP/verify-branded-package/MacSync.app/Contents/Resources/branding-provenance.json"
           codesign --verify --deep --strict "$RUNNER_TEMP/verify-branded-package/MacSync.app"
           bash Packaging/prepare-release-signing.sh
@@ -320,7 +320,7 @@ jobs:
           MACSYNC_SPARKLE_PRIVATE_KEY: ${{ secrets.MACSYNC_SPARKLE_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          bash Packaging/sign-release-v0191.sh signing-input/MacSync-v0.19.1-macOS-universal.zip
+          bash Packaging/sign-release-v0192.sh signing-input/MacSync-v0.19.2-macOS-universal.zip
       - uses: actions/upload-artifact@v6
         with:
           name: MacSync-signed-release-candidate
