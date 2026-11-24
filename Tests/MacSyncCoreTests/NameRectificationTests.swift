@@ -97,6 +97,43 @@ final class NameRectificationTests:XCTestCase {
         _=try inventory.reconcile(rootID:"demo",root:root)
         XCTAssertEqual(try inventory.incompatibleNames(rootID:"demo",sourcePath:root.path).filter{$0.relativePath.hasPrefix("folder")}.count,0)
     }
+    func testV0192LocalPlanCanResumeAfterCancellationWithoutTouchingDestination() throws {
+        let fm=FileManager.default
+        let base=fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let source=base.appendingPathComponent("source"),target=base.appendingPathComponent("target")
+        try fm.createDirectory(at:source,withIntermediateDirectories:true)
+        try fm.createDirectory(at:target,withIntermediateDirectories:true)
+        defer {try? fm.removeItem(at:base)}
+        let old="photo?.jpg",new="photo-.jpg"
+        try Data("source".utf8).write(to:source.appendingPathComponent(old))
+        try Data("target".utf8).write(to:target.appendingPathComponent(old))
+        let db=base.appendingPathComponent("fixture.sqlite").path
+        let inventory=try LocalInventory(path:db)
+        _ = try inventory.reconcile(rootID:"demo",root:source)
+        let journal=try ChangeJournal(path:db)
+        let log=try SyncActivityLog(path:db)
+        let rows=try inventory.incompatibleNames(rootID:"demo",sourcePath:source.path)
+        let interrupted=try NameRectification.executeLocal(items:rows,roots:["demo":source.path],
+            journal:journal,log:log,shouldContinue:{(try? journal.hasPendingNameRectification()) == false})
+        XCTAssertTrue(interrupted.cancelled)
+        XCTAssertTrue(try journal.hasPendingNameRectification())
+        let reopened=try ChangeJournal(path:db)
+        let pending=try NameRectification.localMaintenanceRows(rows,journal:reopened)
+        XCTAssertEqual(pending.count,1)
+        XCTAssertTrue(pending[0].reason.hasPrefix("Rettifica in sospeso"))
+        let result=try NameRectification.executeLocal(items:pending,roots:["demo":source.path],journal:reopened,log:log)
+        XCTAssertEqual(result.sourceRenamed,1)
+        XCTAssertFalse(try reopened.hasPendingNameRectification())
+        XCTAssertEqual(try Data(contentsOf:source.appendingPathComponent(new)),Data("source".utf8))
+        XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent(old)),Data("target".utf8))
+        XCTAssertFalse(fm.fileExists(atPath:target.appendingPathComponent(new).path))
+        let remote=IncompatibleName(rootID:"demo",rootPath:target.path,relativePath:old,
+            objectKind:"file",side:.destination,reason:"Incompatible")
+        XCTAssertThrowsError(try NameRectification.executeLocal(items:[remote],roots:["demo":target.path],
+            journal:reopened,log:log))
+        XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent(old)),Data("target".utf8))
+    }
+
     func testIndexedPendingProtectionScalesAndGuardsNestedNames() {
         let relations = (0..<5_000).map { n in
             NameRectification.PendingProtection.Relation(
