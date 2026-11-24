@@ -1,0 +1,39 @@
+name: v0.19.1 exact server-side SMB name validation
+on:
+  push:
+    branches: [validate-v0.19.1-smb]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macsync-v0191-smb-validation
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install disposable loopback Samba
+        run: brew install samba
+      - name: Mount genuine SMB filesystem
+        run: bash scripts/ci/prepare-local-samba.sh
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Build actual protected SMB helper
+        run: bash Packaging/prepare-rclone-smb-rename.sh "$RUNNER_TEMP/macsync-smb-rclone"
+      - name: Verify exact names on server and client including server-created trailing space
+        env:
+          MACSYNC_V0191_REQUIRE_SMB: '1'
+          MACSYNC_TEST_SMB_HELPER: ${{ runner.temp }}/macsync-smb-rclone/rclone-smb-rename
+        run: swift test -Xswiftc -warnings-as-errors --filter SMBV0191ValidationTests
+      - name: Cleanup disposable share
+        if: always()
+        run: bash scripts/ci/cleanup-local-samba.sh
