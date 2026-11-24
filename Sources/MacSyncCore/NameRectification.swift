@@ -344,6 +344,17 @@ public enum NameRectification {
         }
     }
 
+    /// Combine current local inventory with unresolved local durable plans.
+    /// The latter may already have changed their on-disk spelling before a
+    /// crash; do not hide them merely because the incompatible leaf vanished.
+    public static func localMaintenanceRows(_ rows:[IncompatibleName],journal:ChangeJournal) throws -> [IncompatibleName] {
+        var byID=Dictionary(uniqueKeysWithValues:rows.filter{$0.side == .source}.map{($0.id,$0)})
+        for row in try pendingCoordinatedRows(journal:journal) where row.side == .source {
+            byID[row.id]=row
+        }
+        return byID.values.sorted{$0.id<$1.id}
+    }
+
     /// One exact relative path is a transaction-like maintenance unit.
     /// Two filesystems cannot commit atomically: persist every intent before
     /// mutating and compensate on the local Mac only after a definite failure.

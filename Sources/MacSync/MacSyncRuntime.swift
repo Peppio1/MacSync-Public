@@ -122,7 +122,7 @@ final class MacSyncRuntime: ObservableObject {
                     guard let self, !self.shuttingDown, self.rectificationRevision==revision else { return }
                     self.rectificationPending = pending
                     if pending {
-                        self.automaticStatus = "Rettifica pendente: i percorsi interessati restano protetti; riprendi da Nomi incompatibili"
+                        self.automaticStatus = "Rettifica pendente: i percorsi interessati restano protetti; seleziona le voci in Nomi incompatibili"
                     }
                 }
             }
@@ -547,16 +547,6 @@ final class MacSyncRuntime: ObservableObject {
         let approved=items.filter{permitted.contains($0.id) && $0.side == .source}
         guard !approved.isEmpty else { return }
         performNameRectification(approved)
-    }
-
-    func resumeNameRectification() {
-        guard rectificationPending, !previewOnly, !shuttingDown, !folderConfigurationBusy,
-              !savingSchedule, !copy.active, !copy.maintaining, !copy.auditBusy,
-              !copy.namesBusy, !copy.seedBusy, !copy.rectifyingNames,
-              !preparingSignedUpdate, !finalShutdownHolding else { return }
-        let pending = copy.incompatibleNames.filter { $0.side == .source && $0.reason.hasPrefix("Rettifica in sospeso") }
-        guard !pending.isEmpty else { return }
-        performNameRectification(pending)
     }
 
     func cancelNameRectification() {

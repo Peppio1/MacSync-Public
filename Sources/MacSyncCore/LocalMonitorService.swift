@@ -172,8 +172,9 @@ public final class LocalMonitorService {
                 throw SeedVerificationError.cancelled
             }
             let journal=try ChangeJournal(path:databasePath)
-            let rows = pendingOnly ? try journal.pendingLocalNameRectifications() :
+            let baseRows = pendingOnly ? try journal.pendingLocalNameRectifications() :
                 try roots.flatMap { try inventory.incompatibleNames(rootID:$0.id,sourcePath:$0.url.path) }
+            let rows=try NameRectification.localMaintenanceRows(baseRows,journal:journal)
             let current=Dictionary(uniqueKeysWithValues:rows.map{($0.id,$0)})
             let selected=approved.filter { row in
                 current[row.id] == row && NameRectification.proposedName(row.name) != nil
@@ -370,8 +371,11 @@ public final class LocalMonitorService {
         // The queue is durable; count from the database rather than a UI cache.
         let breakdown = try? inventory?.pendingBreakdown()
         let names: [IncompatibleName]?
-        if active, let inventory {
-            names = try? roots.flatMap { try inventory.incompatibleNames(rootID:$0.id,sourcePath:$0.url.path) }
+        if active, let inventory,let databasePath=activeDatabasePath {
+            names = try? {
+                let rows=try roots.flatMap { try inventory.incompatibleNames(rootID:$0.id,sourcePath:$0.url.path) }
+                return try NameRectification.localMaintenanceRows(rows,journal:ChangeJournal(path:databasePath,readOnly:true))
+            }()
         } else { names = nil }
         update(MonitorUpdate(message:message,monitoring:active,pendingChanges:breakdown?.total ?? 0,
                              pendingBreakdown:breakdown,sourceNames:names))
