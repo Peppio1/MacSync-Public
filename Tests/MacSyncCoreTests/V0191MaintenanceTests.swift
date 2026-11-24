@@ -63,6 +63,42 @@ final class V0191MaintenanceTests: XCTestCase {
         XCTAssertFalse(try journal.hasPendingNameRectification())
     }
 
+    func testV0192LocalRectificationCreatesOrdinaryMonitorChangesWithoutAuditHold() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let source = base.appendingPathComponent("source")
+        let target = base.appendingPathComponent("target")
+        defer { try? fm.removeItem(at:base) }
+        let old = "Foto12345.", new = "Foto12345-"
+        for root in [source, target] {
+            let dir = root.appendingPathComponent(old)
+            try fm.createDirectory(at:dir, withIntermediateDirectories:true)
+            try Data("fixture".utf8).write(to:dir.appendingPathComponent("photo.jpg"))
+        }
+        let db = base.appendingPathComponent("inventory.sqlite").path
+        let inventory = try LocalInventory(path:db)
+        _ = try inventory.reconcile(rootID:"demo", root:source, origin:.initialInventory)
+        let journal = try ChangeJournal(path:db)
+        let log = try SyncActivityLog(path:db)
+        XCTAssertTrue(try journal.pending().isEmpty)
+        let items = try inventory.incompatibleNames(rootID:"demo",sourcePath:source.path)
+        XCTAssertEqual(items.map(\.relativePath), [old])
+        let result = try NameRectification.executeCoordinated(items:items, roots:["demo":source.path],
+            journal:journal, log:log, destinations:[:], onlySide:.source, normalLocalRename:true)
+        XCTAssertEqual(result.sourceRenamed,1)
+        XCTAssertFalse(try journal.unilateralNameAuditRequired())
+        XCTAssertFalse(try journal.hasPendingNameRectification())
+        XCTAssertTrue(try journal.pending().isEmpty)
+        XCTAssertTrue(fm.fileExists(atPath:target.appendingPathComponent(old).path))
+        XCTAssertFalse(fm.fileExists(atPath:target.appendingPathComponent(new).path))
+        _ = try inventory.reconcile(rootID:"demo", root:source)
+        let pending = try journal.pending()
+        XCTAssertTrue(pending.contains { $0.kind == .upsert && $0.relativePath == new + "/photo.jpg" })
+        XCTAssertTrue(pending.contains { $0.kind == .delete && $0.relativePath == old + "/photo.jpg" })
+        XCTAssertTrue(try inventory.incompatibleNames(rootID:"demo", sourcePath:source.path).isEmpty)
+        XCTAssertEqual(try Data(contentsOf:source.appendingPathComponent(new).appendingPathComponent("photo.jpg")),Data("fixture".utf8))
+    }
+
     func testFinalizedTotalsSurviveMissingDetailRow() throws {
         let base=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at:base,withIntermediateDirectories:true)

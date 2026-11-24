@@ -217,7 +217,6 @@ final class MountedCopyController: ObservableObject {
     func rectifyNamesAfterDrain(items:[IncompatibleName],
                                 pairs:[(id:String,path:String,destination:String,expected:VolumeFingerprint?)],
                                 token:SeedVerificationCancellation,
-                                onlySide:IncompatibleName.Side? = nil,
                                 completion:@escaping @MainActor (Bool)->Void) {
         guard !previewOnly,!rectifyingNames else { completion(false);return }
         rectifyingNames=true; rectificationStatus="Verifica e rettifica dei nomi in corso…"
@@ -225,26 +224,20 @@ final class MountedCopyController: ObservableObject {
             var status=""
             var resolved=Set<String>()
             var pending = true
-            var unilateralHold = onlySide != nil
+            var unilateralHold = false
             let started = ProcessInfo.processInfo.systemUptime
             do {
                 let db=try Self.databaseURL().path
                 let journal = try ChangeJournal(path: db)
                 let roots = Dictionary(uniqueKeysWithValues: pairs.filter { !$0.path.isEmpty }.map { ($0.id, $0.path) })
-                // Every selected relative path needs a live check of both sides.
-                let requested = items.isEmpty ? Set(pairs.map(\.id)) : Set(items.map(\.rootID))
-                var destinations: [String: MountedFolderMapping] = [:]
-                for pair in pairs where requested.contains(pair.id) && onlySide != .source {
-                    guard !pair.path.isEmpty, !pair.destination.isEmpty, let expected = pair.expected else { continue }
-                    destinations[pair.id] = try? MountedFolderMapping(
-                        rootID: pair.id, source: URL(fileURLWithPath: pair.path),
-                        target: URL(fileURLWithPath: pair.destination), expectedTargetVolume: expected)
+                guard !items.isEmpty, items.allSatisfy({ $0.side == .source }) else {
+                    throw MountedCopyError.invalidMapping
                 }
                 let log = try SyncActivityLog(path: db)
                 log.cycleID = UUID().uuidString
                 var lastProgress = -Double.infinity
                 let result=try NameRectification.executeCoordinated(items:items,roots:roots,journal:journal,log:log,
-                    destinations:destinations, onlySide:onlySide, onProgress: { checked, total in
+                    destinations:[:], onlySide:.source, normalLocalRename:true, onProgress: { checked, total in
                         let now = ProcessInfo.processInfo.systemUptime
                         guard total > 0, checked == total || now - lastProgress >= 0.15 else { return }
                         lastProgress = now
@@ -254,14 +247,12 @@ final class MountedCopyController: ObservableObject {
                 pending = try journal.hasPendingNameRectification()
                 unilateralHold = try journal.unilateralNameAuditRequired()
                 let localPending = sides.sourcePending
-                let remotePending = sides.destinationPending
                 let localCompleted = result.sourceRenamed
-                let remoteCompleted = result.destinationRenamed
                 try? log.record(level: pending ? .warning : .info, rootID: "app",
                     action: pending ? "name_rectification_waiting" : "name_rectification_finish",
                     durationSeconds: ProcessInfo.processInfo.systemUptime - started, message: "Esito del lotto")
                 resolved=result.resolvedIDs
-                status="iMac: \(localCompleted) rinominati, \(localPending) pendenti · SMB: \(remoteCompleted) rinominati, \(remotePending) pendenti · \(result.skipped) conflitti · \(result.failed) non verificati"
+                status="Sorgenti: \(localCompleted) rinominati, \(localPending) pendenti · \(result.skipped) conflitti · \(result.failed) non verificati"
                 if result.cancelled { status+=" · interrotto" }
                 if let reason = result.firstFailure { status += "\n" + reason }
             } catch {
@@ -314,7 +305,7 @@ final class MountedCopyController: ObservableObject {
             nameScanStarted = Date()
             namesStatus = "Preparazione scansione dei nomi…"
         }
-        let total = pairs.reduce(0) { $0 + ($1.path.isEmpty ? 0 : 1) + ($1.destination.isEmpty ? 0 : 1) }
+        let total = pairs.filter { !$0.path.isEmpty }.count
         namesQueue.async { [weak self] in
             var warnings: [String] = []
             var snapshots: [NameScanSnapshot] = []
@@ -326,17 +317,17 @@ final class MountedCopyController: ObservableObject {
                 // Cached name-list refresh must not run schema migration/DDL
                 // while a transfer or archive audit is writing to SQLite.
                 let journal = try ChangeJournal(path: db, readOnly: !scan)
-                pendingRows = try NameRectification.pendingCoordinatedRows(journal:journal)
+                pendingRows = try NameRectification.pendingCoordinatedRows(journal:journal).filter { $0.side == .source }
                 let log = scan ? try? SyncActivityLog(path: db) : nil
                 log?.cycleID = UUID().uuidString
                 try? log?.record(level: .info, rootID: "app", action: "name_scan_start", message: "Scansione dei nomi avviata")
                 for pair in pairs {
-                    for side in IncompatibleName.Side.allCases {
-                        let value = side == .source ? pair.path : pair.destination
+                    for side in [IncompatibleName.Side.source] {
+                        let value = pair.path
                         guard !value.isEmpty else { continue }
                         examined += 1
                         let root = URL(fileURLWithPath: value, isDirectory: true).standardizedFileURL
-                        let volume = side == .destination ? pair.expected : nil
+                        let volume: VolumeFingerprint? = nil
                         if scan && !cancellation.isCancelled {
                             let phase = "\(side.label) · Posizione \(examined) di \(total)"
                             let started = ProcessInfo.processInfo.systemUptime
@@ -392,7 +383,7 @@ final class MountedCopyController: ObservableObject {
             for row in pendingRows { indexed[row.id]=row }
             let rows = indexed.values.sorted { $0.id<$1.id }
             let dates = Dictionary(grouping: snapshots, by: \.side).compactMapValues { $0.map(\.date).min() }
-            let dateSummary = IncompatibleName.Side.allCases.map { side in
+            let dateSummary = [IncompatibleName.Side.source].map { side in
                 side.label + ": " + (dates[side]?.formatted(date: .abbreviated, time: .shortened) ?? "nessun esito")
             }.joined(separator: " · ")
             let incomplete = unavailable > 0 || snapshots.count < examined

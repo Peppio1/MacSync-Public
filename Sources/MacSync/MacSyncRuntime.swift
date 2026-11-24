@@ -475,16 +475,16 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     /// Explicitly confirmed name maintenance. Stop workers and drain before
-    /// any rename. A previously authorized automatic-copy setting may be
-    /// restored after the monitor is restarted; mirror remains disarmed.
-    func rectifyNames(_ items:[IncompatibleName], onlySide:IncompatibleName.Side? = nil) {
+    /// any rename. Restore previously authorized automatic copies; no
+    /// destination mutation or new mirror consent is performed here.
+    func rectifyNames(_ items:[IncompatibleName]) {
         guard !previewOnly,!items.isEmpty,!shuttingDown,!folderConfigurationBusy,!savingSchedule,
               !copy.auditBusy,!copy.seedBusy,!copy.maintaining,!copy.rectifyingNames,!copy.namesBusy,
               !preparingSignedUpdate,!finalShutdownHolding else { return }
         let permitted=Set(copy.incompatibleNames.filter{ NameRectification.proposedName($0.name) != nil }.map(\.id))
-        let approved=items.filter{permitted.contains($0.id) && (onlySide == nil || $0.side == onlySide)}
+        let approved=items.filter{permitted.contains($0.id) && $0.side == .source}
         guard !approved.isEmpty else { return }
-        performNameRectification(approved,onlySide:onlySide)
+        performNameRectification(approved)
     }
 
     func resumeNameRectification() {
@@ -492,7 +492,9 @@ final class MacSyncRuntime: ObservableObject {
               !savingSchedule, !copy.active, !copy.maintaining, !copy.auditBusy,
               !copy.namesBusy, !copy.seedBusy, !copy.rectifyingNames,
               !preparingSignedUpdate, !finalShutdownHolding else { return }
-        performNameRectification([])
+        let pending = copy.incompatibleNames.filter { $0.side == .source && $0.reason.hasPrefix("Rettifica in sospeso") }
+        guard !pending.isEmpty else { return }
+        performNameRectification(pending)
     }
 
     func cancelNameRectification() {
@@ -501,7 +503,7 @@ final class MacSyncRuntime: ObservableObject {
         folderEditCancellation?.cancel()
     }
 
-    private func performNameRectification(_ approved: [IncompatibleName], onlySide:IncompatibleName.Side? = nil) {
+    private func performNameRectification(_ approved: [IncompatibleName]) {
         rectificationRevision += 1
         let pairs = model.configuredPairs()
         // This does NOT authorize automatic copies for the first time.
@@ -514,7 +516,6 @@ final class MacSyncRuntime: ObservableObject {
         folderEditCancellation=token
         stopAllOperations()
         copy.setAutomaticCopiesEnabled(false)
-        copy.revokeMirrorAuthorization()
         copy.invalidateSeedReport()
         copy.afterWorkerStopped { [weak self] in
             guard let self else { return }
@@ -526,7 +527,7 @@ final class MacSyncRuntime: ObservableObject {
                     self.rectificationCancellationRequested=false
                     self.finishShutdownIfReady();return
                 }
-                self.copy.rectifyNamesAfterDrain(items:approved,pairs:pairs,token:token,onlySide:onlySide) { [weak self] pending in
+                self.copy.rectifyNamesAfterDrain(items:approved,pairs:pairs,token:token) { [weak self] pending in
                     guard let self else { return }
                     self.folderConfigurationBusy=false;self.folderEditCancellation=nil
                     self.rectificationCancellationRequested=false

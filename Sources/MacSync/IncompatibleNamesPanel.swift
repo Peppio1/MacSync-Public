@@ -18,7 +18,6 @@ private struct NameSelectionRequest: Equatable {
 private struct NameConfirmation: Identifiable {
     let id = UUID()
     let items: [IncompatibleName]
-    let onlySide: IncompatibleName.Side?
 }
 
 struct IncompatibleNamesPanel:View {
@@ -26,14 +25,11 @@ struct IncompatibleNamesPanel:View {
     @ObservedObject var model:MacSyncViewModel
     @ObservedObject var runtime:MacSyncRuntime
     @State private var directories=true
-    @State private var side="all"
     @State private var search=""
     @State private var message=""
     @State private var revealing=false
     @State private var selected=Set<String>()
     @State private var confirmation:NameConfirmation?
-    @State private var experimentalUnilateral=false
-    @State private var experimentalSide:IncompatibleName.Side = .source
     @State private var pageOffset=0
     @State private var namePage:IncompatibleNameListPage?
     @State private var displayedRequest:NameListingRequest?
@@ -42,13 +38,13 @@ struct IncompatibleNamesPanel:View {
     @State private var resolvedSelection:NameSelectionRequest?
 
     private var listingRequest:NameListingRequest {
-        .init(revision:copy.namesRevision,side:side,directories:directories,
+        .init(revision:copy.namesRevision,side:"source",directories:directories,
               search:search,offset:pageOffset)
     }
     private var selectionRequest:NameSelectionRequest {
         .init(revision:selectionRevision,namesRevision:copy.namesRevision)
     }
-    private var chosen:[IncompatibleName] { experimentalUnilateral ? selectedRows.filter { $0.side == experimentalSide } : selectedRows }
+    private var chosen:[IncompatibleName] { selectedRows.filter { $0.side == .source } }
     private var canRectify:Bool {
         !runtime.previewOnly && !runtime.folderConfigurationBusy && !runtime.shuttingDown &&
         !copy.auditBusy && !copy.seedBusy && !copy.maintaining && !copy.rectifyingNames && !copy.namesBusy
@@ -66,12 +62,8 @@ struct IncompatibleNamesPanel:View {
         return MacSyncPanel("Nomi incompatibili",icon:"folder.badge.questionmark",fillHeight:true) {
             HStack {
                 VStack(alignment:.leading,spacing:3) {
-                    ForEach(IncompatibleName.Side.allCases, id: \.rawValue) { position in
-                        let folders = position == .source ? (namePage?.sourceFolders ?? 0) : (namePage?.destinationFolders ?? 0)
-                        let files = position == .source ? (namePage?.sourceFiles ?? 0) : (namePage?.destinationFiles ?? 0)
-                        Text("\(position.label): \(folders) cartelle · \(files) file").font(.subheadline)
-                    }
-                    Text("I nomi già corrispondenti possono essere incompatibili con nuove copie. Le due posizioni sono contate separatamente.")
+                    Text("Sorgenti: \(namePage?.sourceFolders ?? 0) cartelle · \(namePage?.sourceFiles ?? 0) file").font(.subheadline)
+                    Text("I nomi incompatibili sono rilevati soltanto nelle sorgenti.")
                         .font(.caption2).foregroundStyle(.secondary)
                     Text(copy.namesStatus).font(.caption).foregroundStyle(.secondary)
                 }
@@ -88,47 +80,24 @@ struct IncompatibleNamesPanel:View {
                     Text("Cartelle").tag(true)
                     Text("File").tag(false)
                 }.pickerStyle(.segmented)
-                Picker("Posizione",selection:$side) {
-                    Text("Tutte").tag("all")
-                    Text("Sorgente").tag("source")
-                    Text("Destinazione").tag("destination")
-                }.frame(width:190)
             }
             TextField("Cerca nome, percorso o motivo…",text:$search).textFieldStyle(.roundedBorder)
             HStack {
-                Button("Seleziona tutto") {
+                Button("Seleziona tutti") {
                     selected.formUnion(namePage?.selectableIDs ?? [])
                 }
-                    .help("Seleziona tutti i nomi rettificabili dei due lati, anche fuori dalla pagina corrente")
+                    .help("Seleziona tutti i nomi rettificabili delle sorgenti, anche fuori dalla pagina corrente")
                     .disabled(!current || namePage?.selectableIDs.isEmpty != false || !canSelect)
-                Button("Seleziona visibili") { selected.formUnion(namePage?.matchingSelectableIDs ?? []) }
-                    .help("Seleziona tutti i risultati del filtro, anche nelle altre pagine")
-                    .disabled(!current || !canSelect || namePage?.matchingSelectableIDs.isEmpty != false)
-                Button("Deseleziona") { selected.removeAll() }.disabled(selected.isEmpty)
                 Spacer()
                 if runtime.rectificationPending {
                     Button("Riprendi pendenti") { runtime.resumeNameRectification() }
                         .disabled(!canRectify || copy.active)
                 }
-                Button(selectionCurrent ? "Rettifica (\(chosen.count))" : "Calcolo selezione…") {
+                Button(selectionCurrent ? "Rettifica nomi (\(chosen.count))" : "Calcolo selezione…") {
                     guard selectionCurrent, !chosen.isEmpty else { return }
-                    confirmation=NameConfirmation(items:chosen,onlySide:experimentalUnilateral ? experimentalSide : nil)
+                    confirmation=NameConfirmation(items:chosen)
                 }.buttonStyle(.borderedProminent)
                     .disabled(!canRectify || !selectionCurrent || chosen.isEmpty)
-            }
-            HStack(spacing:8) {
-                Toggle("Rinomina su un solo lato (sperimentale)",isOn:$experimentalUnilateral)
-                    .toggleStyle(.checkbox).disabled(!canSelect)
-                if experimentalUnilateral {
-                    Picker("Posizione",selection:$experimentalSide) {
-                        Text("Solo sorgente").tag(IncompatibleName.Side.source)
-                        Text("Solo destinazione").tag(IncompatibleName.Side.destination)
-                    }.pickerStyle(.segmented).frame(width:270).disabled(!canSelect)
-                }
-            }
-            if experimentalUnilateral {
-                Text("Nessun allineamento automatico. Coda conservata; sincronizzazione sospesa fino a una nuova verifica archivio manuale.")
-                    .font(.caption).foregroundStyle(.orange)
             }
             if runtime.preparingRectification {
                 ProgressView("Arresto delle attività prima della rettifica…")
@@ -203,7 +172,7 @@ struct IncompatibleNamesPanel:View {
                 }
             }
             if !message.isEmpty { Text(message).font(.caption).foregroundStyle(.secondary) }
-            Label("Rettifica dopo conferma sui lati interessati. Nessuna sovrascrittura.",systemImage:"info.circle")
+            Label("Rettifica esclusivamente locale, dopo conferma. Nessuna sovrascrittura.",systemImage:"info.circle")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .onChange(of:copy.namesRevision) { _ in
@@ -212,23 +181,16 @@ struct IncompatibleNamesPanel:View {
         }
         .onChange(of:selected) { _ in selectionRevision &+= 1 }
         .onChange(of:search) { _ in pageOffset = 0 }
-        .onChange(of:side) { _ in pageOffset = 0 }
         .onChange(of:directories) { _ in pageOffset = 0 }
         .task(id:listingRequest) { await loadPage(listingRequest) }
         .task(id:selectionRequest) { await resolveSelection(selectionRequest) }
         .sheet(item:$confirmation) { snapshot in
             VStack(alignment:.leading,spacing:12) {
                 Text("Conferma rettifica dei nomi").font(.title2.bold())
-                if let side=snapshot.onlySide {
-                    Text("\(snapshot.items.count) elementi selezionati · Solo "+side.label+" (sperimentale)").font(.headline)
-                    Text("Verrà modificato soltanto il lato scelto, senza modificare le operazioni già accodate. Copie, mirror e monitoraggio saranno sospesi. Quando avrai terminato eventuali copie manuali, prepara e avvia una nuova Verifica archivio. Gli esiti incerti restano protetti.")
-                        .fixedSize(horizontal:false,vertical:true)
-                } else {
-                    Text("\(snapshot.items.count) elementi selezionati. Le copie automatiche e le cancellazioni speculari verranno disattivate. Il monitor verrà riavviato al termine. Le voci con lo stesso percorso sui due lati vengono incluse nel lotto.")
-                        .fixedSize(horizontal:false,vertical:true)
-                    Text("Spazi e punti finali rimossi, caratteri vietati sostituiti con -. Nomi riservati e collisioni restano nell’elenco. Se un lato fallisce prima della rinomina remota, il nome locale viene ripristinato; gli esiti incerti restano protetti. Dopo la rettifica, esegui Verifica archivio prima di riavviare la sincronizzazione.")
-                        .font(.callout).fixedSize(horizontal:false,vertical:true)
-                }
+                Text("\(snapshot.items.count) elementi selezionati. Verranno rinominati solo nelle sorgenti locali. Le modifiche saranno rilevate dal normale inventario: copia del nuovo percorso e cancellazione del precedente secondo le impostazioni mirror.")
+                    .fixedSize(horizontal:false,vertical:true)
+                Text("Spazi finali rimossi, punti finali e caratteri vietati sostituiti con -. Nomi riservati e collisioni restano nell’elenco.")
+                    .font(.callout).fixedSize(horizontal:false,vertical:true)
                 List(snapshot.items) { item in
                     VStack(alignment:.leading,spacing:3) {
                         Text(item.displayName+" → "+(NameRectification.proposedName(item.name) ?? "Correzione manuale")).font(.headline)
@@ -243,7 +205,7 @@ struct IncompatibleNamesPanel:View {
                         guard !items.isEmpty else { return }
                         confirmation=nil
                         selected.removeAll()
-                        runtime.rectifyNames(items,onlySide:snapshot.onlySide)
+                        runtime.rectifyNames(items)
                     }.buttonStyle(.borderedProminent).disabled(!canSelect || snapshot.items.isEmpty)
                 }
             }.padding(20).frame(width:650,height:500)

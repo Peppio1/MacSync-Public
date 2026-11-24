@@ -402,22 +402,16 @@ public final class ArchiveAudit {
             let paths = Set(source.map(\.relativePath)).union(target.map(\.relativePath))
             let grouped = Dictionary(grouping:paths,by:Self.fold)
             let ambiguous = Set(grouped.filter { $0.value.count > 1 }.keys)
-            for side in IncompatibleName.Side.allCases {
-                try check()
-                let items = side == .source ? source : target
-                let root = side == .source ? mapping.source : mapping.target
-                let conflicts = Set(items.lazy.map(\.relativePath).filter {
-                    ambiguous.contains(Self.fold($0)) && !self.ancestorsHaveAlias($0, ambiguous)
-                })
-                state.phase = "Controllo nomi incompatibili · " + side.label
-                report(force: true)
-                nameScans.append(NameScanSnapshot(
-                    rootID: mapping.rootID, side: side, rootPath: root.path,
-                    volume: side == .destination ? mapping.targetVolume : nil,
-                    date: Date(), rows: try IncompatibleName.collect(
-                        rootID: mapping.rootID, rootPath: root.path, side: side, items: items, conflicts: conflicts,
-                        shouldContinue: { !cancellation.isCancelled })))
-            }
+            try check()
+            state.phase = "Controllo nomi incompatibili · Sorgente"
+            report(force: true)
+            // Keep cross-side ambiguity detection for audit and mirror safety,
+            // but the maintenance list represents only incompatible local names.
+            nameScans.append(NameScanSnapshot(
+                rootID: mapping.rootID, side: .source, rootPath: mapping.source.path,
+                volume: nil, date: Date(), rows: try IncompatibleName.collect(
+                    rootID: mapping.rootID, rootPath: mapping.source.path, side: .source,
+                    items: source, shouldContinue: { !cancellation.isCancelled })))
             pairs.append(Pair(mapping:mapping,source:Dictionary(uniqueKeysWithValues:source.map{($0.relativePath,$0)}),
                 target:Dictionary(uniqueKeysWithValues:target.map{($0.relativePath,$0)}),ambiguous:ambiguous,
                 sourceStamp:sourceStamp,targetStamp:targetStamp,

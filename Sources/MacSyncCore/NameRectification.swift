@@ -352,6 +352,7 @@ public enum NameRectification {
                                           journal:ChangeJournal,log:SyncActivityLog,
                                           destinations:[String:MountedFolderMapping],
                                           onlySide:IncompatibleName.Side? = nil,
+                                          normalLocalRename:Bool = false,
                                           onProgress:(Int,Int)->Void = {_,_ in},
                                           beforeDestination:()->Void = {},
                                           shouldContinue:()->Bool = {true}) throws -> Result {
@@ -363,6 +364,9 @@ public enum NameRectification {
         func report(_ item:IncompatibleName,action:String,level:SyncLogLevel,detail:String) {
             try? log.record(level:level,rootID:item.rootID,action:action,
                 relativePath:SyncDiagnostic.clean(item.relativePath),message:item.side.label+" · "+detail)
+        }
+        guard !normalLocalRename || (onlySide == .source && !items.isEmpty && destinations.isEmpty && items.allSatisfy { $0.side == .source }) else {
+            throw MountedCopyError.invalidMapping
         }
         // Legacy plans cannot retroactively recover a snapshot of a side
         // already retired by the old engine. Preserve their original evidence
@@ -380,7 +384,7 @@ public enum NameRectification {
         },by:key)
         // Persist the audit barrier before any experimental mutation. No
         // change_queue row is inserted, acknowledged or retired here.
-        if onlySide != nil && !selected.isEmpty { try journal.requireUnilateralNameAudit() }
+        if onlySide != nil && !normalLocalRename && !selected.isEmpty { try journal.requireUnilateralNameAudit() }
         let keys=items.isEmpty && onlySide == nil ? Array(existing.keys) : Array(selected.keys)
         // A many-to-one normalization is a genuine conflict, even when the
         // proposed spelling is still free. Do not choose an arbitrary winner.
