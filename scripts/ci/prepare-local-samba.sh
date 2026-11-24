@@ -25,6 +25,19 @@ mkdir -m 770 "$share/$server_parent/server-created - "
 mkdir -m 770 "$share/$server_parent/compatible-control"
 printf '%s' 'synthetic checked rename' > "$share/$server_parent/server-created - /child.jpg"
 chmod 660 "$share/$server_parent/server-created - /child.jpg"
+# Seed the on-wire SFM form too. Apple's SMB client represents a final
+# U+F028 as a trailing space locally. Separate parents avoid alias ambiguity
+# except in the deliberate collision case.
+sfm_leaf="$(printf 'server-created -\357\200\250')"
+for parent in macsync-ci-sfm macsync-ci-sfm-collision; do
+  mkdir -m 770 "$share/$parent"
+  mkdir -m 770 "$share/$parent/$sfm_leaf" "$share/$parent/compatible-control"
+  printf '%s' 'synthetic checked rename' > "$share/$parent/$sfm_leaf/child.jpg"
+  chmod 660 "$share/$parent/$sfm_leaf/child.jpg"
+done
+mkdir -m 770 "$share/macsync-ci-sfm-collision/server-created - "
+printf '%s' 'distinct literal name' > "$share/macsync-ci-sfm-collision/server-created - /child.jpg"
+chmod 660 "$share/macsync-ci-sfm-collision/server-created - /child.jpg"
 prefix="$(brew --prefix)"
 smbd="$prefix/sbin/samba-dot-org-smbd"
 test -x "$smbd"

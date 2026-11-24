@@ -23,27 +23,41 @@ final class SMBV0191ValidationTests: XCTestCase {
         let serverPath = try String(contentsOf: fixtureRoot.appendingPathComponent("share-path"), encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard serverPath.hasPrefix("/private/tmp/macsync-ci-share.") else { XCTFail("Unexpected fixture root"); return }
+        let serverRoot=URL(fileURLWithPath:serverPath)
         let prefix = "macsync-v019-" + UUID().uuidString
-        // Separate fresh parents prevent the first case from populating
-        // the macOS directory cache before the server-created case.
-        for directoryCase in [false,true] {
-            let label = directoryCase ? "macsync-ci-preexisting" : prefix+"-client"
+        // A plain illegal wire name can be invisible to Apple's smbfs.
+        // Do not treat invisibility as absence or as a successful rename.
+        // Preserve this case separately from the representable SFM case.
+        let rawLabel="macsync-ci-preexisting"
+        let rawRoot=mount.appendingPathComponent(rawLabel)
+        let rawServer=serverRoot.appendingPathComponent(rawLabel)
+        let rawNames=try fm.contentsOfDirectory(atPath:rawRoot.path)
+        XCTAssertTrue(rawNames.contains("compatible-control"))
+        let rawOld=rawServer.appendingPathComponent("server-created - ")
+        XCTAssertEqual(try Data(contentsOf:rawOld.appendingPathComponent("child.jpg")),Data("synthetic checked rename".utf8))
+        if rawNames.contains(where:{$0.utf8.elementsEqual("server-created - ".utf8)}) {
+            // If a newer client actually exposes the literal wire spelling,
+            // require the complete protected rename, not a skipped test.
+            try checkRename(root:rawRoot,server:rawServer,label:rawLabel,helper:helper,host:host,share:share,user:user,password:password,binding:binding,directoryCase:true,serverLeaf:"server-created - ")
+        } else {
+            XCTAssertFalse(fm.fileExists(atPath:rawServer.appendingPathComponent("server-created -").path))
+            print("Raw trailing-space wire name is not enumerable by this smbfs client; preserved, not counted as a successful rename")
+        }
+        for label in [prefix+"-client","macsync-ci-sfm","macsync-ci-sfm-collision"] {
+            let directoryCase = label != prefix+"-client"
             let root = mount.appendingPathComponent(label)
-            let server = URL(fileURLWithPath:serverPath).appendingPathComponent(label)
-            if !directoryCase {
-                try fm.createDirectory(at:root,withIntermediateDirectories:true)
-            }
-            defer { try? fm.removeItem(at:server) }
-            try checkRename(root:root,server:server,label:label,helper:helper,host:host,share:share,user:user,password:password,binding:binding,directoryCase:directoryCase)
+            let server = serverRoot.appendingPathComponent(label)
+            if !directoryCase { try fm.createDirectory(at:root,withIntermediateDirectories:true) }
+            try checkRename(root:root,server:server,label:label,helper:helper,host:host,share:share,user:user,password:password,binding:binding,directoryCase:directoryCase,serverLeaf:directoryCase ? "server-created -\u{F028}" : "old.jpg",collision:label=="macsync-ci-sfm-collision")
         }
     }
 
-    private func checkRename(root:URL,server:URL,label:String,helper:URL,host:String,share:String,user:String,password:String,binding:DirectoryBinding,directoryCase:Bool) throws {
+    private func checkRename(root:URL,server:URL,label:String,helper:URL,host:String,share:String,user:String,password:String,binding:DirectoryBinding,directoryCase:Bool,serverLeaf:String,collision:Bool=false) throws {
         let fm=FileManager.default
         let oldName=directoryCase ? "server-created - " : "old.jpg"
         let newName=directoryCase ? "server-created -" : "new.jpg"
         let old=root.appendingPathComponent(oldName), new=root.appendingPathComponent(newName)
-        let serverOld=server.appendingPathComponent(oldName), serverNew=server.appendingPathComponent(newName)
+        let serverOld=server.appendingPathComponent(serverLeaf), serverNew=server.appendingPathComponent(newName)
         let bytes=Data("synthetic checked rename".utf8)
         if directoryCase {
             // Fixture created before the server and the mount exist; the
@@ -115,6 +129,13 @@ final class SMBV0191ValidationTests: XCTestCase {
         }
         XCTAssertEqual(try contents(serverOld),bytes)
         XCTAssertFalse(fm.fileExists(atPath:serverNew.path))
+        if collision {
+            XCTAssertEqual(try rename(stale:false),3,"Two wire spellings are ambiguous; reject before mutation")
+            XCTAssertEqual(try contents(serverOld),bytes)
+            XCTAssertEqual(try contents(server.appendingPathComponent(oldName)),Data("distinct literal name".utf8))
+            XCTAssertFalse(fm.fileExists(atPath:serverNew.path))
+            return
+        }
         XCTAssertEqual(try rename(stale:false),0,"Direct SMB must confirm exact new name and identity")
         XCTAssertFalse(fm.fileExists(atPath:serverOld.path))
         XCTAssertEqual(try contents(serverNew),bytes)
