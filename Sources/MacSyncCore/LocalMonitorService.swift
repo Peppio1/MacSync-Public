@@ -59,7 +59,9 @@ public final class LocalMonitorService {
                     return
                 }
                 let checked = try self.validateRoots(roots)
-                let store = try LocalInventory(path: databasePath)
+                let store = try SQLiteConnectionSetup.openWithBoundedRetry(shouldContinue:{ !request.isCancelled }) {
+                    try LocalInventory(path:databasePath)
+                }
                 if retireInactiveRoots {
                     guard !request.isCancelled else { throw SeedVerificationError.cancelled }
                     try store.retireInactiveRoots(keeping:Set(checked.map(\.id)))
@@ -80,7 +82,9 @@ public final class LocalMonitorService {
                 let since = FSEventsWatcher.currentEventID()
                 self.roots = checked
                 self.inventory = store
-                self.activityLog = try SyncActivityLog(path: databasePath)
+                self.activityLog = try SQLiteConnectionSetup.openWithBoundedRetry(shouldContinue:{ !request.isCancelled }) {
+                    try SyncActivityLog(path:databasePath)
+                }
                 self.report("Creazione inventario locale in corso…", active: false)
 
                 var scan = ArchiveAuditProgress()

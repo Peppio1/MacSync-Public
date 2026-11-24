@@ -68,10 +68,8 @@ public final class ChangeJournal {
                 try execute("PRAGMA busy_timeout=1000; PRAGMA query_only=ON;")
                 return
             }
-            try execute("PRAGMA busy_timeout=5000;")
-            try execute("PRAGMA journal_mode=WAL;")
+            try SQLiteConnectionSetup.configureWriter(connection)
             try execute("PRAGMA synchronous=FULL;")
-            try execute("PRAGMA busy_timeout=5000;")
             try execute("""
                 CREATE TABLE IF NOT EXISTS change_queue (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,25 +84,8 @@ public final class ChangeJournal {
             // Additive, local-only migration. Old pending rows retain their
             // original IDs and remain unclassified, never retroactively marked
             // as initial/verified by an audit.
-            try execute("BEGIN IMMEDIATE TRANSACTION;")
-            do {
-                let queueColumns = try prepare("PRAGMA table_info(change_queue);")
-                var hasQueueOrigin = false
-                var queueResult = sqlite3_step(queueColumns)
-                while queueResult == SQLITE_ROW {
-                    if columnText(queueColumns, at: 1) == "origin" { hasQueueOrigin = true }
-                    queueResult = sqlite3_step(queueColumns)
-                }
-                sqlite3_finalize(queueColumns)
-                guard queueResult == SQLITE_DONE else { throw databaseFailure() }
-                if !hasQueueOrigin {
-                    try execute("ALTER TABLE change_queue ADD COLUMN origin TEXT NOT NULL DEFAULT 'legacy_unknown';")
-                }
-                try execute("COMMIT;")
-            } catch {
-                try? execute("ROLLBACK;")
-                throw error
-            }
+            try SQLiteConnectionSetup.addColumnIfMissing(connection,table:"change_queue",column:"origin",
+                sql:"ALTER TABLE change_queue ADD COLUMN origin TEXT NOT NULL DEFAULT 'legacy_unknown';")
             try execute("CREATE TABLE IF NOT EXISTS name_rectification_batch(singleton INTEGER PRIMARY KEY CHECK(singleton=1), plan TEXT NOT NULL, next_move INTEGER NOT NULL DEFAULT 0, progress TEXT NOT NULL DEFAULT '[]');")
             // Child completion index, not another rename plan: identities and
             // old/new names remain exclusively in name_rectification_batch.
@@ -116,15 +97,8 @@ public final class ChangeJournal {
             try execute("CREATE TABLE IF NOT EXISTS name_rectification_groups(root_id TEXT NOT NULL, relative_path TEXT NOT NULL, plan TEXT NOT NULL, PRIMARY KEY(root_id,relative_path));")
             // Existing profiles retain their approved plan, next_move and
             // exact fingerprints. Adding a column never rewrites the plan.
-            let columns = try prepare("PRAGMA table_info(name_rectification_batch);")
-            var hasProgress = false
-            while sqlite3_step(columns) == SQLITE_ROW {
-                if columnText(columns, at: 1) == "progress" { hasProgress = true }
-            }
-            sqlite3_finalize(columns)
-            if !hasProgress {
-                try execute("ALTER TABLE name_rectification_batch ADD COLUMN progress TEXT NOT NULL DEFAULT '[]';")
-            }
+            try SQLiteConnectionSetup.addColumnIfMissing(connection,table:"name_rectification_batch",column:"progress",
+                sql:"ALTER TABLE name_rectification_batch ADD COLUMN progress TEXT NOT NULL DEFAULT '[]';")
             try execute("CREATE TABLE IF NOT EXISTS name_rectification_scopes(root_id TEXT NOT NULL, path TEXT NOT NULL, expires REAL NOT NULL, PRIMARY KEY(root_id,path));")
             try execute("CREATE TABLE IF NOT EXISTS name_scan_cache(root_id TEXT NOT NULL, side TEXT NOT NULL, snapshot TEXT NOT NULL, PRIMARY KEY(root_id, side));")
             try execute("CREATE TABLE IF NOT EXISTS publication_intents(job_id INTEGER PRIMARY KEY, root_id TEXT NOT NULL, relative_path TEXT NOT NULL);")

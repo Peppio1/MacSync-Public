@@ -36,9 +36,11 @@ public final class SyncActivityLog {
         }
         db = dbHandle
         do {
-            try execute(readOnly ? "PRAGMA busy_timeout=1000;" : "PRAGMA busy_timeout=5000;")
-            if readOnly { return }
-            try execute("PRAGMA journal_mode=WAL;")
+            if readOnly {
+                try execute("PRAGMA busy_timeout=1000; PRAGMA query_only=ON;")
+                return
+            }
+            try SQLiteConnectionSetup.configureWriter(db)
             try execute("""
                 CREATE TABLE IF NOT EXISTS sync_activity (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
