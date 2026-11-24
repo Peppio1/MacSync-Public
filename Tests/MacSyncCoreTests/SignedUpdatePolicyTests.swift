@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import XCTest
 @testable import MacSyncCore
 
@@ -21,6 +22,29 @@ final class SignedUpdatePolicyTests: XCTestCase {
             offered: "0.18.15", channel: "beta", asset: release))
         XCTAssertNil(SignedUpdatePolicy.assetURL(version: "0.18.15-rc.1"))
         XCTAssertEqual(Data(base64Encoded: SignedUpdatePolicy.publicKey)?.count, 32)
+    }
+
+    func testV0192RollbackOnlySupportsPinnedPredecessor() throws {
+        let package=try XCTUnwrap(SignedRollbackPackage.previous(for:"0.19.2"))
+        XCTAssertEqual(package.version,"0.19.1")
+        XCTAssertEqual(package.build,"199")
+        XCTAssertEqual(package.byteCount,90_423_835)
+        XCTAssertEqual(package.archiveURL,SignedUpdatePolicy.assetURL(version:"0.19.1"))
+        XCTAssertEqual(package.signatureURL.absoluteString,package.archiveURL.absoluteString+".edsignature")
+        XCTAssertNil(SignedRollbackPackage.previous(for:"0.19.1"))
+        XCTAssertNil(SignedRollbackPackage.previous(for:"0.19.3"))
+        XCTAssertNil(SignedRollbackPackage.previous(for:"0.19.2-rc.1"))
+        XCTAssertFalse(SignedUpdatePolicy.accepts(installed:"0.19.2",requested:"0.19.1",
+            offered:"0.19.1",channel:nil,asset:package.archiveURL))
+    }
+
+    func testV0192RollbackSignatureRejectsTamperedPayloadAndWrongKey() throws {
+        let key=Curve25519.Signing.PrivateKey()
+        let original=Data("signed payload".utf8)
+        let signature=try key.signature(for:original)
+        XCTAssertNoThrow(try SignedRollbackPackage.verify(bytes:original,signature:signature,publicKey:key.publicKey.rawRepresentation))
+        XCTAssertThrowsError(try SignedRollbackPackage.verify(bytes:Data("tampered".utf8),signature:signature,publicKey:key.publicKey.rawRepresentation))
+        XCTAssertThrowsError(try SignedRollbackPackage.verify(bytes:original,signature:signature,publicKey:Curve25519.Signing.PrivateKey().publicKey.rawRepresentation))
     }
 
     func testPersistentMarkerRoundTripAndNoOverwrite() throws {
