@@ -291,8 +291,7 @@ public final class LocalInventory {
         }
         db = handle
         do {
-            try execute("PRAGMA journal_mode=WAL;")
-            try execute("PRAGMA busy_timeout=5000;")
+            try SQLiteConnectionSetup.configureWriter(db)
             try execute("""
                 CREATE TABLE IF NOT EXISTS file_inventory(
                     root_id TEXT NOT NULL,
@@ -324,37 +323,12 @@ public final class LocalInventory {
                 """)
             // LocalInventory can be opened before ChangeJournal on startup,
             // so it must support the same additive, fail-closed migration.
-            try execute("BEGIN IMMEDIATE TRANSACTION;")
-            do {
-                let queueCols = try prepare("PRAGMA table_info(change_queue);")
-                var hasOrigin = false
-                var queueStep = sqlite3_step(queueCols)
-                while queueStep == SQLITE_ROW {
-                    if column(queueCols,1) == "origin" { hasOrigin = true }
-                    queueStep = sqlite3_step(queueCols)
-                }
-                sqlite3_finalize(queueCols)
-                guard queueStep == SQLITE_DONE else { throw failure() }
-                if !hasOrigin {
-                    try execute("ALTER TABLE change_queue ADD COLUMN origin TEXT NOT NULL DEFAULT 'legacy_unknown';")
-                }
-                try execute("COMMIT;")
-            } catch {
-                try? execute("ROLLBACK;")
-                throw error
-            }
+            try SQLiteConnectionSetup.addColumnIfMissing(db,table:"change_queue",column:"origin",
+                sql:"ALTER TABLE change_queue ADD COLUMN origin TEXT NOT NULL DEFAULT 'legacy_unknown';")
             try execute("CREATE TABLE IF NOT EXISTS directory_bindings(root_id TEXT NOT NULL, role TEXT NOT NULL, stamp TEXT NOT NULL, PRIMARY KEY(root_id,role));")
             // Compatible migration: old rows learn the new stamp on their next scan.
-            let columns = try prepare("PRAGMA table_info(file_inventory);")
-            var hasStamp = false
-            var infoResult = sqlite3_step(columns)
-            while infoResult == SQLITE_ROW {
-                if column(columns,1) == "change_stamp" { hasStamp = true }
-                infoResult = sqlite3_step(columns)
-            }
-            sqlite3_finalize(columns)
-            guard infoResult == SQLITE_DONE else { throw failure() }
-            if !hasStamp { try execute("ALTER TABLE file_inventory ADD COLUMN change_stamp TEXT;") }
+            try SQLiteConnectionSetup.addColumnIfMissing(db,table:"file_inventory",column:"change_stamp",
+                sql:"ALTER TABLE file_inventory ADD COLUMN change_stamp TEXT;")
             try execute("CREATE INDEX IF NOT EXISTS idx_inventory_pending_path ON change_queue(root_id, relative_path, completed);")
         } catch {
             sqlite3_close(db)

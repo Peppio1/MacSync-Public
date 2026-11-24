@@ -3,7 +3,7 @@ import Foundation
 /// Counts only events that completed during a sync cycle. A queued or
 /// retried operation is NOT shown as a successful copy or deletion.
 /// UI displays last cycle and cumulative totals for the current test session.
-public struct SyncDashboardStats: Equatable, Sendable {
+public struct SyncDashboardStats: Codable, Equatable, Sendable {
     public var newFiles: Int
     public var updatedFiles: Int
     public var permanentlyDeleted: Int

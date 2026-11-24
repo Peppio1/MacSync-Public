@@ -335,7 +335,7 @@ final class MacSyncViewModel: ObservableObject {
         }
     }
 
-    func startMonitoring(allowSourceRebinding: Bool = false) {
+    func startMonitoring(allowSourceRebinding: Bool = false, allowUnilateralAuditPreparation: Bool = false) {
         guard !configurationInvalid else { return }
         var roots: [MonitorRoot] = []
         if let plan = commonPlan {
@@ -354,7 +354,7 @@ final class MacSyncViewModel: ObservableObject {
             monitoring = false
             message = "Controllo delle Sorgenti locali…"
             service.start(
-                roots: roots, databasePath: db, allowSourceRebinding: allowSourceRebinding, retireInactiveRoots: commonPlan != nil
+                roots: roots, databasePath: db, allowSourceRebinding: allowSourceRebinding, retireInactiveRoots: commonPlan != nil, allowUnilateralAuditPreparation: allowUnilateralAuditPreparation
             )
         } catch {
             message = "Errore monitoraggio: " + error.localizedDescription
@@ -757,6 +757,9 @@ struct MacSyncConfigurationView: View {
                         .font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Button("Riepiloghi precedenti…") { initialMetric = nil; showSummary = true }
+                }
+                if copy.lastCycleStats.deletionsBlocked {
+                    Text("Cancellazioni sospese nell’ultimo ciclo: controlla i job pendenti e il registro.").font(.caption).foregroundStyle(.orange)
                 }
             }
             HStack(alignment: .top, spacing: 8) {

@@ -150,14 +150,14 @@ final class MountedCopyController: ObservableObject {
         guard !active, liveProgress == nil, lastRecordedCycle == nil else { return }
         guard let path = try? historyPath(), FileManager.default.fileExists(atPath:path) else { return }
         let session = historySessionID
-        DispatchQueue.global(qos:.utility).async { [weak self] in
+        logReadQueue.async { [weak self] in
             do {
                 let history = try SyncCycleHistory(path:path)
                 try history.markInterrupted(exceptSession:session)
                 let cycle = try history.cycles(limit:1,finishedOnly:true).first
                 let stats = try cycle.map { try history.totals(cycleID:$0.id).stats } ?? SyncDashboardStats()
                 DispatchQueue.main.async { [weak self] in
-                    guard let self, self.historySessionID==session, !self.active else { return }
+                    guard let self, self.historySessionID==session, !self.active, self.lastRecordedCycle == nil else { return }
                     self.lastRecordedCycle = cycle
                     self.lastCycleStats = stats
                     self.sessionStats = stats
@@ -217,6 +217,7 @@ final class MountedCopyController: ObservableObject {
     func rectifyNamesAfterDrain(items:[IncompatibleName],
                                 pairs:[(id:String,path:String,destination:String,expected:VolumeFingerprint?)],
                                 token:SeedVerificationCancellation,
+                                onlySide:IncompatibleName.Side? = nil,
                                 completion:@escaping @MainActor (Bool)->Void) {
         guard !previewOnly,!rectifyingNames else { completion(false);return }
         rectifyingNames=true; rectificationStatus="Verifica e rettifica dei nomi in corso…"
@@ -224,6 +225,7 @@ final class MountedCopyController: ObservableObject {
             var status=""
             var resolved=Set<String>()
             var pending = true
+            var unilateralHold = onlySide != nil
             let started = ProcessInfo.processInfo.systemUptime
             do {
                 let db=try Self.databaseURL().path
@@ -232,7 +234,7 @@ final class MountedCopyController: ObservableObject {
                 // Every selected relative path needs a live check of both sides.
                 let requested = items.isEmpty ? Set(pairs.map(\.id)) : Set(items.map(\.rootID))
                 var destinations: [String: MountedFolderMapping] = [:]
-                for pair in pairs where requested.contains(pair.id) {
+                for pair in pairs where requested.contains(pair.id) && onlySide != .source {
                     guard !pair.path.isEmpty, !pair.destination.isEmpty, let expected = pair.expected else { continue }
                     destinations[pair.id] = try? MountedFolderMapping(
                         rootID: pair.id, source: URL(fileURLWithPath: pair.path),
@@ -242,7 +244,7 @@ final class MountedCopyController: ObservableObject {
                 log.cycleID = UUID().uuidString
                 var lastProgress = -Double.infinity
                 let result=try NameRectification.executeCoordinated(items:items,roots:roots,journal:journal,log:log,
-                    destinations:destinations, onProgress: { checked, total in
+                    destinations:destinations, onlySide:onlySide, onProgress: { checked, total in
                         let now = ProcessInfo.processInfo.systemUptime
                         guard total > 0, checked == total || now - lastProgress >= 0.15 else { return }
                         lastProgress = now
@@ -250,6 +252,7 @@ final class MountedCopyController: ObservableObject {
                     }, shouldContinue:{!token.isCancelled})
                 let sides = try NameRectification.pendingSideSummary(journal: journal)
                 pending = try journal.hasPendingNameRectification()
+                unilateralHold = try journal.unilateralNameAuditRequired()
                 let localPending = sides.sourcePending
                 let remotePending = sides.destinationPending
                 let localCompleted = result.sourceRenamed
@@ -266,17 +269,23 @@ final class MountedCopyController: ObservableObject {
                 // A failure before creating any durable plan is not a pending
                 // rename. Preserve the conservative state only if DB read fails.
                 if let db=try? Self.databaseURL().path,
-                   let actual=try? ChangeJournal(path:db,readOnly:true).hasPendingNameRectification() {
-                    pending=actual
+                   let reader=try? ChangeJournal(path:db,readOnly:true) {
+                    if let actual=try? reader.hasPendingNameRectification() { pending=actual }
+                    if let actualHold=try? reader.unilateralNameAuditRequired() { unilateralHold=actualHold }
                 }
             }
-            let finalStatus=status, completedIDs=resolved, needsRetry=pending
+            let finalStatus=status, completedIDs=resolved, needsRetry=pending, auditRequired=unilateralHold
             DispatchQueue.main.async { [weak self] in
                 guard let self else { completion(needsRetry);return }
                 self.incompatibleNames.removeAll{completedIDs.contains($0.id)}
                 self.rectificationStatus=finalStatus + (needsRetry ? " · Percorsi pendenti protetti; le copie indipendenti possono procedere" : " · Verificare i nomi eventualmente irrisolti")
                 self.rectifyingNames=false
                 self.rectificationProgress=nil
+                if auditRequired {
+                    self.queueRebuildRequired=true
+                    self.auditReport=nil
+                    self.auditStatus="Rinomina unilaterale: prepara una nuova verifica archivio manuale"
+                }
                 self.refresh()
                 completion(needsRetry)
             }
@@ -1016,9 +1025,12 @@ final class MountedCopyController: ObservableObject {
                     if !historyError.isEmpty { outcomeState += "_history_incomplete" }
                     let endedAt = Date()
                     do {
-                        try history?.finish(id:cycleID,at:endedAt,seconds:ProcessInfo.processInfo.systemUptime-startUptime,state:outcomeState)
+                        try history?.finish(id:cycleID,at:endedAt,seconds:ProcessInfo.processInfo.systemUptime-startUptime,state:outcomeState,totals:totals)
                         try history?.prune(before:endedAt.addingTimeInterval(-365*86400))
-                    } catch { historyError = "Storico incompleto: " + error.localizedDescription }
+                    } catch {
+                        historyError = "Storico incompleto: " + error.localizedDescription
+                        if !outcomeState.hasSuffix("_history_incomplete") { outcomeState += "_history_incomplete" }
+                    }
                     let saved = (try? history?.cycles(limit:1,finishedOnly:true).first) ?? nil
                     let finalStats = totals.stats
                     let maxUIDeliveryDelay = progressCadence.maximumDeliveryDelay
@@ -1800,7 +1812,15 @@ final class MountedCopyController: ObservableObject {
 
     /// Runs after the serial copy queue has drained, including any atomic transfer.
     func afterWorkerStopped(_ completion: @escaping @MainActor () -> Void) {
-        queue.async { DispatchQueue.main.async { completion() } }
+        // Name scans use an independent lane and can still hold a SQLite
+        // writer even after the transfer queue has stopped. Drain both before
+        // resetting settings or restarting the monitor.
+        let namesLane=namesQueue,historyLane=logReadQueue
+        queue.async {
+            namesLane.async {
+                historyLane.async { DispatchQueue.main.async { completion() } }
+            }
+        }
     }
 
     func stop() {

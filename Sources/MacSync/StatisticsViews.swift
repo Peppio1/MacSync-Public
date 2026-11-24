@@ -611,11 +611,18 @@ struct ArchiveAuditPanel: View {
                 } else if copy.active {
                     Button("Sospendi copie") { runtime.stopCopiesForCurrentLaunch() }
                 } else {
-                    Button("Avvia verifica") {
-                        copy.startArchiveAudit(sources: model.configuredPairs(), interactive: true)
-                    }.buttonStyle(.borderedProminent)
-                        .disabled(busy || !model.monitoring || copy.liveProgress != nil || copy.seedReady)
-                        .auditPreviewBounds("start", enabled: runtime.previewOnly)
+                    if copy.queueRebuildRequired && !model.monitoring {
+                        Button("Prepara verifica archivio") {
+                            model.startMonitoring(allowUnilateralAuditPreparation:true)
+                        }.buttonStyle(.borderedProminent)
+                            .disabled(busy || runtime.folderConfigurationBusy || runtime.shuttingDown || model.scanProgress != nil)
+                    } else {
+                        Button("Avvia verifica") {
+                            copy.startArchiveAudit(sources: model.configuredPairs(), interactive: true)
+                        }.buttonStyle(.borderedProminent)
+                            .disabled(busy || !model.monitoring || copy.liveProgress != nil || copy.seedReady || runtime.folderConfigurationBusy)
+                            .auditPreviewBounds("start", enabled: runtime.previewOnly)
+                    }
                 }
             }
         }.auditPreviewBounds("operation", enabled: runtime.previewOnly)

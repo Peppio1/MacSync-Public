@@ -477,14 +477,14 @@ final class MacSyncRuntime: ObservableObject {
     /// Explicitly confirmed name maintenance. Stop workers and drain before
     /// any rename. A previously authorized automatic-copy setting may be
     /// restored after the monitor is restarted; mirror remains disarmed.
-    func rectifyNames(_ items:[IncompatibleName]) {
+    func rectifyNames(_ items:[IncompatibleName], onlySide:IncompatibleName.Side? = nil) {
         guard !previewOnly,!items.isEmpty,!shuttingDown,!folderConfigurationBusy,!savingSchedule,
               !copy.auditBusy,!copy.seedBusy,!copy.maintaining,!copy.rectifyingNames,!copy.namesBusy,
               !preparingSignedUpdate,!finalShutdownHolding else { return }
         let permitted=Set(copy.incompatibleNames.filter{ NameRectification.proposedName($0.name) != nil }.map(\.id))
-        let approved=items.filter{permitted.contains($0.id)}
+        let approved=items.filter{permitted.contains($0.id) && (onlySide == nil || $0.side == onlySide)}
         guard !approved.isEmpty else { return }
-        performNameRectification(approved)
+        performNameRectification(approved,onlySide:onlySide)
     }
 
     func resumeNameRectification() {
@@ -501,7 +501,7 @@ final class MacSyncRuntime: ObservableObject {
         folderEditCancellation?.cancel()
     }
 
-    private func performNameRectification(_ approved: [IncompatibleName]) {
+    private func performNameRectification(_ approved: [IncompatibleName], onlySide:IncompatibleName.Side? = nil) {
         rectificationRevision += 1
         let pairs = model.configuredPairs()
         // This does NOT authorize automatic copies for the first time.
@@ -526,12 +526,17 @@ final class MacSyncRuntime: ObservableObject {
                     self.rectificationCancellationRequested=false
                     self.finishShutdownIfReady();return
                 }
-                self.copy.rectifyNamesAfterDrain(items:approved,pairs:pairs,token:token) { [weak self] pending in
+                self.copy.rectifyNamesAfterDrain(items:approved,pairs:pairs,token:token,onlySide:onlySide) { [weak self] pending in
                     guard let self else { return }
                     self.folderConfigurationBusy=false;self.folderEditCancellation=nil
                     self.rectificationCancellationRequested=false
                     self.rectificationPending = pending
                     if !self.shuttingDown {
+                        if self.copy.queueRebuildRequired {
+                            self.automaticStatus = "Sincronizzazione sospesa: prepara una nuova verifica archivio manuale"
+                            self.finishShutdownIfReady()
+                            return
+                        }
                         self.model.startMonitoring()
                         if restoreAutomaticCopies && !token.isCancelled {
                             self.suspendedUntilNextLaunch = false

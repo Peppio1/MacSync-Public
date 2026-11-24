@@ -5,6 +5,9 @@ import Security
 enum SMBNameRectificationError: LocalizedError {
     case mountUnavailable
     case credentialUnavailable
+    case credentialLookupFailed(OSStatus)
+    case credentialAmbiguous
+    case credentialReadFailed(OSStatus)
     case helperFailed
     case notAttempted
     case timedOut
@@ -12,7 +15,10 @@ enum SMBNameRectificationError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .mountUnavailable: return "Destinazione SMB non identificabile per la rettifica"
-        case .credentialUnavailable: return "Credenziale SMB non identificabile o non accessibile nel Portachiavi"
+        case .credentialUnavailable: return "Nessuna credenziale SMB compatibile nel Portachiavi"
+        case .credentialLookupFailed(let status): return "Ricerca credenziale SMB non riuscita (Portachiavi: \(status))"
+        case .credentialAmbiguous: return "Più credenziali SMB compatibili nel Portachiavi; selezione non sicura"
+        case .credentialReadFailed(let status): return "Lettura credenziale SMB non riuscita (Portachiavi: \(status))"
         case .helperFailed: return "Rclone SMB non ha confermato la rinomina protetta"
         case .notAttempted: return "Rclone SMB ha rifiutato il controllo prima di tentare la rinomina"
         case .timedOut: return "Tempo scaduto durante la rinomina rclone SMB"
@@ -101,6 +107,7 @@ enum SMBNameRectification {
         let modifiedSeconds: Int64
         let modifiedNanos: Int64
         let isDirectory: Bool
+        let verifyOnly: Bool
     }
 
     private static func credential(for target: SMBNameRectificationTarget) throws -> (Account, String) {
@@ -113,9 +120,10 @@ enum SMBNameRectification {
             kSecReturnPersistentRef as String: true
         ]
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let rows = result as? [[String: Any]] else {
-            throw SMBNameRectificationError.credentialUnavailable
+        let lookupStatus = SecItemCopyMatching(query as CFDictionary, &result)
+        if lookupStatus == errSecItemNotFound { throw SMBNameRectificationError.credentialUnavailable }
+        guard lookupStatus == errSecSuccess, let rows = result as? [[String: Any]] else {
+            throw SMBNameRectificationError.credentialLookupFailed(lookupStatus)
         }
 
         let mountedAccount = target.mountedAccount.map(Account.init)
@@ -126,7 +134,11 @@ enum SMBNameRectification {
             let port = (row[kSecAttrPort as String] as? NSNumber)?.intValue ?? 0
             guard port == target.port || (port == 0 && target.port == 445) else { continue }
             let path = (row[kSecAttrPath as String] as? String ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "/\\"))
-            let exactShare = path.caseInsensitiveCompare(target.share) == .orderedSame
+            // Finder can store an internet password for a subdirectory of the
+            // mounted share. Accept only the same share, never another server
+            // or account. Keep ambiguous credentials fail-closed.
+            let firstComponent = path.split(whereSeparator: { $0 == "/" || $0 == "\\" }).first.map(String.init) ?? ""
+            let exactShare = (firstComponent.removingPercentEncoding ?? firstComponent).caseInsensitiveCompare(target.share) == .orderedSame
             guard path.isEmpty || exactShare else { continue }
             var account = Account(user)
             if let hint = mountedAccount {
@@ -138,8 +150,9 @@ enum SMBNameRectification {
 
         let shareMatches = candidates.filter { $0.exactShare }
         let matches = shareMatches.isEmpty ? candidates : shareMatches
+        guard !matches.isEmpty else { throw SMBNameRectificationError.credentialUnavailable }
         guard matches.count == 1, let selected = matches.first else {
-            throw SMBNameRectificationError.credentialUnavailable
+            throw SMBNameRectificationError.credentialAmbiguous
         }
 
         let passwordQuery: [String: Any] = [
@@ -147,16 +160,23 @@ enum SMBNameRectification {
             kSecReturnData as String: true
         ]
         result = nil
-        guard SecItemCopyMatching(passwordQuery as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data, let password = String(data: data, encoding: .utf8),
-              !password.isEmpty else {
-            throw SMBNameRectificationError.credentialUnavailable
+        let readStatus = SecItemCopyMatching(passwordQuery as CFDictionary, &result)
+        guard readStatus == errSecSuccess, let data = result as? Data,
+              let password = String(data: data, encoding: .utf8), !password.isEmpty else {
+            throw SMBNameRectificationError.credentialReadFailed(readStatus)
         }
         return (selected.account, password)
     }
 
+    static func preflight(volume: VolumeFingerprint, parent: URL) throws {
+        let target = try SMBNameRectificationTarget(volume: volume, parent: parent)
+        let executable = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/rclone-smb-rename")
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else { throw MountedCopyError.rcloneUnavailable }
+        _ = try credential(for: target)
+    }
+
     static func rename(volume: VolumeFingerprint, parent: URL, oldName: String, newName: String,
-                       original: stat, shouldContinue: () -> Bool) throws {
+                       original: stat, verifyOnly: Bool = false, shouldContinue: () -> Bool) throws {
         let target = try SMBNameRectificationTarget(volume: volume, parent: parent)
         let oldPath = try target.path(for: oldName)
         let newPath = try target.path(for: newName)
@@ -170,7 +190,7 @@ enum SMBNameRectification {
             fileID: UInt64(original.st_ino), createdSeconds: Int64(original.st_birthtimespec.tv_sec),
             createdNanos: Int64(original.st_birthtimespec.tv_nsec), size: original.st_size,
             modifiedSeconds: Int64(original.st_mtimespec.tv_sec), modifiedNanos: Int64(original.st_mtimespec.tv_nsec),
-            isDirectory: original.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR))
+            isDirectory: original.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR), verifyOnly: verifyOnly)
         let payload = try JSONEncoder().encode(request)
         guard payload.count <= 65_536 else { throw SMBNameRectificationError.helperFailed }
 
