@@ -79,6 +79,9 @@ final class MacSyncRuntime: ObservableObject {
             return
         }
         Self.operationalRuntime = self
+        model.onSourceNamesUpdated = { [weak self] names in
+            self?.copy.acceptMonitoredSourceNames(names)
+        }
         copy.onQueueChanged = { [weak self] in
             guard let self, !self.shuttingDown else { return }
             self.model.refreshPendingCount()

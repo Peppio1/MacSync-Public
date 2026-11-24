@@ -68,12 +68,7 @@ struct IncompatibleNamesPanel:View {
                     Text(copy.namesStatus).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                if copy.scanningNames {
-                    Button("Annulla scansione") { copy.cancelNameScan() }
-                }
-                Button("Scansiona nomi incompatibili") {
-                    copy.refreshIncompatibleNames(pairs: model.configuredPairs(), scan: true)
-                }.disabled(copy.namesBusy || copy.auditBusy || runtime.previewOnly)
+                // Live inventory updates replace the separate scan command.
             }
             HStack {
                 Picker("Tipo",selection:$directories) {

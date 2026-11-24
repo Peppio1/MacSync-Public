@@ -285,6 +285,17 @@ final class MountedCopyController: ObservableObject {
     private let namesQueue = DispatchQueue(label: "macsync.names.reader", qos: .utility)
     private var namesCancellation: SeedVerificationCancellation?
     private var namesGeneration = 0
+    private var monitoredNamesAvailable = false
+
+    func acceptMonitoredSourceNames(_ rows:[IncompatibleName]) {
+        guard !previewOnly, !rectifyingNames else { return }
+        let sourceRows = rows.filter { $0.side == .source }.sorted { $0.id < $1.id }
+        namesGeneration += 1
+        namesCancellation?.cancel(); namesCancellation=nil; nameScanStarted=nil
+        namesBusy=false; namesLoaded=true; monitoredNamesAvailable=true
+        if incompatibleNames != sourceRows { incompatibleNames=sourceRows }
+        namesStatus="Inventario locale · monitoraggio attivo"
+    }
 
     func cancelNameScan() {
         guard let namesCancellation else { return }
@@ -295,6 +306,7 @@ final class MountedCopyController: ObservableObject {
     func refreshIncompatibleNames(pairs: [(id:String,path:String,destination:String,expected:VolumeFingerprint?)],
                                   scan: Bool = false) {
         guard !previewOnly, !rectifyingNames, !scanningNames, !scan || (!namesBusy && !auditBusy) else { return }
+        if monitoredNamesAvailable && !scan { return }
         namesCancellation?.cancel()
         namesGeneration += 1
         let generation = namesGeneration

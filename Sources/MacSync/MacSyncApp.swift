@@ -19,6 +19,7 @@ final class MacSyncViewModel: ObservableObject {
     @Published var pendingCount = 0
     @Published var pendingBreakdown: PendingQueueBreakdown?
     @Published var scanProgress: ArchiveAuditProgress?
+    var onSourceNamesUpdated: (([IncompatibleName]) -> Void)?
 
     let safetyGate = MonitorSafetyGate()
     private lazy var service = LocalMonitorService(safetyGate:safetyGate) { [weak self] update in
@@ -28,6 +29,7 @@ final class MacSyncViewModel: ObservableObject {
             self?.pendingCount = update.pendingChanges
             self?.pendingBreakdown = update.pendingBreakdown
             self?.scanProgress = update.scanProgress
+            if let names=update.sourceNames { self?.onSourceNamesUpdated?(names) }
         }
     }
 

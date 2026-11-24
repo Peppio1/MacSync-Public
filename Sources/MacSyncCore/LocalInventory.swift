@@ -330,6 +330,21 @@ public final class LocalInventory {
             try SQLiteConnectionSetup.addColumnIfMissing(db,table:"file_inventory",column:"change_stamp",
                 sql:"ALTER TABLE file_inventory ADD COLUMN change_stamp TEXT;")
             try execute("CREATE INDEX IF NOT EXISTS idx_inventory_pending_path ON change_queue(root_id, relative_path, completed);")
+            try execute("""
+                CREATE TABLE IF NOT EXISTS source_name_members(
+                    root_id TEXT NOT NULL, relative_path TEXT NOT NULL,
+                    parent_path TEXT NOT NULL, folded_leaf TEXT NOT NULL,
+                    kind TEXT NOT NULL, reason TEXT NOT NULL,
+                    conflicting INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(root_id,relative_path)
+                );
+                CREATE INDEX IF NOT EXISTS idx_source_name_siblings
+                    ON source_name_members(root_id,parent_path,folded_leaf);
+                CREATE INDEX IF NOT EXISTS idx_source_name_issues
+                    ON source_name_members(root_id,relative_path)
+                    WHERE reason<>'' OR conflicting=1;
+                CREATE TABLE IF NOT EXISTS source_name_index_ready(root_id TEXT PRIMARY KEY);
+                """)
         } catch {
             sqlite3_close(db)
             db = nil
@@ -383,7 +398,7 @@ public final class LocalInventory {
         }
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
-            for table in ["change_queue", "file_inventory", "watched_roots", "directory_bindings"] {
+            for table in ["change_queue", "file_inventory", "watched_roots", "directory_bindings", "source_name_members", "source_name_index_ready"] {
                 let statement = try prepare("DELETE FROM " + table + " WHERE root_id = ?;")
                 defer { sqlite3_finalize(statement) }
                 try bind(rootID, at: 1, statement: statement)
@@ -446,7 +461,7 @@ public final class LocalInventory {
             }
             guard code == SQLITE_DONE else { throw failure() }
             for id in old {
-                for sql in ["DELETE FROM change_queue WHERE root_id=? AND completed=0;", "DELETE FROM file_inventory WHERE root_id=?;", "DELETE FROM watched_roots WHERE root_id=?;", "DELETE FROM directory_bindings WHERE root_id=?;"] {
+                for sql in ["DELETE FROM change_queue WHERE root_id=? AND completed=0;", "DELETE FROM file_inventory WHERE root_id=?;", "DELETE FROM watched_roots WHERE root_id=?;", "DELETE FROM directory_bindings WHERE root_id=?;", "DELETE FROM source_name_members WHERE root_id=?;", "DELETE FROM source_name_index_ready WHERE root_id=?;"] {
                     let stmt = try prepare(sql)
                     defer { sqlite3_finalize(stmt) }
                     try bind(id,at:1,statement:stmt)
@@ -588,6 +603,11 @@ public final class LocalInventory {
                 guard sqlite3_step(retire)==SQLITE_DONE else { throw failure() }
             }
 
+            // The name index is committed with the inventory and queue, not
+            // by a separate filesystem scan or UI timer.
+            try updateNameIndex(rootID:rootID, before:before, seen:seen,
+                                fullScan:fullScan, shouldContinue:shouldContinue)
+
             // Keep existing event ID if caller is doing a scan independent of FSEvents.
             let prior = try lastEventID(rootID: rootID)
             let checkpoint: UInt64?
@@ -607,8 +627,137 @@ public final class LocalInventory {
     /// Snapshot of the locally maintained inventory only; never enumerate SMB.
     public func incompatibleNames(rootID:String,sourcePath:String,conflicts:Set<String> = []) throws -> [IncompatibleName] {
         guard try rootPath(rootID:rootID)==sourcePath else { throw MountedCopyError.invalidMapping }
-        return IncompatibleName.collect(rootID:rootID,rootPath:sourcePath,side:.source,
-                                       items:Array(try readEntries(rootID:rootID,scope:nil).values),conflicts:conflicts)
+        if try !conflicts.isEmpty || !nameIndexReady(rootID:rootID) {
+            return IncompatibleName.collect(rootID:rootID,rootPath:sourcePath,side:.source,
+                items:Array(try readEntries(rootID:rootID,scope:nil).values),conflicts:conflicts)
+        }
+        let statement = try prepare("""
+            SELECT m.relative_path,m.kind,
+              CASE WHEN m.reason<>'' THEN m.reason ELSE 'Conflitto fra nomi equivalenti in Windows' END,
+              CASE WHEN m.kind='directory' THEN
+                (SELECT COUNT(*) FROM file_inventory f
+                 WHERE f.root_id=m.root_id AND f.relative_path>=m.relative_path||'/'
+                   AND f.relative_path<m.relative_path||'0')
+              ELSE 0 END
+            FROM source_name_members m
+            WHERE m.root_id=? AND (m.reason<>'' OR m.conflicting=1)
+            ORDER BY m.relative_path;
+            """)
+        defer { sqlite3_finalize(statement) }
+        try bind(rootID,at:1,statement:statement)
+        var rows: [IncompatibleName] = []
+        var code = sqlite3_step(statement)
+        while code == SQLITE_ROW {
+            rows.append(.init(rootID:rootID,rootPath:sourcePath,
+                relativePath:column(statement,0),objectKind:column(statement,1),
+                side:.source,reason:column(statement,2),affectedDescendants:Int(sqlite3_column_int64(statement,3))))
+            code = sqlite3_step(statement)
+        }
+        guard code == SQLITE_DONE else { throw failure() }
+        return rows
+    }
+
+    private struct SiblingKey: Hashable {
+        let parent:String
+        let folded:String
+        init(path:String) {
+            let parts = path.split(separator:"/",omittingEmptySubsequences:false)
+            parent = parts.dropLast().joined(separator:"/")
+            folded = WindowsPathSafety.comparisonFold(String(parts.last ?? ""))
+        }
+    }
+
+    private func nameIndexReady(rootID:String) throws -> Bool {
+        let stmt = try prepare("SELECT 1 FROM source_name_index_ready WHERE root_id=?;")
+        defer { sqlite3_finalize(stmt) }
+        try bind(rootID,at:1,statement:stmt)
+        let code = sqlite3_step(stmt)
+        guard code == SQLITE_ROW || code == SQLITE_DONE else { throw failure() }
+        return code == SQLITE_ROW
+    }
+
+    private func updateNameIndex(rootID:String,before:[String:TrackedItem],seen:[String:TrackedItem],
+                                 fullScan:Bool,shouldContinue:()->Bool) throws {
+        // New databases and older profiles without an index are seeded
+        // from the inventory already in memory (or SQLite), not from SMB.
+        let rebuild = try !nameIndexReady(rootID:rootID)
+        if rebuild {
+            let clear = try prepare("DELETE FROM source_name_members WHERE root_id=?;")
+            defer { sqlite3_finalize(clear) }
+            try bind(rootID,at:1,statement:clear)
+            guard sqlite3_step(clear)==SQLITE_DONE else { throw failure() }
+        }
+        let current = rebuild && !fullScan ? try readEntries(rootID:rootID,scope:nil) : seen
+        let insert = try prepare("""
+            INSERT INTO source_name_members(root_id,relative_path,parent_path,folded_leaf,kind,reason)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(root_id,relative_path) DO UPDATE SET
+              parent_path=excluded.parent_path,folded_leaf=excluded.folded_leaf,
+              kind=excluded.kind,reason=excluded.reason;
+            """)
+        defer { sqlite3_finalize(insert) }
+        let remove = try prepare("DELETE FROM source_name_members WHERE root_id=? AND relative_path=?;")
+        defer { sqlite3_finalize(remove) }
+        var affected = Set<SiblingKey>()
+        for (path,item) in current {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            // A content-only change cannot change the name or its aliases.
+            if !rebuild && before[path]?.kind == item.kind { continue }
+            let key=SiblingKey(path:path)
+            if !rebuild { affected.insert(key) }
+            if item.kind != "file" && item.kind != "directory" {
+                if !rebuild {
+                    try bind(rootID,at:1,statement:remove); try bind(path,at:2,statement:remove)
+                    guard sqlite3_step(remove)==SQLITE_DONE else { throw failure() }
+                    sqlite3_reset(remove); sqlite3_clear_bindings(remove)
+                }
+                continue
+            }
+            let leaf = String(path.split(separator:"/").last ?? "")
+            for (index,value) in [rootID,path,key.parent,key.folded,item.kind,IncompatibleName.reason(forComponent:leaf) ?? ""].enumerated() {
+                try bind(value,at:Int32(index+1),statement:insert)
+            }
+            guard sqlite3_step(insert)==SQLITE_DONE else { throw failure() }
+            sqlite3_reset(insert); sqlite3_clear_bindings(insert)
+        }
+        if !rebuild {
+            for path in before.keys where seen[path]==nil {
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                affected.insert(SiblingKey(path:path))
+                try bind(rootID,at:1,statement:remove); try bind(path,at:2,statement:remove)
+                guard sqlite3_step(remove)==SQLITE_DONE else { throw failure() }
+                sqlite3_reset(remove); sqlite3_clear_bindings(remove)
+            }
+            let refresh = try prepare("""
+                UPDATE source_name_members SET conflicting=(
+                    SELECT COUNT(*)>1 FROM source_name_members n
+                    WHERE n.root_id=?1 AND n.parent_path=?2 AND n.folded_leaf=?3
+                ) WHERE root_id=?1 AND parent_path=?2 AND folded_leaf=?3;
+                """)
+            defer { sqlite3_finalize(refresh) }
+            for key in affected {
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                try bind(rootID,at:1,statement:refresh); try bind(key.parent,at:2,statement:refresh)
+                try bind(key.folded,at:3,statement:refresh)
+                guard sqlite3_step(refresh)==SQLITE_DONE else { throw failure() }
+                sqlite3_reset(refresh); sqlite3_clear_bindings(refresh)
+            }
+        } else {
+            let conflicts = try prepare("""
+                UPDATE source_name_members SET conflicting=1 WHERE root_id=?1
+                AND (parent_path,folded_leaf) IN (
+                    SELECT parent_path,folded_leaf FROM source_name_members
+                    WHERE root_id=?1 GROUP BY parent_path,folded_leaf HAVING COUNT(*)>1
+                );
+                """)
+            defer { sqlite3_finalize(conflicts) }
+            try bind(rootID,at:1,statement:conflicts)
+            guard sqlite3_step(conflicts)==SQLITE_DONE else { throw failure() }
+            let ready = try prepare("INSERT INTO source_name_index_ready(root_id) VALUES(?);")
+            defer { sqlite3_finalize(ready) }
+            try bind(rootID,at:1,statement:ready)
+            guard sqlite3_step(ready)==SQLITE_DONE else { throw failure() }
+        }
     }
 
     private func readEntries(rootID: String, scope: String?) throws -> [String: TrackedItem] {

@@ -99,6 +99,40 @@ final class V0191MaintenanceTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf:source.appendingPathComponent(new).appendingPathComponent("photo.jpg")),Data("fixture".utf8))
     }
 
+    func testV0192NameIndexTracksManualChangesAndNestedPaths() throws {
+        let fm=FileManager.default
+        let base=fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let source=base.appendingPathComponent("source")
+        let old=source.appendingPathComponent("parent.")
+        try fm.createDirectory(at:old,withIntermediateDirectories:true)
+        defer { try? fm.removeItem(at:base) }
+        try Data("a".utf8).write(to:old.appendingPathComponent("bad?.jpg"))
+        let db=base.appendingPathComponent("inventory.sqlite").path
+        let inventory=try LocalInventory(path:db)
+        _ = try inventory.reconcile(rootID:"demo",root:source,origin:.initialInventory)
+        let rows=try inventory.incompatibleNames(rootID:"demo",sourcePath:source.path)
+        XCTAssertEqual(Set(rows.map(\.relativePath)),Set(["parent.","parent./bad?.jpg"]))
+        XCTAssertEqual(rows.first(where:{$0.isDirectory})?.affectedDescendants,1)
+        let renamed=source.appendingPathComponent("parent-")
+        try fm.moveItem(at:old,to:renamed)
+        _ = try inventory.reconcile(rootID:"demo",root:source,subtree:old)
+        _ = try inventory.reconcile(rootID:"demo",root:source,subtree:renamed)
+        XCTAssertEqual(try inventory.incompatibleNames(rootID:"demo",sourcePath:source.path).map(\.relativePath),["parent-/bad?.jpg"])
+        let oldFile=renamed.appendingPathComponent("bad?.jpg")
+        let newFile=renamed.appendingPathComponent("bad-.jpg")
+        try fm.moveItem(at:oldFile,to:newFile)
+        _ = try inventory.reconcile(rootID:"demo",root:source,subtree:oldFile)
+        _ = try inventory.reconcile(rootID:"demo",root:source,subtree:newFile)
+        XCTAssertTrue(try inventory.incompatibleNames(rootID:"demo",sourcePath:source.path).isEmpty)
+        let fresh=source.appendingPathComponent("new. ")
+        try Data("b".utf8).write(to:fresh)
+        _ = try inventory.reconcile(rootID:"demo",root:source,subtree:fresh)
+        XCTAssertEqual(try LocalInventory(path:db).incompatibleNames(rootID:"demo",sourcePath:source.path).map(\.relativePath),["new. "])
+        try fm.removeItem(at:fresh)
+        _ = try inventory.reconcile(rootID:"demo",root:source,subtree:fresh)
+        XCTAssertTrue(try inventory.incompatibleNames(rootID:"demo",sourcePath:source.path).isEmpty)
+    }
+
     func testFinalizedTotalsSurviveMissingDetailRow() throws {
         let base=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at:base,withIntermediateDirectories:true)
