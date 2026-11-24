@@ -164,6 +164,25 @@ final class V0191MaintenanceTests: XCTestCase {
         XCTAssertEqual(try journal.pendingLocalNameRectifications().map(\.relativePath),["blocked."])
     }
 
+    func testV0192PromptDeadlineIsFailClosedAndSingleUse() {
+        let timely=NamePromptDecision(started:100)
+        XCTAssertNil(timely.answer(at:159.9))
+        timely.confirm(at:159.9)
+        timely.skip()
+        XCTAssertEqual(timely.answer(at:200),true)
+        let expired=NamePromptDecision(started:100)
+        XCTAssertEqual(expired.answer(at:160),false)
+        expired.confirm(at:160)
+        XCTAssertEqual(expired.answer(at:161),false)
+        let late=NamePromptDecision(started:100)
+        late.confirm(at:160)
+        XCTAssertEqual(late.answer(at:161),false)
+        let skipped=NamePromptDecision(started:100)
+        skipped.skip()
+        skipped.confirm(at:101)
+        XCTAssertEqual(skipped.answer(at:101),false)
+    }
+
     func testFinalizedTotalsSurviveMissingDetailRow() throws {
         let base=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at:base,withIntermediateDirectories:true)

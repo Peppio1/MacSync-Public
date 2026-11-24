@@ -31,6 +31,9 @@ public final class LocalMonitorService {
     private var roots: [MonitorRoot] = []
     private var lastFullScan: Date?
     private var recoveryRequired = false
+    private var activeGeneration: UUID?
+    private var activeRequest: SeedVerificationCancellation?
+    private var activeDatabasePath: String?
     private let requestLock = NSLock()
     private var scanRequest: SeedVerificationCancellation?
     public let safetyGate: MonitorSafetyGate
@@ -123,6 +126,9 @@ public final class LocalMonitorService {
                 }
                 try watcher.start(paths: checked.map { $0.url.path }, since: since)
                 self.watcher = watcher
+                self.activeGeneration = generation
+                self.activeRequest = request
+                self.activeDatabasePath = databasePath
                 guard !request.isCancelled else { throw SeedVerificationError.cancelled }
                 self.startHealthTimer(request:request,generation:generation)
                 self.safetyGate.setReady(true,generation:generation)
@@ -151,6 +157,69 @@ public final class LocalMonitorService {
 
     public func afterStopped(_ completion: @escaping () -> Void) { queue.async { completion() } }
     public func refreshCount() { queue.async { [weak self] in guard let self, self.safetyGate.isReady else { return }; self.report("Monitoraggio locale attivo",active:true) } }
+
+    /// Invoked only by the independent serial transfer queue, before any
+    /// remote operations. FSEvents remains running; its queued events and
+    /// this targeted inventory update use the same serial writer.
+    public func rectifyQueuedNames(_ approved:[IncompatibleName],
+                                   shouldContinue:()->Bool) throws {
+        try queue.sync {
+            guard let inventory, let generation=activeGeneration,
+                  let request=activeRequest, let databasePath=activeDatabasePath,
+                  !request.isCancelled, shouldContinue(), safetyGate.isReady else {
+                throw SeedVerificationError.cancelled
+            }
+            let journal=try ChangeJournal(path:databasePath)
+            let current=Dictionary(uniqueKeysWithValues:try journal.pendingLocalNameRectifications().map{($0.id,$0)})
+            let selected=approved.filter { row in
+                current[row.id] == row && NameRectification.proposedName(row.name) != nil
+            }
+            guard !selected.isEmpty else { return }
+            let localRoots=Dictionary(uniqueKeysWithValues:roots.map{($0.id,$0.url.path)})
+            guard selected.allSatisfy({localRoots[$0.rootID] == $0.rootPath}) else {
+                throw MountedCopyError.invalidMapping
+            }
+            safetyGate.beginReconciliation(generation:generation)
+            do {
+                let log=try SyncActivityLog(path:databasePath)
+                log.cycleID=UUID().uuidString
+                let result=try NameRectification.executeCoordinated(items:selected,roots:localRoots,
+                    journal:journal,log:log,destinations:[:],onlySide:.source,normalLocalRename:true,
+                    shouldContinue:{!request.isCancelled && shouldContinue()})
+                // Even after Stop, reconcile names already changed. A
+                // canceled monitor generation instead remains fail-closed.
+                for root in roots {
+                    var scopes=Set<String>()
+                    for row in selected where row.rootID == root.id {
+                        guard let name=NameRectification.proposedName(row.name) else { continue }
+                        let parent=row.relativePath.split(separator:"/").dropLast().joined(separator:"/")
+                        scopes.insert(row.relativePath)
+                        scopes.insert(parent.isEmpty ? name : parent+"/"+name)
+                    }
+                    let ordered=scopes.sorted { a,b in
+                        a.count == b.count ? a < b : a.count < b.count
+                    }
+                    var top:[String]=[]
+                    for scope in ordered {
+                        if !top.contains(where:{scope.hasPrefix($0+"/")}) { top.append(scope) }
+                    }
+                    for scope in top {
+                        _ = try inventory.reconcile(rootID:root.id,root:root.url,
+                            subtree:root.url.appendingPathComponent(scope),
+                            shouldContinue:{!request.isCancelled})
+                    }
+                }
+                guard !request.isCancelled else { throw SeedVerificationError.cancelled }
+                safetyGate.setReady(true,generation:generation)
+                report("Rettifica locale: \(result.sourceRenamed) rinominati · inventario aggiornato",active:true)
+            } catch {
+                recoveryRequired=true
+                safetyGate.fail(generation:generation,reason:"Rettifica locale: inventario da riconciliare")
+                report("Rettifica locale sospesa: "+SyncDiagnostic.describe(error),active:false)
+                throw error
+            }
+        }
+    }
 
     private func validateRoots(_ roots: [MonitorRoot]) throws -> [MonitorRoot] {
         guard Set(roots.map(\.id)).count == roots.count else {
@@ -286,6 +355,7 @@ public final class LocalMonitorService {
         watcher = nil
         inventory = nil
         activityLog = nil
+        activeGeneration=nil; activeRequest=nil; activeDatabasePath=nil
         roots = []
         lastFullScan = nil
         recoveryRequired = false

@@ -371,6 +371,7 @@ final class MacSyncViewModel: ObservableObject {
         service.afterStopped { DispatchQueue.main.async { completion() } }
     }
     func refreshPendingCount() { service.refreshCount() }
+    var localNameMaintenanceService: LocalMonitorService { service }
 }
 
 private final class FolderDropCollector: @unchecked Sendable {

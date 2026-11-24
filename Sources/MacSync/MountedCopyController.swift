@@ -9,6 +9,7 @@ final class MountedCopyController: ObservableObject {
     private let previewOnly: Bool
     private let monitorGate: MonitorSafetyGate
     var onQueueChanged: (() -> Void)?
+    var rectifyDuringCycle: (([IncompatibleName],MirrorDeletionCancellation) throws -> Void)?
     @Published private(set) var interruptionRequested = false
     @Published private(set) var queueRebuildRequired = false
     @Published private(set) var ignoreDSStore = FileExclusionPolicy.ignoreDSStore
@@ -929,6 +930,7 @@ final class MountedCopyController: ObservableObject {
             // Create the armed deletion worker on the serial background queue.
             let cancellation = MirrorDeletionCancellation()
             let gate = monitorGate
+            let localRectification = rectifyDuringCycle
             sessionCancellation = cancellation
             interruptionRequested = false
             mirrorCancellation = policy.enabled ? cancellation : nil
@@ -1120,6 +1122,30 @@ final class MountedCopyController: ObservableObject {
                         throw MirrorDeletionFailure.bulkDeletion(reason)
                     }
                     guard gate.isReady else { throw JournalError.database("Inventario sorgenti non pronto; ciclo sospeso") }
+                    let incompatible=try journal.pendingLocalNameRectifications()
+                    if !incompatible.isEmpty {
+                        progress.phase="Rettifica nomi · attesa conferma (60 s)"
+                        publish(force:true)
+                        let decision=NamePromptDecision()
+                        DispatchQueue.main.async {
+                            NameRectificationPrompt.present(items:incompatible,decision:decision)
+                        }
+                        while decision.answer == nil && !cancellation.isCancelled {
+                            Thread.sleep(forTimeInterval:0.10)
+                        }
+                        if cancellation.isCancelled { decision.skip(); return }
+                        if decision.answer == true, let localRectification {
+                            progress.phase="Rettifica locale e aggiornamento inventario"
+                            publish(force:true)
+                            try localRectification(incompatible,cancellation)
+                            try? log.record(level:.info,rootID:"app",action:"name_prompt_confirmed",
+                                message:"Rettifica locale autorizzata; inventario riconciliato")
+                        } else {
+                            try? log.record(level:.info,rootID:"app",action:"name_prompt_skipped",
+                                message:"Rettifica annullata o scaduta; elementi incompatibili mantenuti in coda")
+                        }
+                        guard !cancellation.isCancelled, gate.isReady else { return }
+                    }
                     // Reopen mappings on each healthy cycle, then compare the
                     // durable logical identity. A changed inode never rebinds.
                     worker = nil; mirrorWorker = nil

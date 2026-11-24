@@ -82,6 +82,10 @@ final class MacSyncRuntime: ObservableObject {
         model.onSourceNamesUpdated = { [weak self] names in
             self?.copy.acceptMonitoredSourceNames(names)
         }
+        let localMaintenance=model.localNameMaintenanceService
+        copy.rectifyDuringCycle = { items, cancellation in
+            try localMaintenance.rectifyQueuedNames(items,shouldContinue:{!cancellation.isCancelled})
+        }
         copy.onQueueChanged = { [weak self] in
             guard let self, !self.shuttingDown else { return }
             self.model.refreshPendingCount()
