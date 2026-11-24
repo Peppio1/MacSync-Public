@@ -23,13 +23,21 @@ final class SMBV0191ValidationTests: XCTestCase {
         let serverPath = try String(contentsOf: fixtureRoot.appendingPathComponent("share-path"), encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard serverPath.hasPrefix("/private/tmp/macsync-ci-share.") else { XCTFail("Unexpected fixture root"); return }
-        let label = "macsync-v019-" + UUID().uuidString
-        let root = mount.appendingPathComponent(label)
-        let server = URL(fileURLWithPath: serverPath).appendingPathComponent(label)
-        try fm.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? fm.removeItem(at: root) }
-        try checkRename(root:root,server:server,label:label,helper:helper,host:host,share:share,user:user,password:password,binding:binding,directoryCase:false)
-        try checkRename(root:root,server:server,label:label,helper:helper,host:host,share:share,user:user,password:password,binding:binding,directoryCase:true)
+        let prefix = "macsync-v019-" + UUID().uuidString
+        // Separate fresh parents prevent the first case from populating
+        // the macOS directory cache before the server-created case.
+        for directoryCase in [false,true] {
+            let label = prefix + (directoryCase ? "-server" : "-client")
+            let root = mount.appendingPathComponent(label)
+            let server = URL(fileURLWithPath:serverPath).appendingPathComponent(label)
+            if directoryCase {
+                try fm.createDirectory(at:server,withIntermediateDirectories:false)
+            } else {
+                try fm.createDirectory(at:root,withIntermediateDirectories:true)
+            }
+            defer { try? fm.removeItem(at:server) }
+            try checkRename(root:root,server:server,label:label,helper:helper,host:host,share:share,user:user,password:password,binding:binding,directoryCase:directoryCase)
+        }
     }
 
     private func checkRename(root:URL,server:URL,label:String,helper:URL,host:String,share:String,user:String,password:String,binding:DirectoryBinding,directoryCase:Bool) throws {
@@ -46,13 +54,20 @@ final class SMBV0191ValidationTests: XCTestCase {
             try bytes.write(to:serverOld.appendingPathComponent("child.jpg"))
             let deadline=ProcessInfo.processInfo.systemUptime+5
             var exactVisible=false
+            var clientNames:[String]=[]
             repeat {
-                let names=try fm.contentsOfDirectory(atPath:root.path)
-                exactVisible=names.contains { $0.utf8.elementsEqual(oldName.utf8) }
+                clientNames=(try? fm.contentsOfDirectory(atPath:root.path)) ?? []
+                exactVisible=clientNames.contains { $0.utf8.elementsEqual(oldName.utf8) }
                 if exactVisible { break }
                 Thread.sleep(forTimeInterval:0.125)
             } while ProcessInfo.processInfo.systemUptime<deadline
-            guard exactVisible else { XCTFail("Server-created trailing-space directory not exposed with its exact spelling by smbfs"); return }
+            guard exactVisible else {
+                // Synthetic fixture names only; never emit credentials.
+                let client=clientNames.map { name in name.unicodeScalars.map { String(format:"U+%04X",$0.value) }.joined(separator:" ") }
+                let raw=try fm.contentsOfDirectory(atPath:server.path).map { name in name.unicodeScalars.map { String(format:"U+%04X",$0.value) }.joined(separator:" ") }
+                XCTFail("Server-created trailing space not exposed literally. Client: "+client.joined(separator:";")+" server: "+raw.joined(separator:";"))
+                return
+            }
         } else {
             try bytes.write(to:old)
         }
@@ -99,6 +114,9 @@ final class SMBV0191ValidationTests: XCTestCase {
         XCTAssertFalse(fm.fileExists(atPath:serverOld.path))
         XCTAssertEqual(try contents(serverNew),bytes)
         XCTAssertEqual(try rename(stale:false,verifyOnly:true),0,"Independent server-side confirmation after rename")
+        if !directoryCase {
+            XCTAssertNotEqual(try rename(stale:true,verifyOnly:true),0,"Read-only verification must reject a wrong timestamp")
+        }
         let deadline=ProcessInfo.processInfo.systemUptime+3.5
         var visible=false
         repeat {

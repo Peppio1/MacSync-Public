@@ -49,6 +49,9 @@ cat > "$conf" <<EOF
     force user = $user
     # CI diagnostic: use straightforward NT ACL and DOS-attribute mapping.
     # No Samba fruit/AAPL extensions until the basic SMB3 write path passes.
+    # This fixture specifically exercises literal server-side names rather
+    # than generated DOS aliases for otherwise incompatible spellings.
+    mangled names = no
     nt acl support = no
     ea support = no
     store dos attributes = no
