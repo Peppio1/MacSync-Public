@@ -21,7 +21,11 @@ public struct MonitorUpdate: Sendable {
 
 /// Local-only prototype. The watcher never connects to SMB and never performs
 /// remote copies or deletions. Its change queue is for a later sync worker.
-public final class LocalMonitorService {
+// All mutable watcher/inventory state is confined to queue. The only
+// state touched by callers, scanRequest, is protected by requestLock;
+// safetyGate has its own synchronization. Callbacks are delivered on queue.
+// This is the explicit cross-queue boundary for the drained copy worker.
+public final class LocalMonitorService: @unchecked Sendable {
     private let queue = DispatchQueue(label: "macsync.localmonitor.serial", qos: .utility)
     private let update: (MonitorUpdate) -> Void
     private var watcher: FSEventsWatcher?

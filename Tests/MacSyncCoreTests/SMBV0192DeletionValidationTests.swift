@@ -52,6 +52,7 @@ final class SMBV0192DeletionValidationTests:XCTestCase {
             let mapping=try MountedFolderMapping(rootID:"photos",source:source,target:target)
             try journal.verifyDirectoryBindings([mapping],allowNewTarget:true)
             let report=try ArchiveAudit(journal:journal,mappings:[mapping]).run(mode:.quick,repair:true,queueMirrorExtras:true)
+            let candidates=try XCTUnwrap(report.deletionCandidates)
             XCTAssertTrue(fm.fileExists(atPath:original.path),"Audit must not mutate destination")
             let consent=try MirrorAuthorization.capture(journal:journal,mappings:[mapping],includePendingDeletes:true)
             let worker=try MirrorDeletionWorker(journal:journal,manifest:RecoveryManifest(path:db),
@@ -68,11 +69,11 @@ final class SMBV0192DeletionValidationTests:XCTestCase {
                     XCTAssertEqual(try Data(contentsOf:original),Data("ambiguous old bytes".utf8))
                 } else {
                     XCTAssertEqual(try Data(contentsOf:original.appendingPathComponent("child.jpg")),Data("old raw bytes".utf8))
-                    XCTAssertFalse(report.deletionCandidates.contains("photos\0"+oldName))
+                    XCTAssertFalse(candidates.contains("photos\0"+oldName))
                 }
                 print("Preserved incompatible extra: "+label)
             } else {
-                XCTAssertTrue(report.deletionCandidates.contains("photos\0"+oldName))
+                XCTAssertTrue(candidates.contains("photos\0"+oldName))
                 XCTAssertEqual(result.removed,1)
                 XCTAssertEqual(result.directories,1)
                 XCTAssertFalse(fm.fileExists(atPath:original.path))
