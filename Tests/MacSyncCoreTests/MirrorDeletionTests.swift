@@ -549,6 +549,50 @@ final class MirrorDeletionTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: f.destination.appendingPathComponent("photo0.dng").path))
     }
 
+    func testV019AuditQueuesExtrasAndNewConsentDeletesOnlyAbsentPaths() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let dir = f.destination.appendingPathComponent("extra")
+        try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true)
+        try Data("extra".utf8).write(to:dir.appendingPathComponent("child.dng"))
+        try deleteSource(f,name:"photo0.dng")
+        try f.journal.verifyDirectoryBindings([f.mapping],allowNewTarget:true)
+        let audit = try ArchiveAudit(journal:f.journal,mappings:[f.mapping])
+        let report = try audit.run(mode:.quick,repair:true,queueMirrorExtras:true)
+        XCTAssertEqual(report.deletionCandidates?.count,3)
+        XCTAssertEqual(report.displayCounts?.deletionFiles,2)
+        XCTAssertEqual(report.displayCounts?.deletionDirectories,1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath:dir.path))
+        XCTAssertEqual(try f.journal.pending().filter{$0.kind == .delete}.count,3)
+        let repeated = try audit.run(mode:.intelligent,repair:true,queueMirrorExtras:true)
+        XCTAssertEqual(repeated.deletionCandidates?.count,3)
+        XCTAssertEqual(try f.journal.pending().filter{$0.kind == .delete}.count,3)
+        let consent = try MirrorAuthorization.capture(journal:f.journal,mappings:[f.mapping],includePendingDeletes:true)
+        let result = try persistentWorker(f,authorization:consent).runCycle()
+        XCTAssertEqual(result.removed,2)
+        XCTAssertEqual(result.directories,1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath:dir.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath:f.destination.appendingPathComponent("photo1.dng").path))
+    }
+
+    func testV019RecreatedAuditExtraSupersedesDelete() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let name="returned.dng"
+        try Data("old".utf8).write(to:f.destination.appendingPathComponent(name))
+        try f.journal.verifyDirectoryBindings([f.mapping],allowNewTarget:true)
+        let audit=try ArchiveAudit(journal:f.journal,mappings:[f.mapping])
+        _ = try audit.run(mode:.quick,repair:true,queueMirrorExtras:true)
+        XCTAssertEqual(try f.journal.pending().filter{$0.relativePath == name}.map(\.kind),[.delete])
+        let path=f.source.appendingPathComponent(name)
+        try Data("new".utf8).write(to:path)
+        try LocalInventory(path:f.database).reconcile(rootID:"photos",root:f.source,subtree:path)
+        XCTAssertEqual(try f.journal.pending().filter{$0.relativePath == name}.map(\.kind),[.upsert])
+        let consent=try MirrorAuthorization.capture(journal:f.journal,mappings:[f.mapping],includePendingDeletes:true)
+        XCTAssertEqual(try persistentWorker(f,authorization:consent).runCycle().removed,0)
+        XCTAssertEqual(try Data(contentsOf:f.destination.appendingPathComponent(name)),Data("old".utf8))
+    }
+
     func testPersistentConsentCannotBindReplacedDestinationOrDatabase() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }

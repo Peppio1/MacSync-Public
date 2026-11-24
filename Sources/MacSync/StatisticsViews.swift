@@ -547,7 +547,7 @@ struct ArchiveAuditPanel: View {
                     Text("Prossima: \(macSyncDateTime(next))").font(detailFont).foregroundStyle(.secondary)
                 }
             }
-            Text("I file presenti solo nella destinazione sono segnalati, mai eliminati.")
+            Text("File e cartelle solo nella destinazione vengono accodati per l’eliminazione; eseguiti solo con mirror autorizzato.")
                 .font(detailFont).foregroundStyle(.secondary)
         }.disabled(busy || copy.active)
     }
@@ -872,15 +872,16 @@ struct AuditFindingCards: View {
             if !overview { differenceCaption }
         }
         .sheet(item:$selection) { snapshot in
-            AuditResultSheet(model:model,findings:snapshot.findings,kind:snapshot.kind,title:snapshot.title,filesOnly:true,deletionCandidates:snapshot.deletionCandidates)
+            AuditResultSheet(model:model,findings:snapshot.findings,kind:snapshot.kind,title:snapshot.title,filesOnly:snapshot.kind != .extra,deletionCandidates:snapshot.deletionCandidates)
         }
     }
     private var differenceCaption: some View {
-        Text(partial ? "Differenze rilevate finora · risultati parziali" : "Ultima verifica · eliminazioni soggette alle protezioni")
+        Text(partial ? "Differenze rilevate finora · risultati parziali" : "Da eliminare: \(counts.deletionFiles) file · \(counts.deletionDirectories ?? 0) cartelle · solo con mirror autorizzato")
             .font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.75)
     }
     private func card(_ kind:AuditFindingKind,_ title:String,_ symbol:String) -> some View {
-        Button {
+        let count = kind == .extra ? counts.deletionItems : counts.files(kind)
+        return Button {
             // Freeze the current report, no filtering or allocation of a new
             // full array on the main thread.
             selection = AuditDetailSnapshot(kind:kind,findings:findings,deletionCandidates:deletionCandidates,title:title)
@@ -891,7 +892,7 @@ struct AuditFindingCards: View {
                     Image(systemName:symbol).foregroundStyle(color)
                     Text(title).font(.caption).lineLimit(1).minimumScaleFactor(0.75)
                     Spacer(minLength:2)
-                    Text(counts.files(kind).formatted()).font(.system(size:16,weight:.semibold,design:.rounded)).monospacedDigit().foregroundStyle(color)
+                    Text(count.formatted()).font(.system(size:16,weight:.semibold,design:.rounded)).monospacedDigit().foregroundStyle(color)
                     Image(systemName:"chevron.right").font(.caption2).foregroundStyle(.secondary)
                 }.padding(7).frame(maxWidth:.infinity,alignment:.leading)
                     .background(MacSyncColors.inset(scheme),in:RoundedRectangle(cornerRadius:8))
@@ -901,7 +902,7 @@ struct AuditFindingCards: View {
                 VStack(alignment:.leading,spacing:2) {
                     HStack(spacing:3) {
                         Image(systemName:symbol).foregroundStyle(color)
-                        Text(counts.files(kind).formatted()).font(.system(size:16,weight:.semibold,design:.rounded)).monospacedDigit().foregroundStyle(color)
+                        Text(count.formatted()).font(.system(size:16,weight:.semibold,design:.rounded)).monospacedDigit().foregroundStyle(color)
                         Spacer(minLength:0)
                         Image(systemName:"chevron.right").font(.caption2).foregroundStyle(.secondary)
                     }
@@ -910,9 +911,9 @@ struct AuditFindingCards: View {
                     .background(MacSyncColors.inset(scheme),in:RoundedRectangle(cornerRadius:6))
                     .overlay(RoundedRectangle(cornerRadius:6).strokeBorder(MacSyncColors.line(scheme),lineWidth:1))
             } else {
-                SyncSummaryMetric(title:title,count:counts.files(kind),symbol:symbol)
+                SyncSummaryMetric(title:title,count:count,symbol:symbol)
             }
-        }.buttonStyle(.plain).help("Mostra i file: " + title)
+        }.buttonStyle(.plain).help("Mostra gli elementi: " + title)
     }
 }
 

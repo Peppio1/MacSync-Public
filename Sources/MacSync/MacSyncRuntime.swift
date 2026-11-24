@@ -56,6 +56,7 @@ final class MacSyncRuntime: ObservableObject {
     @Published private(set) var nextAuditAt: Date?
     private var auditRevision = 0
     @Published private(set) var rectificationPending = false
+    private var rectificationRevision = 0
     @Published private(set) var preparingRectification = false
     @Published private(set) var rectificationCancellationRequested = false
     private var suspendedUntilNextLaunch = false
@@ -107,12 +108,15 @@ final class MacSyncRuntime: ObservableObject {
         updates.start()
         DispatchQueue.main.async { [weak self] in self?.recoverExistingFinderSMBMountIfNeeded() }
         if let path = try? copy.historyPath() {
+            let revision = rectificationRevision
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 let pending = (try? ChangeJournal(path: path).hasPendingNameRectification()) == true
                 DispatchQueue.main.async { [weak self] in
-                    guard let self, pending, !self.shuttingDown else { return }
-                    self.rectificationPending = true
-                    self.automaticStatus = "Rettifica pendente: i percorsi interessati restano protetti; riprendi da Nomi incompatibili"
+                    guard let self, !self.shuttingDown, self.rectificationRevision==revision else { return }
+                    self.rectificationPending = pending
+                    if pending {
+                        self.automaticStatus = "Rettifica pendente: i percorsi interessati restano protetti; riprendi da Nomi incompatibili"
+                    }
                 }
             }
         }
@@ -474,7 +478,7 @@ final class MacSyncRuntime: ObservableObject {
     /// any rename. A previously authorized automatic-copy setting may be
     /// restored after the monitor is restarted; mirror remains disarmed.
     func rectifyNames(_ items:[IncompatibleName]) {
-        guard !previewOnly,!rectificationPending,!items.isEmpty,!shuttingDown,!folderConfigurationBusy,!savingSchedule,
+        guard !previewOnly,!items.isEmpty,!shuttingDown,!folderConfigurationBusy,!savingSchedule,
               !copy.auditBusy,!copy.seedBusy,!copy.maintaining,!copy.rectifyingNames,!copy.namesBusy,
               !preparingSignedUpdate,!finalShutdownHolding else { return }
         let permitted=Set(copy.incompatibleNames.filter{ NameRectification.proposedName($0.name) != nil }.map(\.id))
@@ -498,6 +502,7 @@ final class MacSyncRuntime: ObservableObject {
     }
 
     private func performNameRectification(_ approved: [IncompatibleName]) {
+        rectificationRevision += 1
         let pairs = model.configuredPairs()
         // This does NOT authorize automatic copies for the first time.
         // Preserve only the earlier explicit choice through maintenance.

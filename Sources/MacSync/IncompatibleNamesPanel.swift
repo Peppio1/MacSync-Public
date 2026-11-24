@@ -46,7 +46,7 @@ struct IncompatibleNamesPanel:View {
         !runtime.previewOnly && !runtime.folderConfigurationBusy && !runtime.shuttingDown &&
         !copy.auditBusy && !copy.seedBusy && !copy.maintaining && !copy.rectifyingNames && !copy.namesBusy
     }
-    private var canSelect: Bool { canRectify && !runtime.rectificationPending }
+    private var canSelect: Bool { canRectify }
     private func selectable(_ item:IncompatibleName)->Bool {
         NameRectification.proposedName(item.name) != nil
     }
@@ -99,15 +99,14 @@ struct IncompatibleNamesPanel:View {
                     .disabled(!current || !canSelect || namePage?.matchingSelectableIDs.isEmpty != false)
                 Button("Deseleziona") { selected.removeAll() }.disabled(selected.isEmpty)
                 Spacer()
-                Button(runtime.rectificationPending ? "Riprendi rettifica" :
-                    (selectionCurrent ? "Rettifica (\(chosen.count))" : "Calcolo selezione…")) {
-                    if runtime.rectificationPending {
-                        runtime.resumeNameRectification()
-                    } else {
-                        confirmation=chosen;showConfirmation=true
-                    }
+                if runtime.rectificationPending {
+                    Button("Riprendi pendenti") { runtime.resumeNameRectification() }
+                        .disabled(!canRectify || copy.active)
+                }
+                Button(selectionCurrent ? "Rettifica (\(chosen.count))" : "Calcolo selezione…") {
+                    confirmation=chosen;showConfirmation=true
                 }.buttonStyle(.borderedProminent)
-                    .disabled(!canRectify || !selectionCurrent || (runtime.rectificationPending ? copy.active : chosen.isEmpty))
+                    .disabled(!canRectify || !selectionCurrent || chosen.isEmpty)
             }
             if runtime.preparingRectification {
                 ProgressView("Arresto delle attività prima della rettifica…")
@@ -121,7 +120,7 @@ struct IncompatibleNamesPanel:View {
             } else if !copy.rectificationStatus.isEmpty {
                 Text(copy.rectificationStatus).font(.caption).foregroundStyle(.secondary)
             } else if runtime.rectificationPending {
-                Text("Rettifica in sospeso. Riprendi il lotto quando le cartelle sono disponibili.")
+                Text("Alcune rettifiche sono in sospeso. Puoi selezionare singole voci o riprendere le operazioni pendenti.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let started = copy.nameScanStarted {
@@ -200,7 +199,7 @@ struct IncompatibleNamesPanel:View {
                 Text("Conferma rettifica dei nomi").font(.title2.bold())
                 Text("\(confirmation.count) elementi selezionati. Le copie automatiche e le cancellazioni speculari verranno disattivate. Il monitor verrà riavviato al termine. Le voci con lo stesso percorso sui due lati vengono incluse nel lotto.")
                     .fixedSize(horizontal:false,vertical:true)
-                Text("Spazi e punti finali rimossi, caratteri vietati sostituiti con -. Nomi riservati, conflitti e nomi già esistenti non saranno rettificati. Dopo la rettifica, esegui Verifica archivio prima di riavviare la sincronizzazione.")
+                Text("Spazi e punti finali rimossi, caratteri vietati sostituiti con -. Nomi riservati e collisioni restano nell’elenco. Se un lato fallisce prima della rinomina remota, il nome locale viene ripristinato; gli esiti incerti restano protetti. Dopo la rettifica, esegui Verifica archivio prima di riavviare la sincronizzazione.")
                     .font(.callout).fixedSize(horizontal:false,vertical:true)
                 List(confirmation) { item in
                     VStack(alignment:.leading,spacing:3) {

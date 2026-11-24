@@ -6,6 +6,7 @@ enum SMBNameRectificationError: LocalizedError {
     case mountUnavailable
     case credentialUnavailable
     case helperFailed
+    case notAttempted
     case timedOut
 
     var errorDescription: String? {
@@ -13,6 +14,7 @@ enum SMBNameRectificationError: LocalizedError {
         case .mountUnavailable: return "Destinazione SMB non identificabile per la rettifica"
         case .credentialUnavailable: return "Credenziale SMB non identificabile o non accessibile nel Portachiavi"
         case .helperFailed: return "Rclone SMB non ha confermato la rinomina protetta"
+        case .notAttempted: return "Rclone SMB ha rifiutato il controllo prima di tentare la rinomina"
         case .timedOut: return "Tempo scaduto durante la rinomina rclone SMB"
         }
     }
@@ -204,6 +206,9 @@ enum SMBNameRectification {
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             guard ProcessInfo.processInfo.systemUptime < deadline else { throw SMBNameRectificationError.timedOut }
             Thread.sleep(forTimeInterval: 0.05)
+        }
+        if process.terminationReason == .exit && process.terminationStatus == 3 {
+            throw SMBNameRectificationError.notAttempted
         }
         guard process.terminationReason == .exit, process.terminationStatus == 0 else {
             throw SMBNameRectificationError.helperFailed

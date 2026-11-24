@@ -570,12 +570,14 @@ public struct SeededArchiveSession: Sendable {
         cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
         diagnostic: (ArchiveAuditProgress) -> Void = { _ in },
         progress: (ArchiveAuditProgress) -> Void = { _ in },
-        deletionCandidates: Set<String> = []
+        deletionCandidates: Set<String> = [],
+        queueMirrorExtras: Bool = false
     ) throws -> ArchiveAuditReport {
         let journal = try openJournal()
         var result = try ArchiveAudit(journal: journal, mappings: mappings).run(
             mode: mode, repair: repair, cancellation: cancellation,
-            deletionCandidates: deletionCandidates, diagnostic: diagnostic, progress: progress
+            deletionCandidates: deletionCandidates, queueMirrorExtras: queueMirrorExtras,
+            diagnostic: diagnostic, progress: progress
         )
         try checkFileIdentity()
         if repair {

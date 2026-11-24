@@ -571,7 +571,7 @@ struct MacSyncConfigurationView: View {
     var body: some View {
         MacSyncSectionShell(page: $page, monitoring: model.monitoring, next: visibleNextCopy, showHeader: true, activity: nil,
                             controls: AnyView(HStack(spacing: 10) { automaticSwitch; globalControls }),
-                            nameCount:copy.sourceNameCount) {
+                            nameCount:copy.incompatibleNameCount) {
             VStack(alignment: .leading, spacing: 10) {
                 switch page {
                 case .overview: overviewPage

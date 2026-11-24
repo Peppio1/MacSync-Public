@@ -19,6 +19,11 @@ import (
 // be used to retry a rename after an ambiguous server/transport response.
 var errMacSyncSourceMtimeNotReady = errors.New("source modification timestamp not yet confirmed")
 
+// Report only definite pre-mutation errors separately. Any failure after
+// passing the protected handle validation remains ambiguous, even if the
+// server might have rejected SET_INFO.
+var ErrMacSyncRenameNotAttempted = errors.New("rename not attempted")
+
 // MacSyncRenameRequest is sent to the bundled helper over stdin.
 type MacSyncRenameRequest struct {
 	Host, Port, Share, User, Domain, Password string
@@ -44,7 +49,13 @@ func validMacSyncRelativePath(p string) bool {
 
 // MacSyncRename issues a single checked SMB rename. It never calls the
 // transfer layer, which is allowed to retry with a copy and delete.
-func MacSyncRename(ctx context.Context, request MacSyncRenameRequest) error {
+func MacSyncRename(ctx context.Context, request MacSyncRenameRequest) (result error) {
+	mutationPossible := false
+	defer func() {
+		if result != nil && !mutationPossible {
+			result = ErrMacSyncRenameNotAttempted
+		}
+	}()
 	if request.Host == "" || request.Port == "" || request.User == "" ||
 		request.FileID == 0 || request.CreatedSeconds <= 0 ||
 		!validMacSyncRelativePath(request.Share) || strings.Contains(request.Share, "/") ||
@@ -94,6 +105,7 @@ func MacSyncRename(ctx context.Context, request MacSyncRenameRequest) error {
 				return errMacSyncSourceMtimeNotReady
 			}
 		}
+		mutationPossible = true
 		return nil
 	}
 	const maxMtimeChecks = 11

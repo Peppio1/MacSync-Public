@@ -8,6 +8,12 @@ public enum SyncDiagnostic {
         String(text.replacingOccurrences(of:"\n",with:" ").replacingOccurrences(of:"\r",with:" ").replacingOccurrences(of:"\0",with:" ").prefix(limit))
     }
     public static func describe(_ error: Error) -> String {
+        if let smb = error as? SMBNameRectificationError {
+            return "SMBNameRectificationError: " + smb.localizedDescription
+        }
+        if let check = error as? NameRectificationCheckError {
+            return "NameRectificationCheckError: " + check.localizedDescription
+        }
         if let copy = error as? MountedCopyError {
             if case .copyFailed(let code) = copy {
                 return "MountedCopyError.copyFailed; POSIX \(code): " + String(cString:strerror(Int32(clamping:code))) + "; coda preservata"

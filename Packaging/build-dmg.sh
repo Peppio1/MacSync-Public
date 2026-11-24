@@ -19,7 +19,10 @@ printf 'Creating DMG for verified package version %s\n' "$version"
 name="MacSync-v$version-macOS-universal.dmg"
 # Test artifacts are intentionally marked with a visible CI warning in the
 # Finder background and the bundled provenance. The source app is unchanged.
-"$python" -m dmgbuild -s Packaging/dmg-settings.py \
+# dmgbuild 1.6.7 defaults to five detach attempts. Hosted macOS runners
+# can briefly keep the staging disk busy; allow bounded exponential retries
+# without bypassing image verification or changing the signed app.
+"$python" -m dmgbuild --detach-retries 8 -s Packaging/dmg-settings.py \
   -D "app=$app" -D "guide=Packaging/Guida installazione.html" -D "graphics=$graphics" \
   "MacSync $version" "$out/$name"
 hdiutil verify "$out/$name"
