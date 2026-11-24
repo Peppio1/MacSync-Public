@@ -3,6 +3,31 @@ import XCTest
 @testable import MacSyncCore
 
 final class NameRectificationTests:XCTestCase {
+    func testV019PreflightDistinguishesMissingOriginalAndCollision() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .resolvingSymlinksInPath()
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let old = root.appendingPathComponent("item?.jpg")
+        let new = root.appendingPathComponent("item-.jpg")
+        try Data("original".utf8).write(to: old)
+        let parent = try AnchoredDirectory(root, expectedVolume: DirectoryBinding.read(root).volume)
+        let snapshot = try parent.leaf(old.lastPathComponent)
+        try parent.checkRectification(old: old.lastPathComponent, new: new.lastPathComponent, matching: snapshot)
+        try Data("occupied".utf8).write(to: new)
+        XCTAssertThrowsError(try parent.checkRectification(old: old.lastPathComponent,
+            new: new.lastPathComponent, matching: snapshot)) { error in
+            XCTAssertEqual(error as? NameRectificationCheckError, .nameOccupied)
+        }
+        try fm.removeItem(at: old)
+        XCTAssertThrowsError(try parent.checkRectification(old: old.lastPathComponent,
+            new: new.lastPathComponent, matching: snapshot)) { error in
+            XCTAssertEqual(error as? NameRectificationCheckError, .originalNotListed)
+        }
+        XCTAssertEqual(try Data(contentsOf: new), Data("occupied".utf8))
+    }
+
     func testApprovedRules() {
         XCTAssertEqual(NameRectification.proposedName("photo  . "),"photo")
         XCTAssertEqual(NameRectification.proposedName("Caffè:frontale?.jpg"),"Caffè-frontale-.jpg")

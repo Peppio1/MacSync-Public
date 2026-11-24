@@ -301,7 +301,7 @@ public enum NameRectification {
         var result = Result()
         func report(_ item: IncompatibleName, action: String, level: SyncLogLevel, message: String) {
             try? log.record(level: level, rootID: item.rootID, action: action,
-                relativePath: SyncDiagnostic.clean(item.relativePath), message: message)
+                relativePath: SyncDiagnostic.clean(item.relativePath), message: item.side.label + " · " + message)
         }
         func verifiedRoot(_ item: IncompatibleName) throws -> (URL, DirectoryBinding) {
             if item.side == .source {
@@ -513,7 +513,7 @@ public enum NameRectification {
                     }
                 } else {
                     guard !oldExists, newExists, move.matches(try parent.leaf(move.newName), renamed: true) else {
-                        throw MountedCopyError.destinationConflict
+                        throw NameRectificationCheckError.unresolvedState
                     }
                 }
                 let path = move.parentPath.isEmpty ? move.newName : move.parentPath + "/" + move.newName

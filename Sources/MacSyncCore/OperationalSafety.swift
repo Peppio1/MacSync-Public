@@ -2,6 +2,22 @@ import Foundation
 import Darwin
 import SQLite3
 
+/// Fixed, path-free maintenance diagnostics: an absent original spelling is
+/// not evidence of an existing destination object.
+enum NameRectificationCheckError: LocalizedError, Equatable {
+    case originalNotListed
+    case nameOccupied
+    case unresolvedState
+
+    var errorDescription: String? {
+        switch self {
+        case .originalNotListed: return "Nome originale non visibile esattamente nell'elenco della cartella"
+        case .nameOccupied: return "Conflitto reale: nome proposto o equivalente già presente nell'elenco"
+        case .unresolvedState: return "Stato della rettifica non verificabile: controllare identità e nomi"
+        }
+    }
+}
+
 /// Persistent identity deliberately excludes timestamps changed by ordinary
 /// directory edits. A changed inode/volume is NOT silently accepted on SMB.
 public struct DirectoryBinding: Codable, Equatable, Sendable {
@@ -523,13 +539,24 @@ public final class AnchoredDirectory {
             oldCandidates = names
             newCandidates = names
         }
-        guard oldCandidates.contains(where: { $0.utf8.elementsEqual(old.utf8) }),
-              !newCandidates.contains(where: {
-                  !$0.utf8.elementsEqual(old.utf8) &&
-                  WindowsPathSafety.comparisonFold($0) == WindowsPathSafety.comparisonFold(new)
-              }) else {
-            throw MountedCopyError.destinationConflict
+        // Do not treat a missing exact old spelling as a real collision.
+        // If cached enumeration is ambiguous, make one fresh read, never a
+        // mutation. The identity checks and exclusive rename remain mandatory.
+        var visibleOld = oldCandidates.contains { $0.utf8.elementsEqual(old.utf8) }
+        var occupied = newCandidates.contains {
+            !$0.utf8.elementsEqual(old.utf8) &&
+            WindowsPathSafety.comparisonFold($0) == WindowsPathSafety.comparisonFold(new)
         }
+        if !visibleOld || occupied {
+            let names = try FileManager.default.contentsOfDirectory(atPath: url.path)
+            visibleOld = names.contains { $0.utf8.elementsEqual(old.utf8) }
+            occupied = names.contains {
+                !$0.utf8.elementsEqual(old.utf8) &&
+                WindowsPathSafety.comparisonFold($0) == WindowsPathSafety.comparisonFold(new)
+            }
+        }
+        guard visibleOld else { throw NameRectificationCheckError.originalNotListed }
+        guard !occupied else { throw NameRectificationCheckError.nameOccupied }
         guard Self.sameFile(try leaf(old),original),
               [mode_t(S_IFREG),mode_t(S_IFDIR)].contains(original.st_mode & mode_t(S_IFMT)) else {
             throw MountedCopyError.sourceChanging
