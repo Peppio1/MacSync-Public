@@ -258,8 +258,9 @@ public final class RecoveryManifest {
         }
         db = handle
         do {
-            try execute("PRAGMA journal_mode=WAL;")
+            // Install the busy handler BEFORE any operation that may acquire a lock.
             try execute("PRAGMA busy_timeout=5000;")
+            try execute("PRAGMA journal_mode=WAL;")
             try execute("""
                 CREATE TABLE IF NOT EXISTS mirror_recovery(
                     id TEXT PRIMARY KEY,

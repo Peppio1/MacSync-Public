@@ -178,7 +178,7 @@ public final class SyncCycleHistory {
                 try execute("PRAGMA busy_timeout=1000; PRAGMA query_only=ON;")
                 return
             }
-            try execute("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;")
+            try execute("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
             try execute("""
                 CREATE TABLE IF NOT EXISTS sync_cycles_v1(
                     id TEXT PRIMARY KEY, session_id TEXT NOT NULL, started REAL NOT NULL,

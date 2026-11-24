@@ -15,6 +15,11 @@ private struct NameSelectionRequest: Equatable {
     let namesRevision: Int
 }
 
+private struct NameConfirmation: Identifiable {
+    let id = UUID()
+    let items: [IncompatibleName]
+}
+
 struct IncompatibleNamesPanel:View {
     @ObservedObject var copy:MountedCopyController
     @ObservedObject var model:MacSyncViewModel
@@ -25,8 +30,7 @@ struct IncompatibleNamesPanel:View {
     @State private var message=""
     @State private var revealing=false
     @State private var selected=Set<String>()
-    @State private var confirmation:[IncompatibleName]=[]
-    @State private var showConfirmation=false
+    @State private var confirmation:NameConfirmation?
     @State private var pageOffset=0
     @State private var namePage:IncompatibleNameListPage?
     @State private var displayedRequest:NameListingRequest?
@@ -104,7 +108,8 @@ struct IncompatibleNamesPanel:View {
                         .disabled(!canRectify || copy.active)
                 }
                 Button(selectionCurrent ? "Rettifica (\(chosen.count))" : "Calcolo selezione…") {
-                    confirmation=chosen;showConfirmation=true
+                    guard selectionCurrent, !chosen.isEmpty else { return }
+                    confirmation=NameConfirmation(items:chosen)
                 }.buttonStyle(.borderedProminent)
                     .disabled(!canRectify || !selectionCurrent || chosen.isEmpty)
             }
@@ -194,14 +199,14 @@ struct IncompatibleNamesPanel:View {
         .onChange(of:directories) { _ in pageOffset = 0 }
         .task(id:listingRequest) { await loadPage(listingRequest) }
         .task(id:selectionRequest) { await resolveSelection(selectionRequest) }
-        .sheet(isPresented:$showConfirmation) {
+        .sheet(item:$confirmation) { snapshot in
             VStack(alignment:.leading,spacing:12) {
                 Text("Conferma rettifica dei nomi").font(.title2.bold())
-                Text("\(confirmation.count) elementi selezionati. Le copie automatiche e le cancellazioni speculari verranno disattivate. Il monitor verrà riavviato al termine. Le voci con lo stesso percorso sui due lati vengono incluse nel lotto.")
+                Text("\(snapshot.items.count) elementi selezionati. Le copie automatiche e le cancellazioni speculari verranno disattivate. Il monitor verrà riavviato al termine. Le voci con lo stesso percorso sui due lati vengono incluse nel lotto.")
                     .fixedSize(horizontal:false,vertical:true)
                 Text("Spazi e punti finali rimossi, caratteri vietati sostituiti con -. Nomi riservati e collisioni restano nell’elenco. Se un lato fallisce prima della rinomina remota, il nome locale viene ripristinato; gli esiti incerti restano protetti. Dopo la rettifica, esegui Verifica archivio prima di riavviare la sincronizzazione.")
                     .font(.callout).fixedSize(horizontal:false,vertical:true)
-                List(confirmation) { item in
+                List(snapshot.items) { item in
                     VStack(alignment:.leading,spacing:3) {
                         Text(item.displayName+" → "+(NameRectification.proposedName(item.name) ?? "Correzione manuale")).font(.headline)
                         Text(item.rootPath+"/"+item.relativePath).font(.caption).foregroundStyle(.secondary)
@@ -209,13 +214,14 @@ struct IncompatibleNamesPanel:View {
                 }
                 HStack {
                     Spacer()
-                    Button("Annulla") { showConfirmation=false }
+                    Button("Annulla") { confirmation=nil }
                     Button("Conferma rettifica") {
-                        let items=confirmation
-                        showConfirmation=false
+                        let items=snapshot.items
+                        guard !items.isEmpty else { return }
+                        confirmation=nil
                         selected.removeAll()
                         runtime.rectifyNames(items)
-                    }.buttonStyle(.borderedProminent).disabled(!canSelect)
+                    }.buttonStyle(.borderedProminent).disabled(!canSelect || snapshot.items.isEmpty)
                 }
             }.padding(20).frame(width:650,height:500)
         }

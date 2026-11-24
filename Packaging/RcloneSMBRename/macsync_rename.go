@@ -33,6 +33,7 @@ type MacSyncRenameRequest struct {
 	Size int64
 	ModifiedSeconds, ModifiedNanos int64
 	IsDirectory bool
+	VerifyOnly bool
 }
 
 func validMacSyncRelativePath(p string) bool {
@@ -90,7 +91,7 @@ func MacSyncRename(ctx context.Context, request MacSyncRenameRequest) (result er
 	// No retries are permitted after an actual rename attempt or an ambiguous
 	// transport/server result. Each attempt starts with a fresh protected
 	// source handle; the server's no-overwrite rename remains authoritative.
-	verify := func(info os.FileInfo) error {
+	validateIdentity := func(info os.FileInfo) error {
 		stat, ok := info.Sys().(*smb2.FileStat)
 		if !ok || stat.FileId != request.FileID ||
 			info.Mode()&os.ModeSymlink != 0 || info.IsDir() != request.IsDirectory ||
@@ -105,6 +106,45 @@ func MacSyncRename(ctx context.Context, request MacSyncRenameRequest) (result er
 				return errMacSyncSourceMtimeNotReady
 			}
 		}
+		return nil
+	}
+	// Compare exact server-side spellings, not a lookup that may accept an
+	// alias or normalize a trailing space. Only this immediate parent is read.
+	parentPath := path.Dir(request.OldPath)
+	if parentPath == "." {
+		parentPath = ""
+	}
+	serverParent := strings.ReplaceAll(parentPath, "/", "\\")
+	confirmNames := func(renamed bool) error {
+		entries, err := connection.smbShare.ReadDir(serverParent)
+		if err != nil { return err }
+		oldFound, newFound := false, false
+		for _, entry := range entries {
+			if entry.Name() == path.Base(request.OldPath) { oldFound = true }
+			if entry.Name() == path.Base(request.NewPath) { newFound = true }
+		}
+		if (renamed && (oldFound || !newFound)) || (!renamed && (!oldFound || newFound)) {
+			return errors.New("exact server name not confirmed")
+		}
+		return nil
+	}
+	confirmRenamed := func() error {
+		if err := confirmNames(true); err != nil { return err }
+		info, err := connection.smbShare.Lstat(newPath)
+		if err != nil { return err }
+		return validateIdentity(info)
+	}
+	if request.VerifyOnly {
+		err = confirmRenamed()
+		f.putConnection(&connection, err)
+		return err
+	}
+	if err = confirmNames(false); err != nil {
+		f.putConnection(&connection, err)
+		return err
+	}
+	verify := func(info os.FileInfo) error {
+		if err := validateIdentity(info); err != nil { return err }
 		mutationPossible = true
 		return nil
 	}
@@ -130,6 +170,11 @@ func MacSyncRename(ctx context.Context, request MacSyncRenameRequest) (result er
 			err = ctx.Err()
 			break
 		}
+	}
+	if err == nil {
+		// A successful SET_INFO is not enough: prove exact final spelling and
+		// the same identity using independent read-only SMB queries.
+		err = confirmRenamed()
 	}
 	f.putConnection(&connection, err)
 	return err

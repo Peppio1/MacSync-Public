@@ -157,7 +157,7 @@ final class MountedCopyController: ObservableObject {
                 let cycle = try history.cycles(limit:1,finishedOnly:true).first
                 let stats = try cycle.map { try history.totals(cycleID:$0.id).stats } ?? SyncDashboardStats()
                 DispatchQueue.main.async { [weak self] in
-                    guard let self, self.historySessionID==session, !self.active else { return }
+                    guard let self, self.historySessionID==session, !self.active, self.lastRecordedCycle == nil else { return }
                     self.lastRecordedCycle = cycle
                     self.lastCycleStats = stats
                     self.sessionStats = stats
@@ -1800,7 +1800,13 @@ final class MountedCopyController: ObservableObject {
 
     /// Runs after the serial copy queue has drained, including any atomic transfer.
     func afterWorkerStopped(_ completion: @escaping @MainActor () -> Void) {
-        queue.async { DispatchQueue.main.async { completion() } }
+        // Name scans use an independent lane and can still hold a SQLite
+        // writer even after the transfer queue has stopped. Drain both before
+        // resetting settings or restarting the monitor.
+        queue.async { [weak self] in
+            guard let self else { DispatchQueue.main.async { completion() }; return }
+            self.namesQueue.async { DispatchQueue.main.async { completion() } }
+        }
     }
 
     func stop() {

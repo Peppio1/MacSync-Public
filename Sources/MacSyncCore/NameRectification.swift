@@ -296,7 +296,7 @@ public enum NameRectification {
     static func isSharedDestinationFailure(_ error: Error) -> Bool {
         if let smb = error as? SMBNameRectificationError {
             switch smb {
-            case .mountUnavailable, .credentialUnavailable, .timedOut: return true
+            case .mountUnavailable, .credentialUnavailable, .credentialLookupFailed, .credentialAmbiguous, .credentialReadFailed, .timedOut: return true
             case .helperFailed, .notAttempted: return false
             }
         }
@@ -501,6 +501,13 @@ public enum NameRectification {
             if new {
                 let value=try parent.leaf(move.newName)
                 guard move.matches(value,renamed:true) else { throw NameRectificationCheckError.unresolvedState }
+                if move.item.side == .destination && move.binding.volume.fileSystem.lowercased()=="smbfs" {
+                    // Finder's directory cache is not authoritative. Require
+                    // a separate server-side exact spelling and identity read.
+                    try SMBNameRectification.rename(volume:move.binding.volume,parent:parent.directoryURL,
+                        oldName:move.item.name,newName:move.newName,original:value,
+                        verifyOnly:true,shouldContinue:shouldContinue)
+                }
                 return (.renamed,value)
             }
             throw NameRectificationCheckError.unresolvedState
@@ -539,7 +546,7 @@ public enum NameRectification {
         func knownNotAttempted(_ error:Error)->Bool {
             if let smb=error as? SMBNameRectificationError {
                 switch smb {
-                case .notAttempted,.credentialUnavailable,.mountUnavailable: return true
+                case .notAttempted,.credentialUnavailable,.credentialLookupFailed,.credentialAmbiguous,.credentialReadFailed,.mountUnavailable: return true
                 case .helperFailed,.timedOut: return false
                 }
             }
@@ -601,6 +608,10 @@ public enum NameRectification {
                 do {
                     let parent=try parentFor(source)
                     _ = try checkedOriginal(source,parent:parent)
+                    if let target=group.destination, target.binding.volume.fileSystem.lowercased()=="smbfs" {
+                        let remoteParent=try parentFor(target)
+                        try SMBNameRectification.preflight(volume:target.binding.volume,parent:remoteParent.directoryURL)
+                    }
                 } catch SeedVerificationError.cancelled { throw SeedVerificationError.cancelled }
                 catch { try failed(&group,error:error);try finish(group,successful:false);return }
                 try transition(&group,.sourceAttempt)
@@ -611,6 +622,10 @@ public enum NameRectification {
                 if observed.0 == .original {
                     do {
                         let snapshot=try checkedOriginal(source,parent:parent)
+                        if let target=group.destination, target.binding.volume.fileSystem.lowercased()=="smbfs" {
+                            let remoteParent=try parentFor(target)
+                            try SMBNameRectification.preflight(volume:target.binding.volume,parent:remoteParent.directoryURL)
+                        }
                         try forward(source,parent:parent,snapshot:snapshot)
                     } catch {
                         try failed(&group,error:error)
