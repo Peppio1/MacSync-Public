@@ -258,6 +258,7 @@ public struct ArchiveAuditReport: Codable, Equatable, Sendable {
     public var deletionCandidates: Set<String>? = nil
     public var recognizedFiles: Int? = nil
     public var recognizedDirectories: Int? = nil
+    public var recognizedAbsentDeletes: Int? = nil
     public var metadataMatches: Int? = nil
     public var hashMatches: Int? = nil
     public var cachedHashMatches: Int? = nil

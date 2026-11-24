@@ -84,6 +84,34 @@ final class SeededArchiveVerifierTests: XCTestCase {
         XCTAssertTrue(paths.isSuperset(of:["newer.jpg","uncertain.jpg","legacy.jpg","different.jpg"]))
     }
 
+    func testV0192AuditClosesOnlyVerifiedAbsentDeleteJobsWithoutMutation() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        try write("keep on server",to:f.target.appendingPathComponent("extra.jpg"))
+        try write("local",to:f.source.appendingPathComponent("recreated.jpg"))
+        try write("keep alias",to:f.target.appendingPathComponent("Alias.jpg"))
+        _ = try LocalInventory(path:f.db.path).reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        try f.journal.verifyDirectoryBindings([f.mapping],allowNewTarget:true)
+        for name in ["gone.jpg","extra.jpg","recreated.jpg","alias.jpg","unsafe.","newer.jpg"] {
+            _ = try f.journal.enqueue(rootID:"photos",relativePath:name,kind:.delete,origin:.sourceMonitor)
+        }
+        let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
+        var inserted=false
+        let report=try session.auditPreservingQueuedChanges(mode:.quick,repair:true,progress:{ p in
+            if !inserted && p.phase=="Verifica cancellazioni già soddisfatte" {
+                inserted=true
+                _ = try? f.journal.enqueue(rootID:"photos",relativePath:"newer.jpg",kind:.delete,origin:.sourceMonitor)
+            }
+        },reconcileOrdinaryJobs:true)
+        XCTAssertTrue(inserted)
+        XCTAssertEqual(report.recognizedAbsentDeletes,1)
+        let paths=Set(try f.journal.pending().map(\.relativePath))
+        XCTAssertFalse(paths.contains("gone.jpg"))
+        XCTAssertTrue(paths.isSuperset(of:["extra.jpg","recreated.jpg","alias.jpg","unsafe.","newer.jpg"]))
+        XCTAssertTrue(FileManager.default.fileExists(atPath:f.target.appendingPathComponent("extra.jpg").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath:f.target.appendingPathComponent("Alias.jpg").path))
+    }
+
     func testQuickRepairTransactionRollsBackAndRetriesAfterTransientMonitorEvent() throws {
         let f=try fixture()
         defer { try? FileManager.default.removeItem(at:f.base) }

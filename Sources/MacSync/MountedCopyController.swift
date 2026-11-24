@@ -598,7 +598,7 @@ final class MountedCopyController: ObservableObject {
                     self.seedReady = false; self.seedVerifiedCount = 0
                     self.seedInspectedCount = 0; self.seedReadBytes = savedReport.bytesRead
                     self.seedStatus = "Verifica completata: " + String((savedReport.recognizedFiles ?? 0) + (savedReport.recognizedDirectories ?? 0)) + " copie pendenti corrispondenti"
-                    self.auditStatus = "Verifica conclusa: " + String(savedReport.queuedRepairs) + " nuove operazioni accodate; " + String((savedReport.recognizedFiles ?? 0) + (savedReport.recognizedDirectories ?? 0)) + " copie pendenti già soddisfatte" + warning
+                    self.auditStatus = "Verifica conclusa: " + String(savedReport.queuedRepairs) + " nuove operazioni accodate; " + String((savedReport.recognizedFiles ?? 0) + (savedReport.recognizedDirectories ?? 0)) + " copie pendenti già soddisfatte; " + String(savedReport.recognizedAbsentDeletes ?? 0) + " cancellazioni già soddisfatte" + warning
                     self.auditProgress = nil
                     self.auditBusy = false
                     self.maintaining = false

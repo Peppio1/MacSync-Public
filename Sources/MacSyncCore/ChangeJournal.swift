@@ -1140,6 +1140,89 @@ public final class ChangeJournal {
         } catch { try? execute("ROLLBACK;"); throw error }
     }
 
+    /// Close already-absent deletions; no filesystem mutation, no mirror
+    /// authorization change and no increase to actual deletion statistics.
+    /// Caller provides pre-audit IDs absent from both complete inventories.
+    public func acknowledgeAbsentAuditDeletes(_ entries:[QueuedChange],
+        mappings:[MountedFolderMapping],shouldContinue:()->Bool) throws -> Int {
+        guard !entries.isEmpty else { return 0 }
+        try verifyDirectoryBindings(mappings)
+        if try queueRebuildToken() != nil { return 0 }
+        let maps=Dictionary(uniqueKeysWithValues:mappings.map{($0.rootID,$0)})
+        let cache=AuditDirectoryListingCache()
+        // Check only the absent candidates, never walk a remote tree.
+        // A visible alias, symlink, inaccessible parent or ambiguous name
+        // is not proof of absence. No SQLite write lock while reading SMB.
+        func absent(_ path:String,under root:URL) throws -> Bool {
+            var parent=root
+            for part in path.split(separator:"/").map(String.init) {
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                let aliases=try cache.aliases(for:part,in:parent)
+                let url=parent.appendingPathComponent(part)
+                var info=stat()
+                let rc=url.path.withCString{lstat($0,&info)}
+                if rc != 0 {
+                    return errno==ENOENT && aliases.isEmpty
+                }
+                guard aliases.count==1,aliases[0].utf8.elementsEqual(part.utf8),
+                      info.st_mode & mode_t(S_IFMT) != mode_t(S_IFLNK) else { return false }
+                if info.st_mode & mode_t(S_IFMT) != mode_t(S_IFDIR) { return false }
+                parent=url
+            }
+            return false
+        }
+        var verified:[QueuedChange]=[]
+        for job in entries {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            guard job.kind == .delete,let map=maps[job.rootID],
+                  WindowsPathSafety.validRelativePath(job.relativePath),
+                  !FileExclusionPolicy.excludes(job.relativePath,enabled:FileExclusionPolicy.ignoreDSStore) else { continue }
+            do {
+                if try absent(job.relativePath,under:map.source),
+                   try absent(job.relativePath,under:map.target) { verified.append(job) }
+            } catch SeedVerificationError.cancelled { throw SeedVerificationError.cancelled }
+            catch { cache.invalidate() }
+        }
+        try verifyDirectoryBindings(mappings)
+        guard !verified.isEmpty else { return 0 }
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            if try queueRebuildToken() != nil { try execute("COMMIT;");return 0 }
+            let protection=try NameRectification.pendingProtection(journal:self)
+            let stmt=try prepare("""
+                UPDATE change_queue SET completed=1
+                WHERE id=?1 AND root_id=?2 AND relative_path=?3 AND kind='delete' AND completed=0
+                  AND origin IN ('source_monitor','archive_audit')
+                  AND EXISTS(SELECT 1 FROM watched_roots w WHERE w.root_id=?2 AND w.absolute_path=?4)
+                  AND NOT EXISTS(SELECT 1 FROM file_inventory f WHERE f.root_id=?2 AND f.relative_path=?3)
+                  AND NOT EXISTS(SELECT 1 FROM change_queue q WHERE q.root_id=?2 AND q.relative_path=?3
+                    AND q.id<>?1 AND (q.completed=0 OR q.id>?1))
+                  AND NOT EXISTS(SELECT 1 FROM publication_intents p WHERE p.root_id=?2 AND p.relative_path=?3)
+                  AND NOT EXISTS(SELECT 1 FROM transfer_recovery p WHERE p.root_id=?2 AND p.relative_path=?3);
+                """)
+            defer { sqlite3_finalize(stmt) }
+            var count=0
+            for job in verified {
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                guard let map=maps[job.rootID],!protection.protects(rootID:job.rootID,path:job.relativePath) else { continue }
+                let url=try map.fileURL(relativePath:job.relativePath,destination:false)
+                var info=stat()
+                guard url.resolvingSymlinksInPath().path==url.path,
+                      url.path.withCString({lstat($0,&info)}) != 0,errno==ENOENT else { continue }
+                sqlite3_reset(stmt);sqlite3_clear_bindings(stmt)
+                guard sqlite3_bind_int64(stmt,1,job.id)==SQLITE_OK else { throw databaseFailure() }
+                try bind(job.rootID,at:2,in:stmt);try bind(job.relativePath,at:3,in:stmt)
+                try bind(map.source.path,at:4,in:stmt)
+                guard sqlite3_step(stmt)==SQLITE_DONE else { throw databaseFailure() }
+                count+=Int(sqlite3_changes(connection))
+            }
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            try execute("COMMIT;")
+            return count
+        } catch { try? execute("ROLLBACK;");throw error }
+    }
+
     public func watchedRootPath(rootID: String) throws -> String? {
         let stmt = try prepare("""
             SELECT absolute_path FROM watched_roots WHERE root_id=?;

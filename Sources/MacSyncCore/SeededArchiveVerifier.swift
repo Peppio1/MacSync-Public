@@ -577,9 +577,11 @@ public struct SeededArchiveSession: Sendable {
         let journal = try openJournal()
         var pending:[String:QueuedChange]=[:]
         var ambiguous=Set<String>()
+        var pendingDeletes:[QueuedChange]=[]
         let operational = repair && reconcileOrdinaryJobs
         if operational {
-            let upper=try journal.pendingUploadUpperBound() ?? 0
+            let cutoff=try journal.queueSequence()
+            let upper=cutoff
             var cursor:Int64=0
             while true {
                 guard !cancellation.isCancelled else { throw SeedVerificationError.cancelled }
@@ -590,6 +592,16 @@ public struct SeededArchiveSession: Sendable {
                     let key=job.rootID+"\0"+job.relativePath
                     if pending.updateValue(job,forKey:key) != nil { ambiguous.insert(key) }
                 }
+            }
+            var length=Int64.max
+            cursor=0
+            while true {
+                guard !cancellation.isCancelled else { throw SeedVerificationError.cancelled }
+                let page=try journal.pendingDeletePage(afterID:0,throughID:cutoff,
+                    previousLength:length,previousID:cursor,limit:250)
+                guard let last=page.last else { break }
+                pendingDeletes.append(contentsOf:page)
+                length=Int64(last.relativePath.unicodeScalars.count);cursor=last.id
             }
         }
         var matches:[SeedVerifiedMatch]=[]
@@ -614,6 +626,8 @@ public struct SeededArchiveSession: Sendable {
             if operational {
                 let matching=Set(result.findings.lazy.filter{$0.kind == .matching}.map(\.id))
                 matches.removeAll{!matching.contains($0.rootID+"\0"+$0.relativePath)}
+                let observed=Set(result.findings.map(\.id))
+                pendingDeletes.removeAll{observed.contains($0.rootID+"\0"+$0.relativePath)}
             }
             // No destination scan/read during reconciliation. An FSEvents
             // cycle can briefly set ready=false after the expensive audit;
@@ -636,8 +650,14 @@ public struct SeededArchiveSession: Sendable {
                         progress(snapshot)
                         let counts=try journal.acknowledgeOperationalAuditMatches(matches,mappings:mappings,
                             shouldContinue:{cancellation.mayCommit})
-                        result.recognizedFiles=counts.files
-                        result.recognizedDirectories=counts.directories
+                        result.recognizedFiles=(result.recognizedFiles ?? 0)+counts.files
+                        result.recognizedDirectories=(result.recognizedDirectories ?? 0)+counts.directories
+                        var deleteProgress=snapshot
+                        deleteProgress.phase="Verifica cancellazioni già soddisfatte"
+                        progress(deleteProgress)
+                        let deletes=try journal.acknowledgeAbsentAuditDeletes(pendingDeletes,mappings:mappings,
+                            shouldContinue:{cancellation.mayCommit})
+                        result.recognizedAbsentDeletes=deletes
                         break
                     }
                     let counts = try journal.acknowledgeInitialInventoryMatches(
