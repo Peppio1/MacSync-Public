@@ -920,6 +920,51 @@ public final class ChangeJournal {
         }
     }
 
+    /// Persistent, derived name-maintenance queue. Only incompatible local
+    /// leaves with an outstanding upload (including an invalid ancestor of
+    /// a pending child) belong here. Do not duplicate jobs or consult SMB.
+    public func pendingLocalNameRectifications() throws -> [IncompatibleName] {
+        let schema = try prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_name_members';")
+        let available = sqlite3_step(schema)
+        sqlite3_finalize(schema)
+        guard available == SQLITE_ROW || available == SQLITE_DONE else { throw databaseFailure() }
+        // Older test/maintenance databases may have a journal but no monitor
+        // inventory. The worker still applies its independent path validation.
+        guard available == SQLITE_ROW else { return [] }
+        let stmt = try prepare("""
+            SELECT m.root_id,w.absolute_path,m.relative_path,m.kind,
+              CASE WHEN m.reason<>'' THEN m.reason ELSE 'Conflitto fra nomi equivalenti in Windows' END,
+              CASE WHEN m.kind='directory' THEN
+                (SELECT COUNT(*) FROM file_inventory f
+                 WHERE f.root_id=m.root_id AND f.relative_path>=m.relative_path||'/'
+                   AND f.relative_path<m.relative_path||'0')
+              ELSE 0 END
+            FROM source_name_members m JOIN watched_roots w ON w.root_id=m.root_id
+            JOIN source_name_index_ready r ON r.root_id=m.root_id
+            WHERE (m.reason<>'' OR m.conflicting=1)
+              AND (EXISTS(SELECT 1 FROM change_queue q
+                    WHERE q.root_id=m.root_id AND q.relative_path=m.relative_path
+                      AND q.completed=0 AND q.kind='upsert')
+                OR (m.kind='directory' AND EXISTS(SELECT 1 FROM change_queue q
+                    WHERE q.root_id=m.root_id AND q.relative_path>=m.relative_path||'/'
+                      AND q.relative_path<m.relative_path||'0'
+                      AND q.completed=0 AND q.kind='upsert')))
+            ORDER BY m.root_id,m.relative_path;
+            """)
+        defer { sqlite3_finalize(stmt) }
+        var result:[IncompatibleName]=[]
+        var code=sqlite3_step(stmt)
+        while code==SQLITE_ROW {
+            result.append(.init(rootID:columnText(stmt,at:0),rootPath:columnText(stmt,at:1),
+                relativePath:columnText(stmt,at:2),objectKind:columnText(stmt,at:3),
+                side:.source,reason:columnText(stmt,at:4),
+                affectedDescendants:Int(sqlite3_column_int64(stmt,5))))
+            code=sqlite3_step(stmt)
+        }
+        guard code==SQLITE_DONE else { throw databaseFailure() }
+        return result
+    }
+
     public func pendingUploadUpperBound() throws -> Int64? {
         let stmt = try prepare("""
             SELECT MAX(id) FROM change_queue WHERE completed=0 AND kind='upsert';

@@ -260,6 +260,7 @@ public final class MountedFolderCopyWorker {
     private var nextAfterID: Int64 = 0
     private var rectificationScopes: [String: [String]] = [:]
     private var pendingNameProtection = NameRectification.PendingProtection(relations: [])
+    private var pendingLocalNamePaths:[String:Set<String>] = [:]
     private var transferDiagnostics: [String: Double] = [:]
 
     private func recordDuration(_ action: String, since started: Double) {
@@ -363,6 +364,8 @@ public final class MountedFolderCopyWorker {
         // dependent ancestors/descendants are held. All unrelated uploads
         // continue. Bad journal data throws and still stops the entire cycle.
         pendingNameProtection = try NameRectification.pendingProtection(journal: journal)
+        pendingLocalNamePaths = Dictionary(grouping:try journal.pendingLocalNameRectifications(),by: \.rootID)
+            .mapValues { Set($0.map(\.relativePath)) }
         rectificationScopes = try journal.nameRectificationScopes()
         transferDiagnostics = [:]
         return true
@@ -399,9 +402,15 @@ public final class MountedFolderCopyWorker {
                          detail: "Rettifica nomi pendente: percorso protetto, nessuna copia")
                     continue
                 }
-                if !WindowsPathSafety.validRelativePath(job.relativePath) {
+                let blockedNames=pendingLocalNamePaths[job.rootID] ?? []
+                var prefix=""
+                let blockedByName=job.relativePath.split(separator:"/").contains { part in
+                    prefix=prefix.isEmpty ? String(part) : prefix+"/"+part
+                    return blockedNames.contains(prefix)
+                }
+                if blockedByName || !WindowsPathSafety.validRelativePath(job.relativePath) {
                     summary.deferred += 1
-                    emit(.deferred,job:job,mapping:mapping,detail:"Nome incompatibile: correggere in Finder")
+                    emit(.deferred,job:job,mapping:mapping,detail:"Nome incompatibile: in attesa di rettifica locale")
                     if try journal.noteBlockedName(job) {
                         try? log.record(level:.warning,rootID:job.rootID,action:"name_blocked",relativePath:job.relativePath,message:"Nome incompatibile: operazione mantenuta in coda; nessuna copia tentata")
                     }

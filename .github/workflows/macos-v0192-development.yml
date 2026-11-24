@@ -21,6 +21,6 @@ jobs:
           xcodebuild -version
           swift --version
       - name: Local naming and queue regressions
-        run: swift test -Xswiftc -warnings-as-errors --filter 'NameRectificationTests/(testApprovedRules|testNestedRenameAndConflictPreserveData|testV019ManyToOneCollisionLeavesBothOriginals)|V0191MaintenanceTests/(testV0192LocalRectificationCreatesOrdinaryMonitorChangesWithoutAuditHold|testV0192NameIndexTracksManualChangesAndNestedPaths)|IncompatibleNamesTests'
+        run: swift test -Xswiftc -warnings-as-errors --filter 'NameRectificationTests/(testApprovedRules|testNestedRenameAndConflictPreserveData|testV019ManyToOneCollisionLeavesBothOriginals)|V0191MaintenanceTests/(testV0192LocalRectificationCreatesOrdinaryMonitorChangesWithoutAuditHold|testV0192NameIndexTracksManualChangesAndNestedPaths|testV0192DedicatedNameQueueIncludesInvalidAncestorsAndExcludesBaselineOnly)|IncompatibleNamesTests'
       - name: Compile application
         run: swift build -Xswiftc -warnings-as-errors --product MacSync

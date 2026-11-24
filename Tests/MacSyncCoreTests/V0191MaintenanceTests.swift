@@ -133,6 +133,37 @@ final class V0191MaintenanceTests: XCTestCase {
         XCTAssertTrue(try inventory.incompatibleNames(rootID:"demo",sourcePath:source.path).isEmpty)
     }
 
+    func testV0192DedicatedNameQueueIncludesInvalidAncestorsAndExcludesBaselineOnly() throws {
+        let fm=FileManager.default
+        let base=fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let source=base.appendingPathComponent("source"), target=base.appendingPathComponent("target")
+        let bad=source.appendingPathComponent("blocked.")
+        try fm.createDirectory(at:bad,withIntermediateDirectories:true)
+        try fm.createDirectory(at:target,withIntermediateDirectories:true)
+        defer { try? fm.removeItem(at:base) }
+        try Data("baseline".utf8).write(to:source.appendingPathComponent("baseline?"))
+        let db=base.appendingPathComponent("inventory.sqlite").path
+        let inventory=try LocalInventory(path:db)
+        _ = try inventory.reconcile(rootID:"demo",root:source,origin:.initialInventory)
+        let journal=try ChangeJournal(path:db)
+        XCTAssertTrue(try journal.pendingLocalNameRectifications().isEmpty)
+        let child=bad.appendingPathComponent("child.jpg")
+        let independent=source.appendingPathComponent("good.jpg")
+        try Data("blocked".utf8).write(to:child)
+        try Data("good".utf8).write(to:independent)
+        _ = try inventory.reconcile(rootID:"demo",root:source,subtree:child)
+        _ = try inventory.reconcile(rootID:"demo",root:source,subtree:independent)
+        XCTAssertEqual(try ChangeJournal(path:db,readOnly:true).pendingLocalNameRectifications().map(\.relativePath),["blocked."])
+        let map=try MountedFolderMapping(rootID:"demo",source:source,target:target)
+        let worker=try MountedFolderCopyWorker(journal:journal,log:SyncActivityLog(path:db),
+            mappings:[map],minimumStableAge:0)
+        let result=try worker.runCycle(enabled:true)
+        XCTAssertGreaterThanOrEqual(result.deferred,1)
+        XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent("good.jpg")),Data("good".utf8))
+        XCTAssertFalse(fm.fileExists(atPath:target.appendingPathComponent("blocked.").path))
+        XCTAssertEqual(try journal.pendingLocalNameRectifications().map(\.relativePath),["blocked."])
+    }
+
     func testFinalizedTotalsSurviveMissingDetailRow() throws {
         let base=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at:base,withIntermediateDirectories:true)
