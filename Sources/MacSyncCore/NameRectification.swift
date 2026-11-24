@@ -555,10 +555,11 @@ public enum NameRectification {
             group.failure=SyncDiagnostic.describe(error)
             try persist(group)
         }
-        func finish(_ group:CoordinatedGroup,successful:Bool) throws {
+        func finish(_ group:CoordinatedGroup,successful:Bool,restoredSource:Move? = nil) throws {
             let row=group.moves[0].item
             try journal.finishCoordinatedNameGroup(rootID:row.rootID,path:row.relativePath,
-                completed:successful ? group.moves.map { ($0.item,$0.newName) } : [])
+                completed:successful ? group.moves.map { ($0.item,$0.newName) } : [],
+                restoredSource:restoredSource.map { ($0.item,$0.newName,$0.binding.volume) })
             if successful {
                 for move in group.moves {
                     result.renamed+=1
@@ -592,7 +593,7 @@ public enum NameRectification {
             }
             report(source.item,action:"name_rectification_rollback_source",level:.info,
                 detail:"Nome originale ripristinato; nessuna sovrascrittura")
-            try finish(group,successful:false)
+            try finish(group,successful:false,restoredSource:source)
         }
         func drive(_ group:inout CoordinatedGroup) throws {
             if group.stage == .rollbackSource { try rollback(&group);return }

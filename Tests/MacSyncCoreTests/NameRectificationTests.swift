@@ -109,12 +109,17 @@ final class NameRectificationTests:XCTestCase {
             journal:reopened,log:SyncActivityLog(path:db),destinations:["demo":mapping])
         XCTAssertEqual(next.renamed,2)
         XCTAssertTrue(try reopened.hasPendingNameRectification())
+        // Model an audit refreshing the source cache after the first rename
+        // but before the compensating rollback has been resumed.
+        try reopened.saveNameScan(NameScanSnapshot(rootID:"demo",side:.source,
+            rootPath:source.path,volume:DirectoryBinding.read(source).volume,date:Date(),rows:[]))
         let resumed=try NameRectification.executeCoordinated(items:rows("a?.jpg"),roots:["demo":source.path],
             journal:reopened,log:SyncActivityLog(path:db),destinations:["demo":mapping])
         XCTAssertEqual(resumed.renamed,0)
         XCTAssertFalse(try reopened.hasPendingNameRectification())
         XCTAssertTrue(fm.fileExists(atPath:source.appendingPathComponent("a?.jpg").path))
         XCTAssertTrue(fm.fileExists(atPath:target.appendingPathComponent("a?.jpg").path))
+        XCTAssertEqual(try reopened.nameScan(rootID:"demo",side:.source)?.rows.map(\.relativePath),["a?.jpg"])
     }
 
     func testV019ManyToOneCollisionLeavesBothOriginals() throws {

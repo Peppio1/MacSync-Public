@@ -590,7 +590,8 @@ public final class ChangeJournal {
     /// Finish one verified group and patch only the cached rows affected by
     /// its successful rename. Failed/rolled-back rows stay in the list.
     func finishCoordinatedNameGroup(rootID:String,path:String,
-                                    completed:[(item:IncompatibleName,newName:String)]) throws {
+                                    completed:[(item:IncompatibleName,newName:String)],
+                                    restoredSource:(item:IncompatibleName,newName:String,volume:VolumeFingerprint)? = nil) throws {
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
             for entry in completed {
@@ -618,6 +619,34 @@ public final class ChangeJournal {
                             objectKind:row.objectKind,side:row.side,reason:row.reason,
                             affectedDescendants:row.affectedDescendants)
                     }
+                    try saveNameScan(NameScanSnapshot(rootID:cached.rootID,side:cached.side,
+                        rootPath:cached.rootPath,volume:cached.volume,date:cached.date,rows:rows))
+                }
+            }
+            // An audit may have refreshed the cache while the source had its
+            // temporary corrected spelling. Restore the original cached row
+            // only after the engine has verified the compensating rename.
+            if let restored = restoredSource {
+                let item = restored.item
+                guard item.side == .source, item.rootID == rootID, item.relativePath == path else {
+                    throw JournalError.database("Ripristino rettifica incoerente")
+                }
+                if let cached = try nameScan(rootID:rootID,side:.source),
+                   cached.rootPath == item.rootPath, cached.volume == restored.volume {
+                    let parent = path.split(separator:"/").dropLast().joined(separator:"/")
+                    let renamed = parent.isEmpty ? restored.newName : parent+"/"+restored.newName
+                    var seen = Set<String>()
+                    var rows = cached.rows.compactMap { row -> IncompatibleName? in
+                        let updated: IncompatibleName
+                        if item.isDirectory, row.relativePath.hasPrefix(renamed+"/") {
+                            updated = IncompatibleName(rootID:row.rootID,rootPath:row.rootPath,
+                                relativePath:path+String(row.relativePath.dropFirst(renamed.count)),
+                                objectKind:row.objectKind,side:row.side,reason:row.reason,
+                                affectedDescendants:row.affectedDescendants)
+                        } else { updated = row }
+                        return seen.insert(updated.relativePath).inserted ? updated : nil
+                    }
+                    if seen.insert(path).inserted { rows.append(item) }
                     try saveNameScan(NameScanSnapshot(rootID:cached.rootID,side:cached.side,
                         rootPath:cached.rootPath,volume:cached.volume,date:cached.date,rows:rows))
                 }
