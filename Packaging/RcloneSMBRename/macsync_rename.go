@@ -115,23 +115,34 @@ func MacSyncRename(ctx context.Context, request MacSyncRenameRequest) (result er
 		parentPath = ""
 	}
 	serverParent := strings.ReplaceAll(parentPath, "/", "\\")
-	confirmNames := func(renamed bool) error {
+	confirmNames := func(renamed bool) (os.FileInfo, error) {
 		entries, err := connection.smbShare.ReadDir(serverParent)
-		if err != nil { return err }
-		oldFound, newFound := false, false
+		if err != nil { return nil, err }
+		var oldEntry, newEntry os.FileInfo
 		for _, entry := range entries {
-			if entry.Name() == path.Base(request.OldPath) { oldFound = true }
-			if entry.Name() == path.Base(request.NewPath) { newFound = true }
+			if entry.Name() == path.Base(request.OldPath) {
+				if oldEntry != nil { return nil, errors.New("duplicate old server name") }
+				oldEntry = entry
+			}
+			if entry.Name() == path.Base(request.NewPath) {
+				if newEntry != nil { return nil, errors.New("duplicate new server name") }
+				newEntry = entry
+			}
 		}
-		if (renamed && (oldFound || !newFound)) || (!renamed && (!oldFound || newFound)) {
-			return errors.New("exact server name not confirmed")
+		if renamed {
+			if oldEntry != nil || newEntry == nil { return nil, errors.New("exact final server name not confirmed") }
+			return newEntry, nil
 		}
-		return nil
+		if oldEntry == nil || newEntry != nil { return nil, errors.New("exact original server name not confirmed") }
+		return oldEntry, nil
 	}
 	confirmRenamed := func() error {
-		if err := confirmNames(true); err != nil { return err }
-		info, err := connection.smbShare.Lstat(newPath)
+		info, err := confirmNames(true)
 		if err != nil { return err }
+		// go-smb2 Lstat returns CREATE metadata with FileId unset.
+		// QUERY_DIRECTORY FileIdBothDirectoryInformation supplies both
+		// the exact name and persistent file ID in the same server record.
+		// Do not weaken the identity, birth time, size or mtime checks.
 		return validateIdentity(info)
 	}
 	if request.VerifyOnly {
@@ -139,7 +150,7 @@ func MacSyncRename(ctx context.Context, request MacSyncRenameRequest) (result er
 		f.putConnection(&connection, err)
 		return err
 	}
-	if err = confirmNames(false); err != nil {
+	if _, err = confirmNames(false); err != nil {
 		f.putConnection(&connection, err)
 		return err
 	}
