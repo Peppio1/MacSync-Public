@@ -358,7 +358,7 @@ final class MacSyncRuntime: ObservableObject {
         confirmation.informativeText="Versione attuale: "+installed+"\nVersione precedente: "+package.version+"\n\nMacSync terminerà le attività, creerà un backup dell’archivio corrente e verificherà il pacchetto firmato. Il database non verrà sostituito. Dopo il riavvio copie e mirror resteranno disattivati."
         confirmation.addButton(withTitle:"Annulla")
         confirmation.addButton(withTitle:"Conferma ripristino")
-        guard confirmation.runModal()==.alertSecondButtonReturn else { return }
+        guard confirmation.runModal() == .alertSecondButtonReturn else { return }
         preparingSignedUpdate=true
         requestShutdown { [weak self] in
             guard let self else { return }
