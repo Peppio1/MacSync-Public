@@ -131,6 +131,8 @@ jobs:
           (cd dist && shasum -a 256 "$zip" > "$zip.sha256")
       - name: Create graphical DMG and verify mounted contents
         run: bash Packaging/build-dmg.sh dist/MacSync.app "$RUNNER_TEMP/macsync-branding" dist "$RUNNER_TEMP/macsync-packaging/bin/python"
+      - name: Build debug test bundle required by isolated Sparkle recovery laboratory
+        run: swift build --build-tests -Xswiftc -warnings-as-errors
       - name: Validate Sparkle 2.10.0 with disposable signing keys
         run: |
           set -euo pipefail
