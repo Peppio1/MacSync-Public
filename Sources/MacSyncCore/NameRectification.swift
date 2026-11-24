@@ -13,7 +13,16 @@ public enum NameRectification {
                 result += "-"
             } else { result.unicodeScalars.append(scalar) }
         }
-        while result.hasSuffix(" ") || result.hasSuffix(".") { result.removeLast() }
+        // Remove spaces from the trailing Windows-incompatible suffix and
+        // preserve every trailing dot as a hyphen. Keep the previous refusal
+        // of empty, reserved-device and managed names after trimming.
+        var trailingDots = 0
+        while result.hasSuffix(" ") || result.hasSuffix(".") {
+            if result.hasSuffix(".") { trailingDots += 1 }
+            result.removeLast()
+        }
+        guard WindowsPathSafety.validComponent(result) else { return nil }
+        result += String(repeating: "-", count: trailingDots)
         guard WindowsPathSafety.validComponent(result),result != name else { return nil }
         return result
     }

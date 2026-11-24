@@ -157,7 +157,12 @@ final class NameRectificationTests:XCTestCase {
     }
 
     func testApprovedRules() {
-        XCTAssertEqual(NameRectification.proposedName("photo  . "),"photo")
+        XCTAssertEqual(NameRectification.proposedName("photo  . "),"photo-")
+        XCTAssertEqual(NameRectification.proposedName("Foto12345."),"Foto12345-")
+        XCTAssertEqual(NameRectification.proposedName("Samsung A56..."),"Samsung A56---")
+        XCTAssertEqual(NameRectification.proposedName("Samsung A56. "),"Samsung A56-")
+        XCTAssertEqual(NameRectification.proposedName("Foto.jpg."),"Foto.jpg-")
+        XCTAssertEqual(NameRectification.proposedName("Foto12345   "),"Foto12345")
         XCTAssertEqual(NameRectification.proposedName("Caffè:frontale?.jpg"),"Caffè-frontale-.jpg")
         XCTAssertEqual(NameRectification.proposedName("name.psd "),"name.psd")
         for name in ["CON.jpg","NUL ","COM1.",".",".."," . ",".macsync-staging","already valid"] {
