@@ -48,6 +48,39 @@ func validMacSyncRelativePath(p string) bool {
 	return true
 }
 
+// macSyncSFMLeaf mirrors the pinned go-smb2 SFM mapping for a single
+// macOS-visible component. Use raw QUERY_DIRECTORY records to distinguish
+// the literal spelling from the encoded one; never enable global decoding
+// that could collapse two distinct on-server names into one.
+func macSyncSFMLeaf(name string) string {
+	runes := []rune(name)
+	for i, r := range runes {
+		switch {
+		case r >= 1 && r <= 31:
+			runes[i] = r + 0xF000
+		case r == '"':
+			runes[i] = 0xF020
+		case r == '*':
+			runes[i] = 0xF021
+		case r == ':':
+			runes[i] = 0xF022
+		case r == '<':
+			runes[i] = 0xF023
+		case r == '>':
+			runes[i] = 0xF024
+		case r == '?':
+			runes[i] = 0xF025
+		case r == '|':
+			runes[i] = 0xF027
+		case r == ' ' && i == len(runes)-1:
+			runes[i] = 0xF028
+		case r == '.' && i == len(runes)-1:
+			runes[i] = 0xF029
+		}
+	}
+	return string(runes)
+}
+
 // MacSyncRename issues a single checked SMB rename. It never calls the
 // transfer layer, which is allowed to retry with a copy and delete.
 func MacSyncRename(ctx context.Context, request MacSyncRenameRequest) (result error) {
@@ -81,9 +114,16 @@ func MacSyncRename(ctx context.Context, request MacSyncRenameRequest) (result er
 	if err != nil {
 		return err
 	}
-	// The names are already taken from the mounted directory. Avoid rclone's
-	// filename encoding, which would change a literal trailing space.
-	oldPath := strings.ReplaceAll(request.OldPath, "/", "\\")
+	// Keep raw wire names. Only the old leaf may have a different SFM
+	// spelling; resolve it from an exact server listing below. Never guess
+	// an alias for a parent directory or rewrite a compatible destination.
+	oldLeaf := path.Base(request.OldPath)
+	mappedOld := macSyncSFMLeaf(oldLeaf)
+	newLeaf := path.Base(request.NewPath)
+	if mappedOld == newLeaf || macSyncSFMLeaf(newLeaf) != newLeaf {
+		f.putConnection(&connection, os.ErrInvalid)
+		return os.ErrInvalid
+	}
 	newPath := strings.ReplaceAll(request.NewPath, "/", "\\")
 	// Most items complete in a single request. Only a SOURCE mtime mismatch
 	// is retried, because RenameNoReplace checks the same opened SMB handle
@@ -120,11 +160,11 @@ func MacSyncRename(ctx context.Context, request MacSyncRenameRequest) (result er
 		if err != nil { return nil, err }
 		var oldEntry, newEntry os.FileInfo
 		for _, entry := range entries {
-			if entry.Name() == path.Base(request.OldPath) {
-				if oldEntry != nil { return nil, errors.New("duplicate old server name") }
+			if entry.Name() == oldLeaf || entry.Name() == mappedOld {
+				if oldEntry != nil { return nil, errors.New("ambiguous literal and SFM original names") }
 				oldEntry = entry
 			}
-			if entry.Name() == path.Base(request.NewPath) {
+			if entry.Name() == newLeaf {
 				if newEntry != nil { return nil, errors.New("duplicate new server name") }
 				newEntry = entry
 			}
@@ -150,10 +190,23 @@ func MacSyncRename(ctx context.Context, request MacSyncRenameRequest) (result er
 		f.putConnection(&connection, err)
 		return err
 	}
-	if _, err = confirmNames(false); err != nil {
+	entry, err := confirmNames(false)
+	if err != nil {
 		f.putConnection(&connection, err)
 		return err
 	}
+	// The identity from the mounted client must agree with the exact
+	// server entry before we choose the raw wire spelling. Fresh file
+	// mtime convergence is still handled by the protected opened handle.
+	stat, ok := entry.Sys().(*smb2.FileStat)
+	if !ok || stat.FileId != request.FileID ||
+		entry.Mode()&os.ModeSymlink != 0 || entry.IsDir() != request.IsDirectory ||
+		!stat.CreationTime.Equal(time.Unix(request.CreatedSeconds, request.CreatedNanos)) {
+		err = errors.New("original server identity could not be confirmed")
+		f.putConnection(&connection, err)
+		return err
+	}
+	oldPath := strings.ReplaceAll(path.Join(parentPath, entry.Name()), "/", "\\")
 	verify := func(info os.FileInfo) error {
 		if err := validateIdentity(info); err != nil { return err }
 		mutationPossible = true
