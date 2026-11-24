@@ -36,7 +36,7 @@ final class IncompatibleNamesTests:XCTestCase {
         try FileManager.default.createSymbolicLink(at:leaf,withDestinationURL:root.appendingPathComponent("other"))
         XCTAssertThrowsError(try issue.revealURL(expectedRoot:root.path))
     }
-    func testDedicatedScanAndAuditShareRowsAndCacheSurvivesReopen() throws {
+    func testAuditCollectsOnlySourceNamesAndSourceCacheSurvivesReopen() throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             .resolvingSymlinksInPath()
         let source = base.appendingPathComponent("source")
@@ -53,7 +53,9 @@ final class IncompatibleNamesTests:XCTestCase {
         if !mapping.targetVolume.isStrongIdentity { throw XCTSkip("Volume identity unavailable") }
         let audit = try ArchiveAudit(journal: journal, mappings: [mapping]).run(mode: .quick)
         let snapshots = try XCTUnwrap(audit.nameScans)
-        XCTAssertEqual(snapshots.count, 2)
+        XCTAssertEqual(snapshots.count, 1)
+        XCTAssertEqual(snapshots.first?.side, .source)
+        XCTAssertTrue(audit.findings.contains { $0.relativePath == "target?" && $0.kind == .extra })
         for snapshot in snapshots {
             let standalone = try NameScanSnapshot.scan(rootID: "demo", side: snapshot.side,
                 root: snapshot.side == .source ? source : target, volume: snapshot.volume,
@@ -62,7 +64,7 @@ final class IncompatibleNamesTests:XCTestCase {
             try journal.saveNameScan(snapshot)
             XCTAssertEqual(try ChangeJournal(path: database).nameScan(rootID: "demo", side: snapshot.side), snapshot)
         }
-        XCTAssertEqual(snapshots.flatMap(\.rows).map(\.relativePath), ["source ", "target?"])
+        XCTAssertEqual(snapshots.flatMap(\.rows).map(\.relativePath), ["source "])
         try journal.invalidateNameScan(rootID: "demo", side: .destination)
         XCTAssertNil(try journal.nameScan(rootID: "demo", side: .destination))
         XCTAssertNotNil(try journal.nameScan(rootID: "demo", side: .source))
