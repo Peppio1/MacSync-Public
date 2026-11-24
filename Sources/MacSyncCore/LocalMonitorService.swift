@@ -161,8 +161,10 @@ public final class LocalMonitorService {
     /// Invoked only by the independent serial transfer queue, before any
     /// remote operations. FSEvents remains running; its queued events and
     /// this targeted inventory update use the same serial writer.
-    public func rectifyQueuedNames(_ approved:[IncompatibleName],
-                                   shouldContinue:()->Bool) throws {
+    @discardableResult
+    public func rectifyQueuedNames(_ approved:[IncompatibleName], pendingOnly:Bool = true,
+                                   onProgress:(Int,Int)->Void = {_,_ in},
+                                   shouldContinue:()->Bool) throws -> NameRectification.Result {
         try queue.sync {
             guard let inventory, let generation=activeGeneration,
                   let request=activeRequest, let databasePath=activeDatabasePath,
@@ -170,11 +172,13 @@ public final class LocalMonitorService {
                 throw SeedVerificationError.cancelled
             }
             let journal=try ChangeJournal(path:databasePath)
-            let current=Dictionary(uniqueKeysWithValues:try journal.pendingLocalNameRectifications().map{($0.id,$0)})
+            let rows = pendingOnly ? try journal.pendingLocalNameRectifications() :
+                try roots.flatMap { try inventory.incompatibleNames(rootID:$0.id,sourcePath:$0.url.path) }
+            let current=Dictionary(uniqueKeysWithValues:rows.map{($0.id,$0)})
             let selected=approved.filter { row in
                 current[row.id] == row && NameRectification.proposedName(row.name) != nil
             }
-            guard !selected.isEmpty else { return }
+            guard !selected.isEmpty else { return NameRectification.Result() }
             let localRoots=Dictionary(uniqueKeysWithValues:roots.map{($0.id,$0.url.path)})
             guard selected.allSatisfy({localRoots[$0.rootID] == $0.rootPath}) else {
                 throw MountedCopyError.invalidMapping
@@ -185,7 +189,7 @@ public final class LocalMonitorService {
                 log.cycleID=UUID().uuidString
                 let result=try NameRectification.executeCoordinated(items:selected,roots:localRoots,
                     journal:journal,log:log,destinations:[:],onlySide:.source,normalLocalRename:true,
-                    shouldContinue:{!request.isCancelled && shouldContinue()})
+                    onProgress:onProgress,shouldContinue:{!request.isCancelled && shouldContinue()})
                 // Even after Stop, reconcile names already changed. A
                 // canceled monitor generation instead remains fail-closed.
                 for root in roots {
@@ -212,6 +216,7 @@ public final class LocalMonitorService {
                 guard !request.isCancelled else { throw SeedVerificationError.cancelled }
                 safetyGate.setReady(true,generation:generation)
                 report("Rettifica locale: \(result.sourceRenamed) rinominati · inventario aggiornato",active:true)
+                return result
             } catch {
                 recoveryRequired=true
                 safetyGate.fail(generation:generation,reason:"Rettifica locale: inventario da riconciliare")

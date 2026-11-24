@@ -218,6 +218,7 @@ final class MountedCopyController: ObservableObject {
     func rectifyNamesAfterDrain(items:[IncompatibleName],
                                 pairs:[(id:String,path:String,destination:String,expected:VolumeFingerprint?)],
                                 token:SeedVerificationCancellation,
+                                liveMonitor:LocalMonitorService? = nil,
                                 completion:@escaping @MainActor (Bool)->Void) {
         guard !previewOnly,!rectifyingNames else { completion(false);return }
         rectifyingNames=true; rectificationStatus="Verifica e rettifica dei nomi in corso…"
@@ -237,13 +238,21 @@ final class MountedCopyController: ObservableObject {
                 let log = try SyncActivityLog(path: db)
                 log.cycleID = UUID().uuidString
                 var lastProgress = -Double.infinity
-                let result=try NameRectification.executeCoordinated(items:items,roots:roots,journal:journal,log:log,
-                    destinations:[:], onlySide:.source, normalLocalRename:true, onProgress: { checked, total in
+                let progress:(Int,Int)->Void = { checked, total in
                         let now = ProcessInfo.processInfo.systemUptime
                         guard total > 0, checked == total || now - lastProgress >= 0.15 else { return }
                         lastProgress = now
                         DispatchQueue.main.async { [weak self] in self?.rectificationProgress = (checked, total) }
-                    }, shouldContinue:{!token.isCancelled})
+                    }
+                let result:NameRectification.Result
+                if let liveMonitor {
+                    result=try liveMonitor.rectifyQueuedNames(items,pendingOnly:false,onProgress:progress,
+                        shouldContinue:{!token.isCancelled})
+                } else {
+                    result=try NameRectification.executeCoordinated(items:items,roots:roots,journal:journal,log:log,
+                        destinations:[:],onlySide:.source,normalLocalRename:true,onProgress:progress,
+                        shouldContinue:{!token.isCancelled})
+                }
                 let sides = try NameRectification.pendingSideSummary(journal: journal)
                 pending = try journal.hasPendingNameRectification()
                 unilateralHold = try journal.unilateralNameAuditRequired()

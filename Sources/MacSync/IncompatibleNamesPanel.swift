@@ -84,10 +84,6 @@ struct IncompatibleNamesPanel:View {
                     .help("Seleziona tutti i nomi rettificabili delle sorgenti, anche fuori dalla pagina corrente")
                     .disabled(!current || namePage?.selectableIDs.isEmpty != false || !canSelect)
                 Spacer()
-                if runtime.rectificationPending {
-                    Button("Riprendi pendenti") { runtime.resumeNameRectification() }
-                        .disabled(!canRectify || copy.active)
-                }
                 Button(selectionCurrent ? "Rettifica nomi (\(chosen.count))" : "Calcolo selezione…") {
                     guard selectionCurrent, !chosen.isEmpty else { return }
                     confirmation=NameConfirmation(items:chosen)
@@ -106,7 +102,7 @@ struct IncompatibleNamesPanel:View {
             } else if !copy.rectificationStatus.isEmpty {
                 Text(copy.rectificationStatus).font(.caption).foregroundStyle(.secondary)
             } else if runtime.rectificationPending {
-                Text("Alcune rettifiche sono in sospeso. Puoi selezionare singole voci o riprendere le operazioni pendenti.")
+                Text("Alcune rettifiche sono in sospeso. Seleziona le voci interessate e conferma Rettifica nomi.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let started = copy.nameScanStarted {

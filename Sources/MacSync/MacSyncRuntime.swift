@@ -84,7 +84,7 @@ final class MacSyncRuntime: ObservableObject {
         }
         let localMaintenance=model.localNameMaintenanceService
         copy.rectifyDuringCycle = { items, cancellation in
-            try localMaintenance.rectifyQueuedNames(items,shouldContinue:{!cancellation.isCancelled})
+            _ = try localMaintenance.rectifyQueuedNames(items,shouldContinue:{!cancellation.isCancelled})
         }
         copy.onQueueChanged = { [weak self] in
             guard let self, !self.shuttingDown else { return }
@@ -568,6 +568,7 @@ final class MacSyncRuntime: ObservableObject {
     private func performNameRectification(_ approved: [IncompatibleName]) {
         rectificationRevision += 1
         let pairs = model.configuredPairs()
+        let keepMonitor = model.monitoring && model.safetyGate.isReady
         // This does NOT authorize automatic copies for the first time.
         // Preserve only the earlier explicit choice through maintenance.
         let restoreAutomaticCopies = copy.automaticCopiesEnabled && !suspendedUntilNextLaunch
@@ -576,12 +577,17 @@ final class MacSyncRuntime: ObservableObject {
         rectificationCancellationRequested=false
         let token=SeedVerificationCancellation()
         folderEditCancellation=token
-        stopAllOperations()
+        if keepMonitor {
+            stopCopiesForCurrentLaunch()
+            auditRevision += 1
+            auditTimer?.invalidate(); auditTimer=nil; nextAuditAt=nil
+            copy.cancelNameScan()
+        } else { stopAllOperations() }
         copy.setAutomaticCopiesEnabled(false)
         copy.invalidateSeedReport()
         copy.afterWorkerStopped { [weak self] in
             guard let self else { return }
-            self.model.afterMonitorStopped { [weak self] in
+            let proceed: @MainActor () -> Void = { [weak self] in
                 guard let self else { return }
                 self.preparingRectification=false
                 if self.shuttingDown || token.isCancelled {
@@ -589,7 +595,8 @@ final class MacSyncRuntime: ObservableObject {
                     self.rectificationCancellationRequested=false
                     self.finishShutdownIfReady();return
                 }
-                self.copy.rectifyNamesAfterDrain(items:approved,pairs:pairs,token:token) { [weak self] pending in
+                self.copy.rectifyNamesAfterDrain(items:approved,pairs:pairs,token:token,
+                    liveMonitor:keepMonitor ? self.model.localNameMaintenanceService : nil) { [weak self] pending in
                     guard let self else { return }
                     self.folderConfigurationBusy=false;self.folderEditCancellation=nil
                     self.rectificationCancellationRequested=false
@@ -600,7 +607,8 @@ final class MacSyncRuntime: ObservableObject {
                             self.finishShutdownIfReady()
                             return
                         }
-                        self.model.startMonitoring()
+                        if !keepMonitor || !self.model.safetyGate.isReady { self.model.startMonitoring() }
+                        else { self.model.refreshPendingCount() }
                         if restoreAutomaticCopies && !token.isCancelled {
                             self.suspendedUntilNextLaunch = false
                             self.copy.restorePreviouslyAuthorizedAutomaticCopies()
@@ -614,6 +622,8 @@ final class MacSyncRuntime: ObservableObject {
                     self.finishShutdownIfReady()
                 }
             }
+            if keepMonitor { proceed() }
+            else { self.model.afterMonitorStopped { proceed() } }
         }
     }
 
