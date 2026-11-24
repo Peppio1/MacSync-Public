@@ -200,28 +200,23 @@ final class MirrorDeletionTests: XCTestCase {
             try f.journal.markCompleted(id: job.id)
         }
         try f.journal.verifyDirectoryBindings([f.mapping], allowNewTarget: true)
-        let rows = IncompatibleName.Side.allCases.map { side in
-            IncompatibleName(rootID: "photos",
-                rootPath: (side == .source ? f.source : f.destination).path,
-                relativePath: old, objectKind: "file", side: side, reason: "Incompatible")
-        }
+        let row=IncompatibleName(rootID:"photos",rootPath:f.source.path,
+            relativePath:old,objectKind:"file",side:.source,reason:"Incompatible")
         let collision = f.destination.appendingPathComponent(new)
-        let first = try NameRectification.execute(items: rows,
-            roots: ["photos": f.source.path], journal: f.journal, log: f.log,
-            destinations: ["photos": f.mapping],
-            onProgress: { checked, _ in
-                if checked == 0 {
-                    do { try occupiedBytes.write(to: collision) }
-                    catch { XCTFail("Fixture collision failed: \(error)") }
-                }
+        try occupiedBytes.write(to:collision)
+        let first=try NameRectification.executeLocal(items:[row],roots:["photos":f.source.path],
+            journal:f.journal,log:f.log,shouldContinue:{
+                (try? f.journal.hasPendingNameRectification()) == false
             })
-        XCTAssertEqual(first.renamed, 1)
-        XCTAssertEqual(first.failed, 1)
+        XCTAssertTrue(first.cancelled)
         XCTAssertTrue(try f.journal.hasPendingNameRectification())
-        _ = try LocalInventory(path: f.database).reconcile(rootID: "photos", root: f.source)
+        // Simulate an operator changing the local path while the persisted
+        // intent remains unresolved. Its old and new paths stay protected.
+        try fm.moveItem(at:f.source.appendingPathComponent(old),to:f.source.appendingPathComponent(new))
+        _ = try LocalInventory(path:f.database).reconcile(rootID:"photos",root:f.source)
         let mirror = try worker(f, recover: false)
         // Source disappearance queues a valid DELETE for the renamed path;
-        // the known outstanding remote rename must protect it.
+        // the outstanding local rename intent must protect it.
         try deleteSource(f, name: new)
         try deleteSource(f, name: "photo0.dng")
         let result = try mirror.runOnce(maxFiles: 25)

@@ -188,8 +188,8 @@ public final class LocalMonitorService {
             do {
                 let log=try SyncActivityLog(path:databasePath)
                 log.cycleID=UUID().uuidString
-                let result=try NameRectification.executeCoordinated(items:selected,roots:localRoots,
-                    journal:journal,log:log,destinations:[:],onlySide:.source,normalLocalRename:true,
+                let result=try NameRectification.executeLocal(items:selected,roots:localRoots,
+                    journal:journal,log:log,
                     onProgress:onProgress,shouldContinue:{!request.isCancelled && shouldContinue()})
                 // Even after Stop, reconcile names already changed. A
                 // canceled monitor generation instead remains fail-closed.

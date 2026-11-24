@@ -249,8 +249,8 @@ final class MountedCopyController: ObservableObject {
                     result=try liveMonitor.rectifyQueuedNames(items,pendingOnly:false,onProgress:progress,
                         shouldContinue:{!token.isCancelled})
                 } else {
-                    result=try NameRectification.executeCoordinated(items:items,roots:roots,journal:journal,log:log,
-                        destinations:[:],onlySide:.source,normalLocalRename:true,onProgress:progress,
+                    result=try NameRectification.executeLocal(items:items,roots:roots,journal:journal,log:log,
+                        onProgress:progress,
                         shouldContinue:{!token.isCancelled})
                 }
                 let sides = try NameRectification.pendingSideSummary(journal: journal)

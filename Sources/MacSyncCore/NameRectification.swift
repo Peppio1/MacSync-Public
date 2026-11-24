@@ -254,82 +254,6 @@ public enum NameRectification {
             destinationPending: pending.relations.filter { $0.side == .destination }.count)
     }
 
-    /// SMB metadata from a just-closed Finder write can still be cached.
-    /// Capture the persistent plan only after a fresh file has had time to
-    /// settle. This is read-only: no timestamp is synthesized and no
-    /// mismatch is tolerated. Older files pay no additional delay.
-    static func stableSMBSnapshot(parent: AnchoredDirectory, oldName: String,
-                                  shouldContinue: () -> Bool) throws -> stat {
-        let initial = try parent.leaf(oldName)
-        guard (initial.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG) else { return initial }
-        func modifiedAt(_ value: stat) -> Double {
-            Double(value.st_mtimespec.tv_sec) +
-                Double(value.st_mtimespec.tv_nsec) / 1_000_000_000
-        }
-        // Old, already-settled files are never delayed. For a recent file,
-        // require an exact pair of snapshots once its last modification is
-        // at least four seconds old. The five-second total cap also prevents
-        // an actively modified file from delaying the entire batch.
-        let initialAge = Date().timeIntervalSince1970 - modifiedAt(initial)
-        guard initialAge >= 0 && initialAge < 4 else { return initial }
-        let deadline = ProcessInfo.processInfo.systemUptime + 5
-        var candidate = initial
-        while true {
-            guard shouldContinue() else { throw SeedVerificationError.cancelled }
-            guard ProcessInfo.processInfo.systemUptime < deadline else {
-                throw MountedCopyError.sourceChanging
-            }
-            if Date().timeIntervalSince1970 - modifiedAt(candidate) >= 4 {
-                let a = try parent.leaf(oldName)
-                Thread.sleep(forTimeInterval: 0.125)
-                guard shouldContinue() else { throw SeedVerificationError.cancelled }
-                let b = try parent.leaf(oldName)
-                let unchanged = a.st_ino == b.st_ino && a.st_mode == b.st_mode &&
-                    a.st_birthtimespec.tv_sec == b.st_birthtimespec.tv_sec &&
-                    a.st_birthtimespec.tv_nsec == b.st_birthtimespec.tv_nsec &&
-                    a.st_size == b.st_size &&
-                    a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec &&
-                    a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec &&
-                    a.st_ctimespec.tv_sec == b.st_ctimespec.tv_sec &&
-                    a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec
-                if unchanged && Date().timeIntervalSince1970 - modifiedAt(b) >= 4 { return b }
-                candidate = b
-            } else {
-                Thread.sleep(forTimeInterval: 0.125)
-                candidate = try parent.leaf(oldName)
-            }
-        }
-    }
-
-    /// A shared destination outage must not trigger an SMB helper invocation
-    /// for every remaining file in the same batch. Only infrastructure
-    /// failures qualify: a file-specific collision, stale fingerprint or
-    /// ambiguous helper response remains isolated to that file.
-    static func isSharedDestinationFailure(_ error: Error) -> Bool {
-        if let smb = error as? SMBNameRectificationError {
-            switch smb {
-            case .mountUnavailable, .credentialUnavailable, .credentialLookupFailed, .credentialAmbiguous, .credentialReadFailed, .timedOut: return true
-            case .helperFailed, .notAttempted: return false
-            }
-        }
-        if let copy = error as? MountedCopyError {
-            switch copy {
-            case .invalidMapping, .rootUnavailable, .volumeChanged, .rcloneUnavailable,
-                 .rcloneLaunchFailed: return true
-            default: return false
-            }
-        }
-        let nsError = error as NSError
-        if nsError.domain == NSPOSIXErrorDomain {
-            return [Int(ENOTCONN), Int(ETIMEDOUT), Int(ENETDOWN),
-                    Int(ENETUNREACH), Int(EHOSTDOWN), Int(EHOSTUNREACH)].contains(nsError.code)
-        }
-        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? Error {
-            return isSharedDestinationFailure(underlying)
-        }
-        return false
-    }
-
     /// Original rows remain visible even after a partially successful rename.
     public static func pendingCoordinatedRows(journal:ChangeJournal) throws -> [IncompatibleName] {
         _ = try pendingProtection(journal:journal)
@@ -355,18 +279,13 @@ public enum NameRectification {
         return byID.values.sorted{$0.id<$1.id}
     }
 
-    /// One exact relative path is a transaction-like maintenance unit.
-    /// Two filesystems cannot commit atomically: persist every intent before
-    /// mutating and compensate on the local Mac only after a definite failure.
-    /// A lost remote result is never treated as proof of failure.
-    public static func executeCoordinated(items:[IncompatibleName],roots:[String:String],
-                                          journal:ChangeJournal,log:SyncActivityLog,
-                                          destinations:[String:MountedFolderMapping],
-                                          onlySide:IncompatibleName.Side? = nil,
-                                          normalLocalRename:Bool = false,
-                                          onProgress:(Int,Int)->Void = {_,_ in},
-                                          beforeDestination:()->Void = {},
-                                          shouldContinue:()->Bool = {true}) throws -> Result {
+    /// Rectify only local source names. Persist each local intent before
+    /// the exclusive rename; retain uncertain states for explicit recovery.
+    /// No destination mapping, credentials or remote execution is accepted.
+    public static func executeLocal(items:[IncompatibleName],roots:[String:String],
+                                    journal:ChangeJournal,log:SyncActivityLog,
+                                    onProgress:(Int,Int)->Void = {_,_ in},
+                                    shouldContinue:()->Bool = {true}) throws -> Result {
         var result=Result()
         func key(_ item:IncompatibleName)->String { item.rootID+"\0"+item.relativePath }
         func check() throws {
@@ -376,27 +295,16 @@ public enum NameRectification {
             try? log.record(level:level,rootID:item.rootID,action:action,
                 relativePath:SyncDiagnostic.clean(item.relativePath),message:item.side.label+" · "+detail)
         }
-        guard !normalLocalRename || (onlySide == .source && !items.isEmpty && destinations.isEmpty && items.allSatisfy { $0.side == .source }) else {
+        guard !items.isEmpty,items.allSatisfy({$0.side == .source}) else {
             throw MountedCopyError.invalidMapping
         }
-        // Legacy plans cannot retroactively recover a snapshot of a side
-        // already retired by the old engine. Preserve their original evidence
-        // and permit explicit recovery without blocking new disjoint groups.
-        if items.isEmpty, try journal.pendingNameRectification() != nil {
-            result=try execute(items:[],roots:roots,journal:journal,log:log,
-                destinations:destinations,onProgress:onProgress,shouldContinue:shouldContinue)
-            if result.cancelled { return result }
-        }
+        // Legacy remote plans are read-only protection. Do not resume them
+        // using this engine, even if the original local side is selected.
         _ = try pendingProtection(journal:journal)
         let stored=try coordinatedGroups(journal:journal)
         let existing=Dictionary(uniqueKeysWithValues:stored.map { (key($0.moves[0].item),$0) })
-        let selected=Dictionary(grouping:items.filter {
-            proposedName($0.name) != nil && (onlySide == nil || $0.side == onlySide)
-        },by:key)
-        // Persist the audit barrier before any experimental mutation. No
-        // change_queue row is inserted, acknowledged or retired here.
-        if onlySide != nil && !normalLocalRename && !selected.isEmpty { try journal.requireUnilateralNameAudit() }
-        let keys=items.isEmpty && onlySide == nil ? Array(existing.keys) : Array(selected.keys)
+        let selected=Dictionary(grouping:items.filter { proposedName($0.name) != nil },by:key)
+        let keys=Array(selected.keys)
         // A many-to-one normalization is a genuine conflict, even when the
         // proposed spelling is still free. Do not choose an arbitrary winner.
         let proposals=Dictionary(grouping:selected.keys.compactMap { k -> (String,String)? in
@@ -414,28 +322,17 @@ public enum NameRectification {
             return a==b ? $0<$1 : a>b
         }
 
-        func boundRoot(_ item:IncompatibleName, unilateral:Bool = false) throws -> (URL,DirectoryBinding) {
-            // Source-only maintenance must also work with the SMB volume
-            // disconnected. It must never inspect or mutate that volume.
-            if unilateral && item.side == .source {
-                guard let configured=roots[item.rootID], configured==item.rootPath else { throw MountedCopyError.invalidMapping }
-                let root=URL(fileURLWithPath:configured,isDirectory:true)
-                return (root,try journal.verifyLocalSourceBinding(rootID:item.rootID,root:root))
-            }
-            guard let map=destinations[item.rootID], roots[item.rootID]==map.source.path else {
+        func boundRoot(_ item:IncompatibleName) throws -> (URL,DirectoryBinding) {
+            guard item.side == .source,let configured=roots[item.rootID],configured==item.rootPath else {
                 throw MountedCopyError.invalidMapping
             }
-            try map.verify()
-            let root=item.side == .source ? map.source : map.target
-            guard root.path==item.rootPath else { throw MountedCopyError.invalidMapping }
-            let binding = item.side == .source
-                ? try journal.verifyLocalSourceBinding(rootID:item.rootID,root:root)
-                : try journal.verifiedNameBinding(rootID:item.rootID,root:root,side:.destination)
+            let root=URL(fileURLWithPath:configured,isDirectory:true)
+            let binding=try journal.verifyLocalSourceBinding(rootID:item.rootID,root:root)
+            guard !binding.volume.isNetworkVolume else { throw MountedCopyError.invalidMapping }
             return (root,binding)
         }
 
-        // An absent counterpart must be proven by an exact live enumeration,
-        // not guessed from a stale name list. Alias and symlink paths fail closed.
+        // Exact live path enumeration: aliases and symlinks fail closed.
         func locate(_ path:String,under root:URL) throws -> (URL,stat)? {
             var url=root
             let parts=path.split(separator:"/",omittingEmptySubsequences:false)
@@ -469,8 +366,6 @@ public enum NameRectification {
 
         func makePlan(_ rows:[IncompatibleName]) throws -> CoordinatedGroup {
             guard let first=rows.first,let newName=proposedName(first.name) else { throw MountedCopyError.invalidMapping }
-            let map=destinations[first.rootID]
-            if onlySide != .source && map == nil { throw MountedCopyError.invalidMapping }
             let previous=try pendingProtection(journal:journal)
             let parent=first.relativePath.split(separator:"/").dropLast().joined(separator:"/")
             let newPath=parent.isEmpty ? newName : parent+"/"+newName
@@ -478,40 +373,17 @@ public enum NameRectification {
                   !previous.protects(rootID:first.rootID,path:newPath) else {
                 throw NameRectificationCheckError.unresolvedState
             }
-            var moves:[Move]=[]
-            let listingCache=AuditDirectoryListingCache()
-            for side in IncompatibleName.Side.allCases where onlySide == nil || side == onlySide {
-                let root:URL
-                if side == .source {
-                    guard let configured=roots[first.rootID] else { throw MountedCopyError.invalidMapping }
-                    root=URL(fileURLWithPath:configured,isDirectory:true)
-                } else {
-                    guard let map else { throw MountedCopyError.invalidMapping }
-                    root=map.target
-                }
-                let row=IncompatibleName(rootID:first.rootID,rootPath:root.path,
-                    relativePath:first.relativePath,objectKind:first.objectKind,side:side,reason:first.reason,
-                    affectedDescendants:first.affectedDescendants)
-                let (_,binding)=try boundRoot(row,unilateral:onlySide != nil)
-                guard let (url,observed)=try locate(row.relativePath,under:root) else {
-                    guard !rows.contains(where:{$0.side==side}),
-                          try locate(newPath,under:root)==nil else {
-                        throw NameRectificationCheckError.unresolvedState
-                    }
-                    continue
-                }
-                let directory=(observed.st_mode & mode_t(S_IFMT))==mode_t(S_IFDIR)
-                guard directory==row.isDirectory else { throw MountedCopyError.unsafeFile }
-                let anchored=try AnchoredDirectory(url.deletingLastPathComponent(),expectedVolume:binding.volume)
-                let snapshot=side == .destination && binding.volume.fileSystem.lowercased()=="smbfs"
-                    ? try stableSMBSnapshot(parent:anchored,oldName:row.name,shouldContinue:shouldContinue)
-                    : try anchored.leaf(row.name)
-                try anchored.checkRectification(old:row.name,new:newName,matching:snapshot,
-                    preflightCache:listingCache)
-                moves.append(Move(item:row,binding:binding,snapshot:snapshot,newName:newName,unilateral:onlySide != nil))
+            let (root,binding)=try boundRoot(first)
+            guard let (url,observed)=try locate(first.relativePath,under:root) else {
+                throw NameRectificationCheckError.originalNotListed
             }
-            guard !moves.isEmpty else { throw NameRectificationCheckError.originalNotListed }
-            return CoordinatedGroup(moves:moves)
+            guard (observed.st_mode & mode_t(S_IFMT)==mode_t(S_IFDIR))==first.isDirectory else {
+                throw MountedCopyError.unsafeFile
+            }
+            let anchored=try AnchoredDirectory(url.deletingLastPathComponent(),expectedVolume:binding.volume)
+            let snapshot=try anchored.leaf(first.name)
+            try anchored.checkRectification(old:first.name,new:newName,matching:snapshot)
+            return CoordinatedGroup(moves:[Move(item:first,binding:binding,snapshot:snapshot,newName:newName,unilateral:true)])
         }
 
         func persist(_ group:CoordinatedGroup) throws {
@@ -524,7 +396,7 @@ public enum NameRectification {
             try persist(next);group=next
         }
         func parentFor(_ move:Move) throws -> AnchoredDirectory {
-            let (root,binding)=try boundRoot(move.item,unilateral:move.unilateral == true)
+            let (root,binding)=try boundRoot(move.item)
             guard binding==move.binding else { throw MountedCopyError.volumeChanged }
             let url:URL
             if move.parentPath.isEmpty { url=root }
@@ -541,6 +413,7 @@ public enum NameRectification {
             let names=try parent.listedNames()
             let old=names.contains{$0.utf8.elementsEqual(move.item.name.utf8)}
             let new=names.contains{$0.utf8.elementsEqual(move.newName.utf8)}
+            guard !(old && new) else { throw NameRectificationCheckError.unresolvedState }
             if old {
                 let value=try parent.leaf(move.item.name)
                 guard move.matches(value,renamed:true) else { throw NameRectificationCheckError.unresolvedState }
@@ -549,13 +422,6 @@ public enum NameRectification {
             if new {
                 let value=try parent.leaf(move.newName)
                 guard move.matches(value,renamed:true) else { throw NameRectificationCheckError.unresolvedState }
-                if move.item.side == .destination && move.binding.volume.fileSystem.lowercased()=="smbfs" {
-                    // Finder's directory cache is not authoritative. Require
-                    // a separate server-side exact spelling and identity read.
-                    try SMBNameRectification.rename(volume:move.binding.volume,parent:parent.directoryURL,
-                        oldName:move.item.name,newName:move.newName,original:value,
-                        verifyOnly:true,shouldContinue:shouldContinue)
-                }
                 return (.renamed,value)
             }
             throw NameRectificationCheckError.unresolvedState
@@ -572,39 +438,10 @@ public enum NameRectification {
             try check()
             let item=move.item
             report(item,action:"name_rectify_start",level:.info,detail:"Nuovo nome: "+move.newName)
-            if item.side == .destination && move.binding.volume.fileSystem.lowercased()=="smbfs" {
-                try SMBNameRectification.rename(volume:move.binding.volume,parent:parent.directoryURL,
-                    oldName:item.name,newName:move.newName,original:snapshot,shouldContinue:shouldContinue)
-                let deadline=ProcessInfo.processInfo.systemUptime+3.5
-                while true {
-                    try check()
-                    if let observed=try? observe(move,parent:parent),observed.0 == .renamed { return }
-                    guard ProcessInfo.processInfo.systemUptime<deadline else {
-                        throw MountedCopyError.destinationChanging
-                    }
-                    Thread.sleep(forTimeInterval:0.125)
-                }
-            } else {
-                try parent.rectifyName(item.name,as:move.newName,matching:snapshot,shouldContinue:shouldContinue)
-                guard try observe(move,parent:parent).0 == .renamed else {
-                    throw NameRectificationCheckError.unresolvedState
-                }
+            try parent.rectifyName(item.name,as:move.newName,matching:snapshot,shouldContinue:shouldContinue)
+            guard try observe(move,parent:parent).0 == .renamed else {
+                throw NameRectificationCheckError.unresolvedState
             }
-        }
-        func knownNotAttempted(_ error:Error)->Bool {
-            if let smb=error as? SMBNameRectificationError {
-                switch smb {
-                case .notAttempted,.credentialUnavailable,.credentialLookupFailed,.credentialAmbiguous,.credentialReadFailed,.mountUnavailable: return true
-                case .helperFailed,.timedOut: return false
-                }
-            }
-            if let copy=error as? MountedCopyError {
-                switch copy {
-                case .rcloneUnavailable,.rcloneLaunchFailed: return true
-                default: return false
-                }
-            }
-            return false
         }
         func failed(_ group:inout CoordinatedGroup,error:Error) throws {
             group.failure=SyncDiagnostic.describe(error)
@@ -615,12 +452,11 @@ public enum NameRectification {
             try journal.finishCoordinatedNameGroup(rootID:row.rootID,path:row.relativePath,
                 completed:successful ? group.moves.map { ($0.item,$0.newName) } : [],
                 restoredSource:restoredSource.map { ($0.item,$0.newName,$0.binding.volume) },
-                recordReconciliationScope:!group.moves.contains { $0.unilateral == true })
+                recordReconciliationScope:false)
             if successful {
                 for move in group.moves {
                     result.renamed+=1
-                    if move.item.side == .source { result.sourceRenamed+=1 }
-                    else { result.destinationRenamed+=1 }
+                    result.sourceRenamed+=1
                     result.resolvedIDs.insert(move.item.id)
                     report(move.item,action:"name_rectified_"+move.item.side.rawValue,level:.success,
                         detail:"Rettificato in: "+move.newName)
@@ -652,15 +488,15 @@ public enum NameRectification {
             try finish(group,successful:false,restoredSource:source)
         }
         func drive(_ group:inout CoordinatedGroup) throws {
+            try check()
+            guard group.moves.count==1,group.source != nil,group.destination==nil,
+                  group.moves[0].unilateral == true else { throw MountedCopyError.invalidMapping }
             if group.stage == .rollbackSource { try rollback(&group);return }
             if group.stage == .prepared, let source=group.source {
                 do {
                     let parent=try parentFor(source)
                     _ = try checkedOriginal(source,parent:parent)
-                    if let target=group.destination, target.binding.volume.fileSystem.lowercased()=="smbfs" {
-                        let remoteParent=try parentFor(target)
-                        try SMBNameRectification.preflight(volume:target.binding.volume,parent:remoteParent.directoryURL)
-                    }
+                    
                 } catch SeedVerificationError.cancelled { throw SeedVerificationError.cancelled }
                 catch { try failed(&group,error:error);try finish(group,successful:false);return }
                 try transition(&group,.sourceAttempt)
@@ -671,10 +507,7 @@ public enum NameRectification {
                 if observed.0 == .original {
                     do {
                         let snapshot=try checkedOriginal(source,parent:parent)
-                        if let target=group.destination, target.binding.volume.fileSystem.lowercased()=="smbfs" {
-                            let remoteParent=try parentFor(target)
-                            try SMBNameRectification.preflight(volume:target.binding.volume,parent:remoteParent.directoryURL)
-                        }
+                        
                         try forward(source,parent:parent,snapshot:snapshot)
                     } catch {
                         try failed(&group,error:error)
@@ -694,55 +527,7 @@ public enum NameRectification {
                 }
                 try finish(group,successful:true);return
             }
-            if group.stage == .destinationAttempt,let target=group.destination {
-                // Never reissue an SMB write whose previous result is unknown.
-                // A visible, exact new name with the original identity is
-                // sufficient for confirmation; absence of such evidence is not.
-                let parent=try parentFor(target)
-                let observed=try observe(target,parent:parent)
-                if observed.0 == .renamed { try transition(&group,.destinationDone) }
-                else if !target.binding.volume.isNetworkVolume {
-                    try failed(&group,error:NameRectificationCheckError.unresolvedState)
-                    try rollback(&group);return
-                } else { throw NameRectificationCheckError.unresolvedState }
-            }
-            if (group.stage == .sourceDone || group.stage == .prepared),let target=group.destination {
-                let parent:AnchoredDirectory
-                let snapshot:stat
-                do {
-                    try check()
-                    beforeDestination()
-                    try check()
-                    parent=try parentFor(target)
-                    snapshot=try checkedOriginal(target,parent:parent)
-                } catch {
-                    try failed(&group,error:error)
-                    try rollback(&group);return
-                }
-                try transition(&group,.destinationAttempt)
-                do {
-                    try forward(target,parent:parent,snapshot:snapshot)
-                } catch {
-                    try failed(&group,error:error)
-                    if let observed=try? observe(target,parent:parent),observed.0 == .renamed {
-                        try transition(&group,.destinationDone)
-                    } else if knownNotAttempted(error) ||
-                                (!target.binding.volume.isNetworkVolume &&
-                                 (try? observe(target,parent:parent).0) == .original) {
-                        try rollback(&group);return
-                    } else { throw error }
-                }
-                if group.stage != .destinationDone { try transition(&group,.destinationDone) }
-            }
-            if group.stage == .destinationDone {
-                for move in group.moves {
-                    let parent=try parentFor(move)
-                    guard try observe(move,parent:parent).0 == .renamed else {
-                        throw NameRectificationCheckError.unresolvedState
-                    }
-                }
-                try finish(group,successful:true)
-            }
+            throw NameRectificationCheckError.unresolvedState
         }
         onProgress(0,ordered.count)
         for (index,k) in ordered.enumerated() {
@@ -750,10 +535,10 @@ public enum NameRectification {
             defer { onProgress(index+1,ordered.count) }
             var group:CoordinatedGroup
             if let saved=existing[k] {
-                if (onlySide != nil && !(saved.moves.count == 1 && saved.moves[0].item.side == onlySide && saved.moves[0].unilateral == true)) ||
-                    (onlySide == nil && !items.isEmpty && saved.moves.contains { $0.unilateral == true }) {
+                if !(saved.moves.count == 1 && saved.moves[0].item.side == .source && saved.moves[0].unilateral == true) ||
+                    saved.stage == .destinationAttempt || saved.stage == .destinationDone {
                     result.skipped += selected[k]?.count ?? 1
-                    let reason="Piano pendente di modalità diversa: riprendilo separatamente"
+                    let reason="Piano precedente non compatibile: percorso protetto; verificare prima del reset volontario"
                     if result.firstFailure == nil { result.firstFailure=reason }
                     for row in selected[k] ?? [] { report(row,action:"name_rectify_skipped",level:.warning,detail:reason) }
                     continue
@@ -801,262 +586,4 @@ public enum NameRectification {
         return result
     }
 
-    /// A confirmed batch persists before its first mutation. Resume checks
-    /// exact paths and identities again, including after a lost SMB response.
-    public static func execute(items: [IncompatibleName], roots: [String: String],
-                               journal: ChangeJournal, log: SyncActivityLog,
-                               destinations: [String: MountedFolderMapping] = [:],
-                               onProgress: (Int, Int) -> Void = { _, _ in },
-                               shouldContinue: () -> Bool = { true }) throws -> Result {
-        var result = Result()
-        func report(_ item: IncompatibleName, action: String, level: SyncLogLevel, message: String) {
-            try? log.record(level: level, rootID: item.rootID, action: action,
-                relativePath: SyncDiagnostic.clean(item.relativePath), message: item.side.label + " · " + message)
-        }
-        func verifiedRoot(_ item: IncompatibleName) throws -> (URL, DirectoryBinding) {
-            if item.side == .source {
-                guard let path = roots[item.rootID] else { throw MountedCopyError.invalidMapping }
-                let root = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
-                return (root, try journal.verifyLocalSourceBinding(rootID: item.rootID, root: root))
-            }
-            guard let mapping = destinations[item.rootID], mapping.targetVolume.isStrongIdentity else {
-                throw MountedCopyError.invalidMapping
-            }
-            try mapping.verify()
-            return (mapping.target, try journal.verifiedNameBinding(rootID: item.rootID, root: mapping.target, side: .destination))
-        }
-        func counterpartKey(_ item: IncompatibleName) -> String { item.rootID + "\0" + item.relativePath }
-        let resume = try journal.pendingNameRectification()
-        // Reused only for the non-mutating preflight. Every actual rename
-        // retains a fresh directory listing and the exclusive syscall.
-        let preflightListingCache = AuditDirectoryListingCache()
-        func slowPhase(_ item: IncompatibleName, name: String, started: Double) {
-            let elapsed = ProcessInfo.processInfo.systemUptime - started
-            guard elapsed >= 0.5 else { return }
-            try? log.record(level: .info, rootID: item.rootID, action: "metric_name_rectification_phase",
-                relativePath: SyncDiagnostic.clean(item.relativePath), durationSeconds: elapsed,
-                message: item.side.label + " · " + name)
-        }
-        var moves: [Move] = []
-        if let resume {
-            guard items.isEmpty else { throw JournalError.database("Rettifica precedente in attesa") }
-            moves = try JSONDecoder().decode([Move].self, from: resume.data)
-        } else {
-            var seen = Set<String>()
-            var unavailablePreflightDestinations = Set<String>()
-            let paired = Dictionary(grouping: items, by: counterpartKey)
-            for item in items where seen.insert(item.id).inserted {
-                guard shouldContinue() else { result.cancelled = true; return result }
-                guard let name = proposedName(item.name) else { result.skipped += 1; continue }
-                if item.side == .destination && unavailablePreflightDestinations.contains(item.rootID) {
-                    // No safe fingerprint can be persisted for an unseen file.
-                    // The operator can scan again once the volume is back.
-                    result.failed += 1
-                    report(item, action: "name_rectification_preflight_destination_deferred",
-                        level: .warning, message: "Destinazione non disponibile: verifica da ripetere")
-                    continue
-                }
-                let preflightStarted = ProcessInfo.processInfo.systemUptime
-                do {
-                    defer { slowPhase(item, name: "preflight", started: preflightStarted) }
-                    let (root, binding) = try verifiedRoot(item)
-                    let url = try item.revealURL(expectedRoot: root.path)
-                    let parent = try AnchoredDirectory(url.deletingLastPathComponent(), expectedVolume: binding.volume)
-                    let snapshot = item.side == .destination &&
-                        binding.volume.fileSystem.lowercased() == "smbfs"
-                        ? try stableSMBSnapshot(parent: parent, oldName: item.name,
-                            shouldContinue: shouldContinue)
-                        : try parent.leaf(item.name)
-                    try parent.checkRectification(old: item.name, new: name, matching: snapshot,
-                        preflightCache: preflightListingCache)
-                    moves.append(Move(item: item, binding: binding, snapshot: snapshot, newName: name))
-                } catch SeedVerificationError.cancelled {
-                    result.cancelled = true
-                    return result
-                } catch {
-                    let reason = SyncDiagnostic.describe(error)
-                    if item.side == .destination && isSharedDestinationFailure(error) {
-                        unavailablePreflightDestinations.insert(item.rootID)
-                        result.failed += 1
-                        if result.firstFailure == nil { result.firstFailure = item.side.label + " · " + reason }
-                        report(item, action: "name_rectification_preflight_destination_unavailable",
-                            level: .warning, message: reason)
-                    } else {
-                        result.skipped += 1
-                        report(item, action: "name_rectify_skipped", level: .warning, message: reason)
-                    }
-                }
-            }
-            let collisions = Dictionary(grouping: moves, by: \.collisionKey).mapValues(\.count)
-            let verified = Dictionary(grouping: moves.filter { collisions[$0.collisionKey] == 1 }, by: { counterpartKey($0.item) })
-            moves = moves.filter { move in
-                let key = counterpartKey(move.item)
-                let bothSides = Set((paired[key] ?? []).map { $0.side.rawValue }).count == 2
-                guard collisions[move.collisionKey] == 1, !bothSides || verified[key]?.count == 2 else {
-                    result.skipped += 1
-                    report(move.item, action: "name_rectify_skipped", level: .warning, message: "Conflitto o controparte non verificata")
-                    return false
-                }
-                return true
-            }
-            moves.sort {
-                let a = $0.item.relativePath.split(separator: "/").count
-                let b = $1.item.relativePath.split(separator: "/").count
-                return a == b ? $0.item.id < $1.item.id : a > b
-            }
-            if !moves.isEmpty {
-                let grouped = Dictionary(grouping: moves, by: { counterpartKey($0.item) })
-                let progress = grouped.values.compactMap { group -> NameRectificationProgressRecord? in
-                    guard let first = group.first else { return nil }
-                    return .init(rootID: first.item.rootID, relativePath: first.item.relativePath,
-                        sourceRequired: group.contains { $0.item.side == .source },
-                        destinationRequired: group.contains { $0.item.side == .destination },
-                        sourceCompleted: false, destinationCompleted: false)
-                }
-                try journal.saveNameRectification(JSONEncoder().encode(moves), progress: progress)
-            }
-        }
-
-        var deferred: [Move] = []
-        // Index only *actual* path dependencies on the same side. A failed
-        // SMB destination must not suppress the source operation at the same
-        // path; the persisted unfinished batch still blocks ordinary sync.
-        var blockedAncestors = Set<String>()
-        // Per-execution circuit breaker. Pending moves stay in the durable
-        // plan and can be retried explicitly after the destination recovers.
-        // It never clears the journal or authorizes an ordinary sync.
-        var unavailableDestinationRoots = Set<String>()
-        func blockKey(_ item: IncompatibleName, path: String) -> String {
-            item.rootID + "\0" + item.side.rawValue + "\0" + path
-        }
-        func deferMove(_ move: Move) {
-            deferred.append(move)
-            var prefix = ""
-            for segment in move.item.relativePath.split(separator: "/") {
-                prefix = prefix.isEmpty ? String(segment) : prefix + "/" + segment
-                blockedAncestors.insert(blockKey(move.item, path: prefix))
-            }
-        }
-        let offset = resume?.offset ?? 0
-        guard (0...moves.count).contains(offset) else { throw JournalError.database("Rettifica non leggibile") }
-        onProgress(offset, moves.count)
-        for (index, move) in moves.enumerated().dropFirst(offset) {
-            guard shouldContinue() else { result.cancelled = true; break }
-            defer { onProgress(index + 1, moves.count) }
-            let item = move.item
-            if blockedAncestors.contains(blockKey(item, path: item.relativePath)) {
-                deferMove(move)
-                continue
-            }
-            if item.side == .destination && unavailableDestinationRoots.contains(item.rootID) {
-                // The first shared failure has already been reported. Avoid
-                // repeated SMB calls/timeouts while preserving each move in
-                // SQLite for a later operator-approved resume.
-                result.failed += 1
-                report(item, action: "name_rectification_shared_destination_deferred",
-                    level: .warning, message: "Destinazione non disponibile: rettifica conservata nel lotto")
-                deferMove(move)
-                continue
-            }
-            let executionStarted = ProcessInfo.processInfo.systemUptime
-            do {
-                defer { slowPhase(item, name: "execute-total", started: executionStarted) }
-                let (root, binding) = try verifiedRoot(item)
-                guard root.path == item.rootPath, binding == move.binding else { throw MountedCopyError.volumeChanged }
-                let parentURL: URL
-                if move.parentPath.isEmpty {
-                    parentURL = root
-                } else {
-                    let parentItem = IncompatibleName(rootID: item.rootID, rootPath: item.rootPath,
-                        relativePath: move.parentPath, objectKind: "directory", side: item.side, reason: "")
-                    parentURL = try parentItem.revealURL(expectedRoot: root.path)
-                }
-                let parent = try AnchoredDirectory(parentURL, expectedVolume: binding.volume)
-                let listingStarted = ProcessInfo.processInfo.systemUptime
-                let names = try FileManager.default.contentsOfDirectory(atPath: parentURL.path)
-                slowPhase(item, name: "live-directory-listing", started: listingStarted)
-                let oldExists = names.contains { $0.utf8.elementsEqual(item.name.utf8) }
-                let newExists = names.contains { $0.utf8.elementsEqual(move.newName.utf8) }
-                if oldExists && !newExists {
-                    let old = try parent.leaf(item.name)
-                    guard move.matches(old, renamed: false) else { throw MountedCopyError.sourceChanging }
-                    try journal.invalidateNameScan(rootID: item.rootID, side: item.side)
-                    report(item, action: "name_rectify_start", level: .info,
-                        message: item.side.label + " · Nuovo nome: " + move.newName)
-                    let renameStarted = ProcessInfo.processInfo.systemUptime
-                    defer { slowPhase(item, name: item.side == .destination &&
-                        binding.volume.fileSystem.lowercased() == "smbfs" ? "smb-helper-and-verify" : "local-rename-and-verify",
-                        started: renameStarted) }
-                    if item.side == .destination && binding.volume.fileSystem.lowercased() == "smbfs" {
-                        try parent.checkRectification(old: item.name, new: move.newName, matching: old)
-                        try SMBNameRectification.rename(volume: binding.volume, parent: parentURL,
-                            oldName: item.name, newName: move.newName, original: old, shouldContinue: shouldContinue)
-                        // A direct SMB rename can be committed server-side
-                        // before Finder's smbfs directory cache reflects it.
-                        // Never issue another rename after helper success:
-                        // wait read-only for the exact old/new names and
-                        // original file identity to become visible locally.
-                        let visibilityDeadline = ProcessInfo.processInfo.systemUptime + 3.5
-                        while true {
-                            guard shouldContinue() else { throw SeedVerificationError.cancelled }
-                            try parent.verify()
-                            let finalNames = try FileManager.default.contentsOfDirectory(atPath: parentURL.path)
-                            let oldVisible = finalNames.contains { $0.utf8.elementsEqual(item.name.utf8) }
-                            let newVisible = finalNames.contains { $0.utf8.elementsEqual(move.newName.utf8) }
-                            if !oldVisible && newVisible {
-                                guard move.matches(try parent.leaf(move.newName), renamed: true) else {
-                                    throw MountedCopyError.destinationChanging
-                                }
-                                break
-                            }
-                            guard ProcessInfo.processInfo.systemUptime < visibilityDeadline else {
-                                // The remote result was positive, but local
-                                // visibility is still uncertain. Preserve the
-                                // journal plan for recovery; never re-copy or
-                                // delete the old path to force convergence.
-                                throw MountedCopyError.destinationChanging
-                            }
-                            Thread.sleep(forTimeInterval: 0.125)
-                        }
-                    } else {
-                        try parent.rectifyName(item.name, as: move.newName, matching: old, shouldContinue: shouldContinue)
-                    }
-                } else {
-                    guard !oldExists, newExists, move.matches(try parent.leaf(move.newName), renamed: true) else {
-                        throw NameRectificationCheckError.unresolvedState
-                    }
-                }
-                let path = move.parentPath.isEmpty ? move.newName : move.parentPath + "/" + move.newName
-                // An unresolved move must keep its old path and its position
-                // ahead of any dependent rename when the batch is reopened.
-                let remaining = deferred.isEmpty ? nil
-                    : try JSONEncoder().encode(deferred + Array(moves.dropFirst(index + 1)))
-                let journalStarted = ProcessInfo.processInfo.systemUptime
-                try journal.advanceNameRectification(to: index + 1, finished: index + 1 == moves.count && deferred.isEmpty,
-                    rootID: item.side == .destination ? item.rootID : nil,
-                    path: item.side == .destination ? path : nil, remainingPlan: remaining,
-                    completed: (rootID: item.rootID, path: item.relativePath, side: item.side.rawValue))
-                slowPhase(item, name: "sqlite-commit", started: journalStarted)
-                result.renamed += 1
-                if item.side == .source { result.sourceRenamed += 1 }
-                else { result.destinationRenamed += 1 }
-                result.resolvedIDs.insert(item.id)
-                let action = resume == nil ? "name_rectified_" : "name_rectification_resumed_"
-                report(item, action: action + item.side.rawValue, level: .success, message: item.side.label + " · Rettificato in: " + move.newName)
-            } catch SeedVerificationError.cancelled {
-                result.cancelled = true
-                break
-            } catch {
-                result.failed += 1
-                let reason = SyncDiagnostic.describe(error)
-                if result.firstFailure == nil { result.firstFailure = item.side.label + " · " + reason }
-                report(item, action: "name_rectification_pending_" + item.side.rawValue, level: .warning, message: reason)
-                if item.side == .destination && isSharedDestinationFailure(error) {
-                    unavailableDestinationRoots.insert(item.rootID)
-                }
-                deferMove(move)
-            }
-        }
-        return result
-    }
 }

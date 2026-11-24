@@ -4,65 +4,6 @@ import XCTest
 @testable import MacSyncCore
 
 final class V0191MaintenanceTests: XCTestCase {
-    func testUnilateralRenameLeavesOppositeAndQueueUntouchedAndPersistsHold() throws {
-        let fm=FileManager.default
-        let base=fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
-        let source=base.appendingPathComponent("source"), target=base.appendingPathComponent("target")
-        try fm.createDirectory(at:source,withIntermediateDirectories:true)
-        try fm.createDirectory(at:target,withIntermediateDirectories:true)
-        defer { try? fm.removeItem(at:base) }
-        let old="folder - ", new="folder -"
-        let content=Data("synthetic archive".utf8)
-        for root in [source,target] {
-            let dir=root.appendingPathComponent(old)
-            try fm.createDirectory(at:dir,withIntermediateDirectories:true)
-            try content.write(to:dir.appendingPathComponent("content.jpg"))
-        }
-        let db=base.appendingPathComponent("inventory.sqlite").path
-        let inventory=try LocalInventory(path:db)
-        _ = try inventory.reconcile(rootID:"demo",root:source)
-        let journal=try ChangeJournal(path:db)
-        let map=try MountedFolderMapping(rootID:"demo",source:source,target:target)
-        try journal.verifyDirectoryBindings([map],allowNewTarget:true)
-        try journal.enqueue(rootID:"demo",relativePath:"existing.jpg",kind:.upsert)
-        let before=try journal.pending()
-        let log=try SyncActivityLog(path:db)
-        let rows=IncompatibleName.Side.allCases.map { side in
-            IncompatibleName(rootID:"demo",rootPath:side == .source ? source.path : target.path,
-                relativePath:old,objectKind:"directory",side:side,reason:"Spazio finale")
-        }
-        // An unmounted/unavailable destination is represented by no mapping.
-        let local=try NameRectification.executeCoordinated(items:rows,roots:["demo":source.path],
-            journal:journal,log:log,destinations:[:],onlySide:.source)
-        XCTAssertEqual(local.sourceRenamed,1)
-        XCTAssertEqual(local.destinationRenamed,0)
-        XCTAssertEqual(try Data(contentsOf:source.appendingPathComponent(new).appendingPathComponent("content.jpg")),content)
-        XCTAssertTrue(fm.fileExists(atPath:target.appendingPathComponent(old).path))
-        XCTAssertFalse(fm.fileExists(atPath:target.appendingPathComponent(new).path))
-        XCTAssertEqual(try journal.pending(),before)
-        XCTAssertTrue(try ChangeJournal(path:db,readOnly:true).unilateralNameAuditRequired())
-        XCTAssertFalse(try journal.hasPendingNameRectification())
-
-        let stopped=expectation(description:"Automatic startup does not reconcile during unilateral maintenance")
-        let monitor=LocalMonitorService { _ in }
-        monitor.start(roots:[MonitorRoot(id:"demo",url:source)],databasePath:db)
-        monitor.afterStopped { stopped.fulfill() }
-        wait(for:[stopped],timeout:10)
-        XCTAssertFalse(monitor.safetyGate.isReady)
-        XCTAssertEqual(try journal.pending(),before)
-
-        let remote=try NameRectification.executeCoordinated(items:rows,roots:["demo":source.path],
-            journal:journal,log:log,destinations:["demo":map],onlySide:.destination)
-        XCTAssertEqual(remote.sourceRenamed,0)
-        XCTAssertEqual(remote.destinationRenamed,1)
-        XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent(new).appendingPathComponent("content.jpg")),content)
-        XCTAssertEqual(try Data(contentsOf:source.appendingPathComponent(new).appendingPathComponent("content.jpg")),content)
-        XCTAssertEqual(try journal.pending(),before)
-        XCTAssertTrue(try journal.unilateralNameAuditRequired())
-        XCTAssertTrue(try journal.nameRectificationScopes().isEmpty)
-        XCTAssertFalse(try journal.hasPendingNameRectification())
-    }
-
     func testV0192LocalRectificationCreatesOrdinaryMonitorChangesWithoutAuditHold() throws {
         let fm = FileManager.default
         let base = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
@@ -83,8 +24,8 @@ final class V0191MaintenanceTests: XCTestCase {
         XCTAssertTrue(try journal.pending().isEmpty)
         let items = try inventory.incompatibleNames(rootID:"demo",sourcePath:source.path)
         XCTAssertEqual(items.map(\.relativePath), [old])
-        let result = try NameRectification.executeCoordinated(items:items, roots:["demo":source.path],
-            journal:journal, log:log, destinations:[:], onlySide:.source, normalLocalRename:true)
+        let result = try NameRectification.executeLocal(items:items, roots:["demo":source.path],
+            journal:journal, log:log)
         XCTAssertEqual(result.sourceRenamed,1)
         XCTAssertFalse(try journal.unilateralNameAuditRequired())
         XCTAssertFalse(try journal.hasPendingNameRectification())
