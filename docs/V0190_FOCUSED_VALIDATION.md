@@ -1,0 +1,3 @@
+# Focused v0.19.0 validation
+
+Production source baseline: `47404177100ffea8730facbcb6b3ce4ab60a46b4`, successful development build `45392055242`. This branch adds only test code, disposable loopback Samba fixture and targeted CI. It must not be used as a release artifact. The local case checks coordinated name reconciliation, archive audit and zero copied bytes; the SMB case checks the new helper's explicit pre-mutation exit code against server-side files and confirms a successful protected rename. It does not test production Keychain integration, network interruption, or Windows Server. Results must be checked in Actions before claiming success.
