@@ -211,6 +211,25 @@ public final class ChangeJournal {
         guard sqlite3_step(stmt)==SQLITE_DONE else { throw databaseFailure() }
     }
 
+    /// A durable maintenance barrier, separate from any queue row.
+    public func requireUnilateralNameAudit() throws {
+        let stmt=try prepare("INSERT OR REPLACE INTO queue_rebuild_hold(singleton,token) VALUES(1,?);")
+        defer { sqlite3_finalize(stmt) }
+        try bind("unilateral-name:"+UUID().uuidString,at:1,in:stmt)
+        guard sqlite3_step(stmt)==SQLITE_DONE else { throw databaseFailure() }
+    }
+
+    public func unilateralNameAuditRequired() throws -> Bool {
+        // Old inventories may predate the hold table. Do not run DDL on a
+        // read-only connection just to check whether maintenance is pending.
+        let stmt=try prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='queue_rebuild_hold';")
+        let rc=sqlite3_step(stmt)
+        sqlite3_finalize(stmt)
+        if rc == SQLITE_DONE { return false }
+        guard rc == SQLITE_ROW else { throw databaseFailure() }
+        return try queueRebuildToken()?.hasPrefix("unilateral-name:") == true
+    }
+
     @discardableResult public func retireExcludedJobs() throws -> Int {
         guard FileExclusionPolicy.ignoreDSStore else { return 0 }
         try execute("UPDATE change_queue SET completed=1 WHERE completed=0 AND instr('/'||relative_path||'/','/.DS_Store/')>0;")
@@ -253,6 +272,9 @@ public final class ChangeJournal {
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
             guard try queueRebuildToken() == token, shouldContinue() else { throw SeedVerificationError.cancelled }
+            if token.hasPrefix("unilateral-name:"), try hasPendingNameRectification() {
+                throw JournalError.database("Rettifica pendente: risolvere prima i nomi dall'esito incerto")
+            }
             let query = try prepare("""
                 SELECT q.id,q.root_id,q.relative_path FROM retired_delete_evidence e
                 JOIN change_queue q ON q.id=e.job_id
@@ -591,7 +613,8 @@ public final class ChangeJournal {
     /// its successful rename. Failed/rolled-back rows stay in the list.
     func finishCoordinatedNameGroup(rootID:String,path:String,
                                     completed:[(item:IncompatibleName,newName:String)],
-                                    restoredSource:(item:IncompatibleName,newName:String,volume:VolumeFingerprint)? = nil) throws {
+                                    restoredSource:(item:IncompatibleName,newName:String,volume:VolumeFingerprint)? = nil,
+                                    recordReconciliationScope:Bool = true) throws {
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
             for entry in completed {
@@ -601,7 +624,7 @@ public final class ChangeJournal {
                 }
                 let parent = path.split(separator:"/").dropLast().joined(separator:"/")
                 let renamed = parent.isEmpty ? entry.newName : parent+"/"+entry.newName
-                if item.side == .destination {
+                if item.side == .destination && recordReconciliationScope {
                     let scope = try prepare("""
                         INSERT OR REPLACE INTO name_rectification_scopes(root_id,path,expires)
                         VALUES(?,?,strftime('%s','now')+604800);

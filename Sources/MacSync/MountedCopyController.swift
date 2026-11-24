@@ -217,6 +217,7 @@ final class MountedCopyController: ObservableObject {
     func rectifyNamesAfterDrain(items:[IncompatibleName],
                                 pairs:[(id:String,path:String,destination:String,expected:VolumeFingerprint?)],
                                 token:SeedVerificationCancellation,
+                                onlySide:IncompatibleName.Side? = nil,
                                 completion:@escaping @MainActor (Bool)->Void) {
         guard !previewOnly,!rectifyingNames else { completion(false);return }
         rectifyingNames=true; rectificationStatus="Verifica e rettifica dei nomi in corso…"
@@ -224,6 +225,7 @@ final class MountedCopyController: ObservableObject {
             var status=""
             var resolved=Set<String>()
             var pending = true
+            var unilateralHold = onlySide != nil
             let started = ProcessInfo.processInfo.systemUptime
             do {
                 let db=try Self.databaseURL().path
@@ -232,7 +234,7 @@ final class MountedCopyController: ObservableObject {
                 // Every selected relative path needs a live check of both sides.
                 let requested = items.isEmpty ? Set(pairs.map(\.id)) : Set(items.map(\.rootID))
                 var destinations: [String: MountedFolderMapping] = [:]
-                for pair in pairs where requested.contains(pair.id) {
+                for pair in pairs where requested.contains(pair.id) && onlySide != .source {
                     guard !pair.path.isEmpty, !pair.destination.isEmpty, let expected = pair.expected else { continue }
                     destinations[pair.id] = try? MountedFolderMapping(
                         rootID: pair.id, source: URL(fileURLWithPath: pair.path),
@@ -242,7 +244,7 @@ final class MountedCopyController: ObservableObject {
                 log.cycleID = UUID().uuidString
                 var lastProgress = -Double.infinity
                 let result=try NameRectification.executeCoordinated(items:items,roots:roots,journal:journal,log:log,
-                    destinations:destinations, onProgress: { checked, total in
+                    destinations:destinations, onlySide:onlySide, onProgress: { checked, total in
                         let now = ProcessInfo.processInfo.systemUptime
                         guard total > 0, checked == total || now - lastProgress >= 0.15 else { return }
                         lastProgress = now
@@ -250,6 +252,7 @@ final class MountedCopyController: ObservableObject {
                     }, shouldContinue:{!token.isCancelled})
                 let sides = try NameRectification.pendingSideSummary(journal: journal)
                 pending = try journal.hasPendingNameRectification()
+                unilateralHold = try journal.unilateralNameAuditRequired()
                 let localPending = sides.sourcePending
                 let remotePending = sides.destinationPending
                 let localCompleted = result.sourceRenamed
@@ -270,13 +273,18 @@ final class MountedCopyController: ObservableObject {
                     pending=actual
                 }
             }
-            let finalStatus=status, completedIDs=resolved, needsRetry=pending
+            let finalStatus=status, completedIDs=resolved, needsRetry=pending, auditRequired=unilateralHold
             DispatchQueue.main.async { [weak self] in
                 guard let self else { completion(needsRetry);return }
                 self.incompatibleNames.removeAll{completedIDs.contains($0.id)}
                 self.rectificationStatus=finalStatus + (needsRetry ? " · Percorsi pendenti protetti; le copie indipendenti possono procedere" : " · Verificare i nomi eventualmente irrisolti")
                 self.rectifyingNames=false
                 self.rectificationProgress=nil
+                if auditRequired {
+                    self.queueRebuildRequired=true
+                    self.auditReport=nil
+                    self.auditStatus="Rinomina unilaterale: prepara una nuova verifica archivio manuale"
+                }
                 self.refresh()
                 completion(needsRetry)
             }

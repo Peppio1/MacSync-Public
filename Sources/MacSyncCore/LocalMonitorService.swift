@@ -39,7 +39,7 @@ public final class LocalMonitorService {
         self.update = onUpdate
     }
 
-    public func start(roots: [MonitorRoot], databasePath: String, allowSourceRebinding: Bool = false, retireInactiveRoots: Bool = false) {
+    public func start(roots: [MonitorRoot], databasePath: String, allowSourceRebinding: Bool = false, retireInactiveRoots: Bool = false, allowUnilateralAuditPreparation: Bool = false) {
         let request = SeedVerificationCancellation()
         requestLock.lock()
         scanRequest?.cancel()
@@ -53,6 +53,11 @@ public final class LocalMonitorService {
                 return
             }
             do {
+                if !allowUnilateralAuditPreparation, FileManager.default.fileExists(atPath:databasePath),
+                   try ChangeJournal(path:databasePath,readOnly:true).unilateralNameAuditRequired() {
+                    self.report("Rinomina unilaterale: monitoraggio sospeso; prepara la verifica archivio",active:false)
+                    return
+                }
                 let checked = try self.validateRoots(roots)
                 let store = try LocalInventory(path: databasePath)
                 if retireInactiveRoots {
