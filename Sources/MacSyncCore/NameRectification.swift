@@ -303,6 +303,7 @@ public enum NameRectification {
         _ = try pendingProtection(journal:journal)
         let stored=try coordinatedGroups(journal:journal)
         let existing=Dictionary(uniqueKeysWithValues:stored.map { (key($0.moves[0].item),$0) })
+        result.skipped=items.filter { proposedName($0.name) == nil }.count
         let selected=Dictionary(grouping:items.filter { proposedName($0.name) != nil },by:key)
         let keys=Array(selected.keys)
         // A many-to-one normalization is a genuine conflict, even when the
@@ -511,7 +512,7 @@ public enum NameRectification {
                         try forward(source,parent:parent,snapshot:snapshot)
                     } catch {
                         try failed(&group,error:error)
-                        // The remote side has never been attempted in this phase.
+                        // Only the exact original local identity may be restored.
                         if let verified=try? observe(source,parent:parent) {
                             if verified.0 == .original { try finish(group,successful:false);return }
                             try rollback(&group);return

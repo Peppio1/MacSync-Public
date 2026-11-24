@@ -1,0 +1,32 @@
+name: v0.19.2 mounted SMB deletion validation
+on:
+  push:
+    branches: [validate-v0.19.2-smb]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macsync-v0192-smb-validation
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install disposable loopback Samba
+        run: brew install samba
+      - name: Mount genuine SMB filesystem
+        run: bash scripts/ci/prepare-local-samba.sh
+      - name: Verify exact literal deletes and preserve hidden or equivalent paths
+        env:
+          MACSYNC_V0192_REQUIRE_SMB: '1'
+        run: swift test -Xswiftc -warnings-as-errors --filter SMBV0192DeletionValidationTests
+      - name: Cleanup disposable share
+        if: always()
+        run: bash scripts/ci/cleanup-local-samba.sh
