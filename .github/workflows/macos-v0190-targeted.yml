@@ -42,6 +42,10 @@ jobs:
         env:
           MACSYNC_TEST_RCLONE: ${{ runner.temp }}/macsync-rclone/rclone
         run: swift test -Xswiftc -warnings-as-errors --filter 'NameRectificationTests/(testV019PreflightDistinguishesMissingOriginalAndCollision|testPreflightCacheKeepsSiblingListingAndInvalidatesOnCollision|testNestedRenameAndConflictPreserveData|testApprovedRules)'
+      - name: Targeted mirror tests
+        env:
+          MACSYNC_TEST_RCLONE: ${{ runner.temp }}/macsync-rclone/rclone
+        run: swift test -Xswiftc -warnings-as-errors --filter 'MirrorDeletionTests/(testV019AuditQueuesExtrasAndNewConsentDeletesOnlyAbsentPaths|testV019RecreatedAuditExtraSupersedesDelete|testPersistentConsentCannotBindReplacedDestinationOrDatabase|testRecreatedSourceBlocksStaleDelete)'
       - name: Release build for Apple Silicon and Intel
         run: |
           set -euo pipefail

@@ -132,7 +132,11 @@ public struct MirrorAuthorization: Codable, Equatable, Sendable {
     fileprivate let databaseID: String
     fileprivate let cutoff: Int64
 
-    public static func capture(journal: ChangeJournal, mappings: [MountedFolderMapping], shouldContinue: () -> Bool = { true }) throws -> MirrorAuthorization {
+    public static func capture(journal: ChangeJournal, mappings: [MountedFolderMapping],
+                               includePendingDeletes: Bool = false,
+                               shouldContinue: () -> Bool = { true }) throws -> MirrorAuthorization {
+        // Broader consent requires already registered target identities.
+        if includePendingDeletes { try journal.verifyDirectoryBindings(mappings) }
         guard !mappings.isEmpty, Set(mappings.map(\.rootID)).count == mappings.count else {
             throw MirrorDeletionFailure.noBaseline
         }
@@ -160,7 +164,7 @@ public struct MirrorAuthorization: Codable, Equatable, Sendable {
         }
         guard shouldContinue() else { throw SeedVerificationError.cancelled }
         return MirrorAuthorization(roots: roots, databaseID: try journal.databaseIdentity(),
-            cutoff: try journal.queueSequence())
+            cutoff: includePendingDeletes ? 0 : try journal.queueSequence())
     }
 
     fileprivate static func captureIdentity(_ map: MountedFolderMapping, journal: ChangeJournal,

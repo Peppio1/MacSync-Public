@@ -547,7 +547,7 @@ struct ArchiveAuditPanel: View {
                     Text("Prossima: \(macSyncDateTime(next))").font(detailFont).foregroundStyle(.secondary)
                 }
             }
-            Text("I file presenti solo nella destinazione sono segnalati, mai eliminati.")
+            Text("File e cartelle solo nella destinazione vengono accodati per l’eliminazione; eseguiti solo con mirror autorizzato.")
                 .font(detailFont).foregroundStyle(.secondary)
         }.disabled(busy || copy.active)
     }

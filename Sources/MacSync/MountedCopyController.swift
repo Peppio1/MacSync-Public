@@ -95,7 +95,8 @@ final class MountedCopyController: ObservableObject {
     @Published private(set) var automaticSession = false
 
     // A legacy Boolean is deliberately NOT a persisted deletion consent.
-    private static let authorizationKey = "MacSync.mirrorAuthorization.v1"
+    // Broader deletion consent must be explicitly granted after upgrading.
+    private static let authorizationKey = "MacSync.mirrorAuthorization.v2"
     private static func loadAuthorization() -> MirrorAuthorization? {
         guard let data = UserDefaults.standard.data(forKey: authorizationKey) else { return nil }
         return try? JSONDecoder().decode(MirrorAuthorization.self, from: data)
@@ -450,7 +451,7 @@ final class MountedCopyController: ObservableObject {
                 : "La verifica rapida confronta percorsi, dimensioni e date (tolleranza 2 secondi), senza leggere il contenuto. ")
                 + "I file con metadati corrispondenti saranno segnalati come allineati. Solo le copie del primo inventario riconoscibili con certezza potranno essere considerate soddisfatte; gli eventi FSEvents e i job storici ambigui rimangono in coda. "
                 + "Le differenze sicure saranno accodate senza duplicare job pendenti, dopo un backup del database. "
-                + "Nessuna scrittura sulle destinazioni e nessuna cancellazione dei file presenti soltanto sul server."
+                + "File e cartelle validi presenti soltanto sul server saranno accodati per l’eliminazione. Nessuna cancellazione durante la verifica; esecuzione solo con mirror autorizzato."
             alert.addButton(withTitle:"Avvia verifica"); alert.addButton(withTitle:"Annulla")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
@@ -515,9 +516,9 @@ final class MountedCopyController: ObservableObject {
                 // inventory. INTELLIGENT may additionally hash doubtful files.
                 // No second mass-recognition pass, and no acknowledgment of
                 // existing FSEvents or other pending SQLite jobs.
-                var report = try local.auditPreservingQueuedChanges(
+                let report = try local.auditPreservingQueuedChanges(
                     mode:settings.mode,repair:true,cancellation:cancel,
-                    diagnostic:diagnostic,progress:progress,deletionCandidates:candidates
+                    diagnostic:diagnostic,progress:progress,deletionCandidates:candidates,queueMirrorExtras:true
                 )
                 var summaryProgress = last
                 if let rebuildToken {
@@ -528,9 +529,8 @@ final class MountedCopyController: ObservableObject {
                     } else {
                         _ = try journal.completeQueueRebuild(token:rebuildToken,shouldContinue:{cancel.mayCommit})
                     }
-                    let freshCandidates = (try? authorization?.auditDeletionCandidates(journal:journal,mappings:maps,shouldContinue:{!cancel.isCancelled})) ?? []
-                    report.deletionCandidates = freshCandidates
-                    report.displayCounts = .calculate(report.findings,deletionCandidates:freshCandidates)
+                    // Audit extras are already queued even if mirror is off.
+                    // Rebuild must not erase their candidate display.
                 }
                 summaryProgress.phase = "Salvataggio report"
                 summaryProgress.comparisonStarted = nil
@@ -667,9 +667,9 @@ final class MountedCopyController: ObservableObject {
         alert.alertStyle = .warning
         alert.messageText = "Abilitare le cancellazioni speculari?"
         alert.informativeText = """
-        MacSync potrà rimuovere dalla destinazione i file eliminati dalla sorgente, anche dopo un riavvio quando la sincronizzazione automatica è attiva. Se il recupero è disabilitato, la rimozione sarà definitiva.
+        MacSync potrà rimuovere dalla destinazione file e cartelle assenti dalla sorgente, inclusi gli elementi già accodati e quelli rilevati dalla verifica archivio. Se il recupero è disabilitato, la rimozione sarà definitiva.
 
-        L'autorizzazione vale solo per le coppie verificate e per nuovi eventi dopo la verifica. Le protezioni tecniche restano sempre attive; le protezioni quantitative sono facoltative. Usa esclusivamente dati di prova.
+        L'autorizzazione vale soltanto per le coppie già verificate. Ogni eliminazione viene rivalidata prima dell'esecuzione. Le protezioni tecniche restano sempre attive; le protezioni quantitative sono facoltative. Usa esclusivamente dati di prova.
         """
         alert.addButton(withTitle: "Abilita cancellazioni speculari")
         alert.addButton(withTitle: "Annulla")
@@ -691,8 +691,9 @@ final class MountedCopyController: ObservableObject {
                         source: URL(fileURLWithPath: $0.path),
                         target: URL(fileURLWithPath: $0.destination), expectedTargetVolume: $0.expected)
                 }
-                try journal.verifyDirectoryBindings(maps,allowNewTarget:true)
-                let authorization = try MirrorAuthorization.capture(journal: journal, mappings: maps,shouldContinue:{ !cancel.isCancelled })
+                try journal.verifyDirectoryBindings(maps)
+                let authorization = try MirrorAuthorization.capture(journal: journal, mappings: maps,
+                    includePendingDeletes:true,shouldContinue:{ !cancel.isCancelled })
                 guard !cancel.isCancelled else { throw SeedVerificationError.cancelled }
                 let data = try JSONEncoder().encode(authorization)
                 DispatchQueue.main.async { [weak self] in
@@ -718,6 +719,7 @@ final class MountedCopyController: ObservableObject {
     func revokeMirrorAuthorization() {
         mirrorConfigurationRevision += 1
         UserDefaults.standard.removeObject(forKey: Self.authorizationKey)
+        UserDefaults.standard.removeObject(forKey: "MacSync.mirrorAuthorization.v1")
         UserDefaults.standard.removeObject(forKey: "MacSync.mirrorEnabled")
         mirrorAuthorization = nil
         mirrorEnabled = false

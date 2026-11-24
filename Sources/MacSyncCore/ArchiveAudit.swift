@@ -280,18 +280,21 @@ public final class ArchiveAudit {
         self.journal = journal; self.mappings = mappings
     }
 
-    // Deliberately read-only except for explicitly requested guarded UPSERTs
-    // in the local queue. No direct writes to the server; never creates DELETEs.
+    // Deliberately read-only on both archives. Explicit repair can queue safe
+    // UPSERTs and, with queueMirrorExtras, verified extra paths as DELETEs.
     public func run(mode: ArchiveAuditMode, repair: Bool = false,
                     cancellation: SeedVerificationCancellation = SeedVerificationCancellation(),
                     collectMetadataMatches: Bool = false,
                     shouldCollectMetadataMatch: (String,String) -> Bool = { _,_ in true },
                     deletionCandidates: Set<String> = [],
+                    queueMirrorExtras: Bool = false,
                     onVerifiedFile: (String, String, SeedFileFingerprint, SeedFileFingerprint) -> Void = { _,_,_,_ in },
                     onVerifiedDirectory: (String, String, SeedFileFingerprint, SeedFileFingerprint) -> Void = { _,_,_,_ in },
                     diagnostic: (ArchiveAuditProgress) -> Void = { _ in },
                     progress: (ArchiveAuditProgress) -> Void = { _ in }) throws -> ArchiveAuditReport {
         var state = ArchiveAuditProgress()
+        let queueExtras = repair && queueMirrorExtras
+        if queueExtras { try journal.verifyDirectoryBindings(mappings) }
         // One indexed read of the already-approved SQLite rename plan.
         // Its relationships are NOT inferred from equal size or timestamps.
         let pendingRenames = try NameRectification.pendingProtection(journal: journal)
@@ -324,6 +327,8 @@ public final class ArchiveAudit {
             let sourceStamp: String
             let targetStamp: String
             let cacheBinding: String?
+            let sourceBinding: String?
+            let targetBinding: String?
         }
         var pairs: [Pair] = []
         var nameScans: [NameScanSnapshot] = []
@@ -335,6 +340,8 @@ public final class ArchiveAudit {
             }
             let sourceStamp = try Self.rootStamp(mapping.source)
             let targetStamp = try Self.rootStamp(mapping.target)
+            let sourceBinding = queueExtras ? try DirectoryBinding.encoded(mapping.source) : nil
+            let targetBinding = queueExtras ? try DirectoryBinding.encoded(mapping.target) : nil
             var scanStart = ProcessInfo.processInfo.systemUptime
             func scanned(_ item: TrackedItem) {
                 if state.scanningDestination { state.destination.record(item) }
@@ -407,7 +414,8 @@ public final class ArchiveAudit {
             pairs.append(Pair(mapping:mapping,source:Dictionary(uniqueKeysWithValues:source.map{($0.relativePath,$0)}),
                 target:Dictionary(uniqueKeysWithValues:target.map{($0.relativePath,$0)}),ambiguous:ambiguous,
                 sourceStamp:sourceStamp,targetStamp:targetStamp,
-                cacheBinding: mode == .intelligent ? (try? DirectoryBinding.encoded(mapping.source) + "\0" + DirectoryBinding.encoded(mapping.target)) : nil))
+                cacheBinding: mode == .intelligent ? (try? DirectoryBinding.encoded(mapping.source) + "\0" + DirectoryBinding.encoded(mapping.target)) : nil,
+                sourceBinding:sourceBinding,targetBinding:targetBinding))
             state.total += paths.count
         }
         var findings: [AuditFinding] = []
@@ -680,12 +688,62 @@ public final class ArchiveAudit {
                 report(force:true)
             }
         }
+        var finalDeletionCandidates = deletionCandidates
+        if queueExtras {
+            // Only after ALL roots have been fully scanned and compared.
+            // Validate live source absence, the same persisted root bindings,
+            // and current SQLite state. Never re-read all remote files.
+            let byRoot = Dictionary(grouping:findings.filter {
+                $0.kind == .extra && ($0.objectKind == "file" || $0.objectKind == "directory") &&
+                WindowsPathSafety.validRelativePath($0.relativePath)
+            },by: \.rootID)
+            var deleteRetries = 0
+            while true {
+                guard cancellation.awaitCommitWindow(onWaiting:{
+                    state.phase="Attesa completamento inventario locale"; report(force:true)
+                }) else { throw SeedVerificationError.cancelled }
+                var entries: [(rootID:String,path:String,sourcePath:String,sourceBinding:String,targetBinding:String)] = []
+                for pair in pairs {
+                    try check()
+                    let map = pair.mapping
+                    guard let src = pair.sourceBinding, let dst = pair.targetBinding else {
+                        throw MountedCopyError.invalidMapping
+                    }
+                    try map.verify()
+                    guard try DirectoryBinding.encoded(map.source)==src,
+                          try DirectoryBinding.encoded(map.target)==dst else { throw MountedCopyError.volumeChanged }
+                    for finding in byRoot[map.rootID] ?? [] {
+                        try check()
+                        let url = map.source.appendingPathComponent(finding.relativePath)
+                        var s = stat()
+                        // Only absence, not permission denial/ENOTDIR/other
+                        // errors, is evidence for deletion.
+                        if url.path.withCString({ lstat($0,&s) }) != 0 && errno == ENOENT {
+                            entries.append((map.rootID,finding.relativePath,map.source.path,src,dst))
+                        }
+                    }
+                    guard try DirectoryBinding.encoded(map.source)==src,
+                          try DirectoryBinding.encoded(map.target)==dst else { throw MountedCopyError.volumeChanged }
+                }
+                state.phase="Accodamento eliminazioni speculari"; report(force:true)
+                do {
+                    finalDeletionCandidates = try journal.enqueueAuditDeletes(entries,
+                        shouldContinue:{ cancellation.mayCommit })
+                    break
+                } catch SeedVerificationError.cancelled {
+                    guard !cancellation.isCancelled, deleteRetries < 3 else { throw SeedVerificationError.cancelled }
+                    deleteRetries += 1
+                }
+            }
+            state.deletionCandidates = finalDeletionCandidates
+            state.counts = .calculate(findings,deletionCandidates:finalDeletionCandidates)
+        }
         state.phase="Salvataggio operazioni nel database · completato"; report(force:true)
         return ArchiveAuditReport(mode:mode,started:state.started,ended:Date(),
             seconds:ProcessInfo.processInfo.systemUptime-startTick,findings:findings,
             bytesRead:state.bytesRead,queuedRepairs:queued,repairRequested:repair,
             sourceMetrics:state.source,destinationMetrics:state.destination,
-            deletionCandidates:deletionCandidates,metadataMatches:metadataMatches,hashMatches:hashMatches,cachedHashMatches:cachedHashMatches,directoryListingCacheHits:listingHits,directoryListingReads:listingReads,displayCounts:state.counts,nameScans:nameScans,comparisonSeconds:comparisonSeconds)
+            deletionCandidates:finalDeletionCandidates,metadataMatches:metadataMatches,hashMatches:hashMatches,cachedHashMatches:cachedHashMatches,directoryListingCacheHits:listingHits,directoryListingReads:listingReads,displayCounts:state.counts,nameScans:nameScans,comparisonSeconds:comparisonSeconds)
     }
 
     private func ancestorsHaveAlias(_ path:String,_ ambiguous:Set<String>) -> Bool {
