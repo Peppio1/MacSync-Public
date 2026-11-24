@@ -25,6 +25,11 @@ final class RuntimeStorageGuard {
             requested: requested, snapshot: snapshot, defaults: .standard)
     }
 
+    func createRollbackSnapshot() throws -> URL {
+        try SignedRollbackTransaction.validateCompatibility(database:folder.appendingPathComponent("inventory.sqlite"))
+        return try createUpdateSnapshot()
+    }
+
     func scheduleFactoryReset(configuredPaths: [String]) throws {
         try FactoryReset.schedule(in: folder, configuredPaths: configuredPaths)
     }

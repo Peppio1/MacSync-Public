@@ -1357,6 +1357,26 @@ struct MacSyncConfigurationView: View {
                 }
             }
             SoftwareUpdatesPanel(updates: runtime.updates)
+            MacSyncPanel("Ripristino versione precedente",icon:"arrow.uturn.backward",accent:false) {
+                HStack {
+                    VStack(alignment:.leading,spacing:4) {
+                        if let installed=Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String,
+                           let previous=SignedRollbackPackage.previous(for:installed) {
+                            Text("Versione precedente: "+previous.version).font(.subheadline.weight(.medium))
+                            Text("Pacchetto firmato, backup preventivo e conservazione dell’archivio attuale.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            Text("Nessuna versione precedente supportata.").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                    Button("Ripristina versione precedente…") { runtime.preparePreviousVersionRollback() }
+                        .buttonStyle(MacSyncStopStyle())
+                        .disabled(runtime.previewOnly || runtime.shuttingDown ||
+                            SignedRollbackPackage.previous(for:Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "") == nil ||
+                            !ApplicationRollback.allowedInstallLocation(Bundle.main.bundleURL))
+                }
+            }
             DiagnosticReportPanel(copy: copy, previewOnly: runtime.previewOnly)
             MacSyncPanel("Ripristino MacSync", icon: "arrow.counterclockwise", accent: false) {
                 HStack {

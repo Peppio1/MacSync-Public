@@ -346,6 +346,61 @@ final class MacSyncRuntime: ObservableObject {
         }
     }
 
+    func preparePreviousVersionRollback() {
+        guard !previewOnly,!shuttingDown,!preparingSignedUpdate,let storageGuard,
+              let installed=Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String,
+              let package=SignedRollbackPackage.previous(for:installed),
+              ApplicationRollback.allowedInstallLocation(Bundle.main.bundleURL),
+              NSApp.modalWindow==nil else { return }
+        let confirmation=NSAlert()
+        confirmation.alertStyle = .warning
+        confirmation.messageText="Ripristinare la versione precedente?"
+        confirmation.informativeText="Versione attuale: "+installed+"\nVersione precedente: "+package.version+"\n\nMacSync terminerà le attività, creerà un backup dell’archivio corrente e verificherà il pacchetto firmato. Il database non verrà sostituito. Dopo il riavvio copie e mirror resteranno disattivati."
+        confirmation.addButton(withTitle:"Annulla")
+        confirmation.addButton(withTitle:"Conferma ripristino")
+        guard confirmation.runModal()==.alertSecondButtonReturn else { return }
+        preparingSignedUpdate=true
+        requestShutdown { [weak self] in
+            guard let self else { return }
+            self.automaticStatus="Rollback: verifica compatibilità e backup"
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    let snapshot=try storageGuard.createRollbackSnapshot()
+                    let staging=snapshot.appendingPathComponent("signed-rollback",isDirectory:true)
+                    try FileManager.default.createDirectory(at:staging,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
+                    self.automaticStatus="Rollback: download e verifica del pacchetto firmato"
+                    _ = try await package.prepare(in:staging)
+                    let backedApp=snapshot.appendingPathComponent("MacSync.app")
+                    try ApplicationRollback.validateBundle(backedApp,version:installed)
+                    let executable=backedApp.appendingPathComponent("Contents/MacOS/MacSyncRecovery")
+                    guard FileManager.default.isExecutableFile(atPath:executable.path) else {
+                        throw ApplicationRollback.Failure("Strumento di ripristino mancante.")
+                    }
+                    try UpdateRecoveryCoordinator.disableCopyAuthorizations(.standard)
+                    let helper=Process()
+                    helper.executableURL=executable
+                    helper.arguments=["--signed-rollback",snapshot.path,Bundle.main.bundleURL.path,String(ProcessInfo.processInfo.processIdentifier)]
+                    helper.standardInput=FileHandle.nullDevice
+                    helper.standardOutput=FileHandle.nullDevice
+                    helper.standardError=FileHandle.nullDevice
+                    try helper.run()
+                    self.automaticStatus="Rollback: chiusura e installazione protetta"
+                    self.preparingSignedUpdate=false
+                    NSApp.terminate(nil)
+                } catch {
+                    self.preparingSignedUpdate=false
+                    self.automaticStatus="Rollback bloccato; riavvia MacSync"
+                    let alert=NSAlert()
+                    alert.alertStyle = .critical
+                    alert.messageText="Ripristino non avviato"
+                    alert.informativeText=error.localizedDescription+"\n\nNessun database verrà sostituito. Esci e riapri MacSync."
+                    alert.runModal()
+                }
+            }
+        }
+    }
+
     func resetApplicationData() {
         guard !previewOnly, !shuttingDown, !preparingSignedUpdate, let storageGuard else { return }
         let confirmation = NSAlert()
