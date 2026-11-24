@@ -47,6 +47,27 @@ final class SignedUpdatePolicyTests: XCTestCase {
         XCTAssertThrowsError(try SignedRollbackPackage.verify(bytes:original,signature:signature,publicKey:Curve25519.Signing.PrivateKey().publicKey.rawRepresentation))
     }
 
+    func testV0192RollbackCompatibilityPreservesQueueAndInvalidatesOnlyDerivedIndex() throws {
+        let base=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let source=base.appendingPathComponent("source")
+        try FileManager.default.createDirectory(at:source,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:base) }
+        let db=base.appendingPathComponent("inventory.sqlite")
+        let inventory=try LocalInventory(path:db.path)
+        let journal=try ChangeJournal(path:db.path)
+        try Data("photo".utf8).write(to:source.appendingPathComponent("photo.jpg"))
+        _ = try inventory.reconcile(rootID:"photos",root:source)
+        let id=try journal.enqueue(rootID:"photos",relativePath:"photo.jpg",kind:.upsert,origin:.sourceMonitor)
+        let before=try journal.pending()
+        XCTAssertTrue(before.contains{$0.id==id})
+        XCTAssertNoThrow(try SignedRollbackTransaction.validateCompatibility(database:db))
+        try SignedRollbackTransaction.invalidateDerivedNameIndex(database:db)
+        XCTAssertEqual(try journal.pending(),before)
+        try journal.requireUnilateralNameAudit()
+        XCTAssertThrowsError(try SignedRollbackTransaction.validateCompatibility(database:db))
+        XCTAssertEqual(try journal.pending(),before)
+    }
+
     func testPersistentMarkerRoundTripAndNoOverwrite() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)

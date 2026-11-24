@@ -50,6 +50,7 @@ public struct UpdateRecoveryCoordinator {
         defaults.set(false, forKey: "MacSync.autoCopiesEnabled")
         defaults.set(false, forKey: "MacSync.autoCopiesEnabled.v2")
         defaults.removeObject(forKey: "MacSync.mirrorAuthorization.v1")
+        defaults.removeObject(forKey: "MacSync.mirrorAuthorization.v2")
         defaults.removeObject(forKey: "MacSync.mirrorEnabled")
         if let data = defaults.data(forKey: "MacSync.archiveAuditSettings") {
             if var value = try? JSONDecoder().decode(ArchiveAuditSettings.self, from: data) {

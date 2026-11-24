@@ -76,7 +76,16 @@ public struct SignedRollbackPackage: Equatable, Sendable {
         try validateArchive(zip,signatureText:signature)
         try signature.write(to:staging.appendingPathComponent("previous.edsignature"),options:.withoutOverwriting)
         try Task.checkCancellation()
-        let expanded=staging.appendingPathComponent("expanded",isDirectory:true)
+        return try extractVerified(in:staging)
+    }
+
+    // Verify the signed archive again in the independent installer.
+    public func extractVerified(in staging:URL) throws -> URL {
+        let fm=FileManager.default
+        let zip=staging.appendingPathComponent("previous.zip")
+        let signature=try Data(contentsOf:staging.appendingPathComponent("previous.edsignature"))
+        try validateArchive(zip,signatureText:signature)
+        let expanded=staging.appendingPathComponent("expanded-"+UUID().uuidString,isDirectory:true)
         try fm.createDirectory(at:expanded,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
         let process=Process()
         process.executableURL=URL(fileURLWithPath:"/usr/bin/ditto")
