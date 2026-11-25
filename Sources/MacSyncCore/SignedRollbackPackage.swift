@@ -11,9 +11,9 @@ public struct SignedRollbackPackage: Equatable, Sendable {
     public let sha256:String
 
     public static func previous(for installed:String) -> Self? {
-        guard installed == "0.19.2" else { return nil }
-        return .init(version:"0.19.1",build:"199",byteCount:90_423_835,
-            sha256:"69ad432f94baed0034c74666f707682bf0d25efa5c09bd079d2e3403f2479308")
+        guard installed == "0.19.3" else { return nil }
+        return .init(version:"0.19.2",build:"200",byteCount:74_640_583,
+            sha256:"4aa29fd358f837365bc17aca05a3aeba5c0882589e950cd0295195842d88d0dd")
     }
     public var archiveURL:URL { SignedUpdatePolicy.assetURL(version:version)! }
     public var signatureURL:URL { URL(string:archiveURL.absoluteString+".edsignature")! }

@@ -225,12 +225,14 @@ final class ArchiveAuditAndHistoryTests:XCTestCase {
         let within = try audit.run(mode: .quick)
         XCTAssertEqual(within.count(.matching), 1)
         XCTAssertEqual(within.bytesRead, 0)
+        XCTAssertEqual(within.hashCalculations, 0)
         XCTAssertTrue(try f.journal.pending().isEmpty)
         try FileManager.default.setAttributes([.modificationDate: sourceDate.addingTimeInterval(2.5)],
             ofItemAtPath: f.target.appendingPathComponent("preview.jpg").path)
         let outside = try audit.run(mode: .quick)
         XCTAssertEqual(outside.count(.different), 1)
         XCTAssertEqual(outside.bytesRead, 0)
+        XCTAssertEqual(outside.hashCalculations, 0)
         XCTAssertTrue(try f.journal.pending().isEmpty)
     }
 
@@ -246,10 +248,12 @@ final class ArchiveAuditAndHistoryTests:XCTestCase {
         XCTAssertEqual(first.count(.matching), 1)
         XCTAssertEqual(first.bytesRead, 8, "Two four-byte files must be hashed once")
         XCTAssertEqual(first.hashMatches, 1)
+        XCTAssertEqual(first.hashCalculations, 2)
         XCTAssertTrue(try f.journal.pending().isEmpty)
         let second = try audit.run(mode: .intelligent)
         XCTAssertEqual(second.count(.matching), 1)
         XCTAssertEqual(second.bytesRead, 0, "Cache must avoid re-hashing unchanged content")
+        XCTAssertEqual(second.hashCalculations, 0)
         XCTAssertTrue(try f.journal.pending().isEmpty)
 
         try Data("WXYZ".utf8).write(to: f.target.appendingPathComponent("raw.dng"))

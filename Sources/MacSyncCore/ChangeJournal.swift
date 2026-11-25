@@ -923,6 +923,12 @@ public final class ChangeJournal {
     /// Read-only indexed local proposal check. Exclude the original itself.
     public func classifyLocalNameProposals(_ rows:[IncompatibleName]) throws -> [IncompatibleName] {
         guard !rows.isEmpty else { return rows }
+        let schema=try prepare("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('source_name_members','source_name_index_ready');")
+        defer { sqlite3_finalize(schema) }
+        guard sqlite3_step(schema)==SQLITE_ROW else { throw databaseFailure() }
+        let available=sqlite3_column_int(schema,0)==2
+        guard sqlite3_step(schema)==SQLITE_DONE else { throw databaseFailure() }
+        guard available else { return rows }
         let stmt=try prepare("""
             SELECT EXISTS(SELECT 1 FROM source_name_index_ready WHERE root_id=?1),
                    EXISTS(SELECT 1 FROM source_name_members WHERE root_id=?1

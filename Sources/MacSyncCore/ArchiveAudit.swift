@@ -261,6 +261,8 @@ public struct ArchiveAuditReport: Codable, Equatable, Sendable {
     public var recognizedAbsentDeletes: Int? = nil
     public var metadataMatches: Int? = nil
     public var hashMatches: Int? = nil
+    /// Number of file hash calculations started (including mismatches).
+    public var hashCalculations: Int? = nil
     public var cachedHashMatches: Int? = nil
     public var directoryListingCacheHits: Int? = nil
     public var directoryListingReads: Int? = nil
@@ -422,6 +424,7 @@ public final class ArchiveAudit {
         }
         var findings: [AuditFinding] = []
         var metadataMatches = 0, hashMatches = 0, cachedHashMatches = 0
+        var hashCalculations = 0
         var candidates: [(MountedFolderMapping, TrackedItem, String, SeedFileFingerprint?)] = []
         state.comparisonStarted = Date()
         let comparisonTick = ProcessInfo.processInfo.systemUptime
@@ -572,8 +575,10 @@ public final class ArchiveAudit {
                         let identical:Bool
                         if cacheHit { identical=true }
                         else {
+                            hashCalculations += 1
                             let h1 = try Self.hash(a,expected:beforeA,cancel:cancellation,read:{ read($0,destination:false) })
                             readTick = ProcessInfo.processInfo.systemUptime
+                            hashCalculations += 1
                             let h2 = try Self.hash(b,expected:beforeB,cancel:cancellation,read:{ read($0,destination:true) })
                             identical=h1==h2
                         }
@@ -756,7 +761,7 @@ public final class ArchiveAudit {
             seconds:ProcessInfo.processInfo.systemUptime-startTick,findings:findings,
             bytesRead:state.bytesRead,queuedRepairs:queued,repairRequested:repair,
             sourceMetrics:state.source,destinationMetrics:state.destination,
-            deletionCandidates:finalDeletionCandidates,metadataMatches:metadataMatches,hashMatches:hashMatches,cachedHashMatches:cachedHashMatches,directoryListingCacheHits:listingHits,directoryListingReads:listingReads,displayCounts:state.counts,nameScans:nameScans,comparisonSeconds:comparisonSeconds)
+            deletionCandidates:finalDeletionCandidates,metadataMatches:metadataMatches,hashMatches:hashMatches,hashCalculations:hashCalculations,cachedHashMatches:cachedHashMatches,directoryListingCacheHits:listingHits,directoryListingReads:listingReads,displayCounts:state.counts,nameScans:nameScans,comparisonSeconds:comparisonSeconds)
     }
 
     private func ancestorsHaveAlias(_ path:String,_ ambiguous:Set<String>) -> Bool {

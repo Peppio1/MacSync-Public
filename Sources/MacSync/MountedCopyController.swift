@@ -594,7 +594,7 @@ final class MountedCopyController: ObservableObject {
                 }
                 if let seconds = report.comparisonSeconds {
                     try? auditLog?.record(level: .info, rootID: "app", action: "metric_audit_comparison",
-                        bytes: report.bytesRead, durationSeconds: seconds, message: "Letture per hash e confronto")
+                        bytes: report.bytesRead, durationSeconds: seconds, message: report.mode == .quick ? "Confronto metadati QUICK · nessuna lettura contenuto per hash" : "Confronto "+report.mode.label+" · calcoli hash avviati: "+String(report.hashCalculations ?? 0))
                 }
                 for finding in report.findings where finding.kind == .uncertain {
                     try? auditLog?.record(level:.warning,rootID:finding.rootID,action:"audit_uncertain",relativePath:finding.relativePath,message:finding.detail.isEmpty ? "Confronto non verificabile" : finding.detail)

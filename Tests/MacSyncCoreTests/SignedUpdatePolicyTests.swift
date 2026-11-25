@@ -24,18 +24,19 @@ final class SignedUpdatePolicyTests: XCTestCase {
         XCTAssertEqual(Data(base64Encoded: SignedUpdatePolicy.publicKey)?.count, 32)
     }
 
-    func testV0192RollbackOnlySupportsPinnedPredecessor() throws {
-        let package=try XCTUnwrap(SignedRollbackPackage.previous(for:"0.19.2"))
-        XCTAssertEqual(package.version,"0.19.1")
-        XCTAssertEqual(package.build,"199")
-        XCTAssertEqual(package.byteCount,90_423_835)
-        XCTAssertEqual(package.archiveURL,SignedUpdatePolicy.assetURL(version:"0.19.1"))
+    func testV0193RollbackOnlySupportsPinnedPredecessor() throws {
+        let package=try XCTUnwrap(SignedRollbackPackage.previous(for:"0.19.3"))
+        XCTAssertEqual(package.version,"0.19.2")
+        XCTAssertEqual(package.build,"200")
+        XCTAssertEqual(package.byteCount,74_640_583)
+        XCTAssertEqual(package.sha256,"4aa29fd358f837365bc17aca05a3aeba5c0882589e950cd0295195842d88d0dd")
+        XCTAssertEqual(package.archiveURL,SignedUpdatePolicy.assetURL(version:"0.19.2"))
         XCTAssertEqual(package.signatureURL.absoluteString,package.archiveURL.absoluteString+".edsignature")
         XCTAssertNil(SignedRollbackPackage.previous(for:"0.19.1"))
-        XCTAssertNil(SignedRollbackPackage.previous(for:"0.19.3"))
-        XCTAssertNil(SignedRollbackPackage.previous(for:"0.19.2-rc.1"))
-        XCTAssertFalse(SignedUpdatePolicy.accepts(installed:"0.19.2",requested:"0.19.1",
-            offered:"0.19.1",channel:nil,asset:package.archiveURL))
+        XCTAssertNil(SignedRollbackPackage.previous(for:"0.19.2"))
+        XCTAssertNil(SignedRollbackPackage.previous(for:"0.19.3-rc.1"))
+        XCTAssertFalse(SignedUpdatePolicy.accepts(installed:"0.19.3",requested:"0.19.2",
+            offered:"0.19.2",channel:nil,asset:package.archiveURL))
     }
 
     func testV0192RollbackSignatureRejectsTamperedPayloadAndWrongKey() throws {
