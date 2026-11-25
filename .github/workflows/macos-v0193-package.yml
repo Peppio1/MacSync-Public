@@ -1,0 +1,154 @@
+name: MacSync v0.19.3 universal release candidate
+
+on:
+  push:
+    branches: [release-v0.19.3-prep]
+  workflow_dispatch:
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Intel runner pool alternative; retain the same macOS major release and both build slices.
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    outputs:
+      approved_brand: ${{ steps.brand.outputs.approved }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Tools
+        run: |
+          xcodebuild -version
+          swift --version
+      - name: Prepare branding and verify all icon resolutions
+        id: brand
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/macsync-packaging"
+          "$RUNNER_TEMP/macsync-packaging/bin/python" -m pip install --disable-pip-version-check -r Packaging/requirements-packaging.txt
+          bash Packaging/prepare-branding.sh "$RUNNER_TEMP/macsync-branding" "$RUNNER_TEMP/macsync-packaging/bin/python"
+          approved="$("$RUNNER_TEMP/macsync-packaging/bin/python" -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["approved_original"]).lower())' "$RUNNER_TEMP/macsync-branding/branding-provenance.json")"
+          echo "approved=$approved" >> "$GITHUB_OUTPUT"
+          echo "Approved original: $approved"
+      - name: Prepare pinned Rclone binaries
+        run: bash Packaging/prepare-rclone.sh "$RUNNER_TEMP/macsync-rclone"
+      - name: Release build for Apple Silicon and Intel
+        run: |
+          set -euo pipefail
+          # Keep scratch directories and output files distinct even on
+          # case-insensitive APFS (macsync-arm64 == MacSync-arm64).
+          slices="$RUNNER_TEMP/macsync-release-slices"
+          mkdir -p "$slices"
+          for arch in arm64 x86_64; do
+            scratch="$RUNNER_TEMP/macsync-swift-build-$arch"
+            swift build -c release --arch "$arch" --scratch-path "$scratch" -Xswiftc -warnings-as-errors
+            bin="$(swift build -c release --arch "$arch" --scratch-path "$scratch" --show-bin-path)"
+            source="$bin/MacSync"
+            output="$slices/$arch.macho"
+            printf 'Architecture: %s\nSwift bin directory: %s\nExecutable: %s\nOutput: %s\n' "$arch" "$bin" "$source" "$output"
+            ls -ld "$source"
+            test -f "$source" && test -s "$source" && test -x "$source"
+            file "$source"
+            file -b "$source" | grep -q 'Mach-O.*executable'
+            test ! -e "$output" && test ! -L "$output"
+            install -m 755 "$source" "$output"
+            test -f "$output" && test -s "$output" && test -x "$output"
+            cmp "$source" "$output"
+            lipo "$output" -info
+            lipo "$output" -verify_arch "$arch"
+            test "$(lipo "$output" -archs)" = "$arch"
+            helper="$bin/MacSyncRecovery"
+            test -x "$helper"
+            lipo "$helper" -verify_arch "$arch"
+            install -m 755 "$helper" "$slices/recovery-$arch.macho"
+          done
+      - name: Assemble and verify universal ad hoc bundle
+        run: |
+          set -euo pipefail
+          mkdir -p dist/MacSync.app/Contents/MacOS
+          lipo -create "$RUNNER_TEMP/macsync-release-slices/arm64.macho" "$RUNNER_TEMP/macsync-release-slices/x86_64.macho" -output dist/MacSync.app/Contents/MacOS/MacSync
+          test -f dist/MacSync.app/Contents/MacOS/MacSync
+          test -s dist/MacSync.app/Contents/MacOS/MacSync
+          file dist/MacSync.app/Contents/MacOS/MacSync
+          chmod 755 dist/MacSync.app/Contents/MacOS/MacSync
+          cp Packaging/Info.plist dist/MacSync.app/Contents/Info.plist
+          lipo -create "$RUNNER_TEMP/macsync-release-slices/recovery-arm64.macho" "$RUNNER_TEMP/macsync-release-slices/recovery-x86_64.macho" -output dist/MacSync.app/Contents/MacOS/MacSyncRecovery
+          chmod 755 dist/MacSync.app/Contents/MacOS/MacSyncRecovery
+          lipo dist/MacSync.app/Contents/MacOS/MacSyncRecovery -verify_arch arm64 x86_64
+          codesign --force --sign - dist/MacSync.app/Contents/MacOS/MacSyncRecovery
+          mkdir -p dist/MacSync.app/Contents/Helpers
+          install -m 755 "$RUNNER_TEMP/macsync-rclone/rclone" dist/MacSync.app/Contents/Helpers/rclone
+          lipo dist/MacSync.app/Contents/Helpers/rclone -verify_arch arm64 x86_64
+          codesign --force --sign - dist/MacSync.app/Contents/Helpers/rclone
+          mkdir -p dist/MacSync.app/Contents/Resources
+          install -m 644 Packaging/Rclone-LICENSE.txt dist/MacSync.app/Contents/Resources/Rclone-LICENSE.txt
+          install -m 644 "$RUNNER_TEMP/macsync-rclone/provenance.txt" dist/MacSync.app/Contents/Resources/Rclone-provenance.txt
+          install -m 755 "Packaging/Ripristina MacSync.command" "dist/MacSync.app/Contents/Resources/Ripristina MacSync.command"
+          for f in MacSync.icns MacSyncBrand.png MacSyncMenuTemplate.png branding-provenance.json; do
+            install -m 644 "$RUNNER_TEMP/macsync-branding/$f" "dist/MacSync.app/Contents/Resources/$f"
+          done
+          install -m 644 "Packaging/Guida installazione.html" "dist/MacSync.app/Contents/Resources/Guida installazione.html"
+          framework="$(find "$RUNNER_TEMP/macsync-swift-build-arm64/artifacts" -type d -path '*/macos-*/Sparkle.framework' -print -quit)"
+          test -d "$framework"
+          mkdir -p dist/MacSync.app/Contents/Frameworks
+          ditto "$framework" dist/MacSync.app/Contents/Frameworks/Sparkle.framework
+          lipo dist/MacSync.app/Contents/Frameworks/Sparkle.framework/Sparkle -verify_arch arm64 x86_64
+          info=dist/MacSync.app/Contents/Info.plist
+          exe=dist/MacSync.app/Contents/MacOS/MacSync
+          plutil -lint "$info"
+          version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$info")"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$info")" = com.macsync.prototype
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$info")" = MacSync
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundlePackageType' "$info")" = APPL
+          test "$(/usr/libexec/PlistBuddy -c 'Print LSMinimumSystemVersion' "$info")" = 13.0
+          test "$(/usr/libexec/PlistBuddy -c 'Print LSUIElement' "$info")" = true
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIconFile' "$info")" = MacSync.icns
+          test "$version" = 0.19.3
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$info")" = 201
+          test -s dist/MacSync.app/Contents/Resources/MacSync.icns
+          test -x "$exe"
+          lipo "$exe" -info
+          lipo "$exe" -verify_arch arm64 x86_64
+          otool -L "$exe" | grep -q '@rpath/Sparkle.framework/Versions/B/Sparkle'
+          codesign --force --sign - dist/MacSync.app
+          codesign --verify --deep --strict --verbose=2 dist/MacSync.app
+          zip="MacSync-v$version-macOS-universal.zip"
+          ditto -c -k --sequesterRsrc --keepParent dist/MacSync.app "dist/$zip"
+          mkdir -p "$RUNNER_TEMP/macsync-package-check"
+          ditto -x -k "dist/$zip" "$RUNNER_TEMP/macsync-package-check"
+          unpacked="$RUNNER_TEMP/macsync-package-check/MacSync.app"
+          codesign --verify --deep --strict --verbose=2 "$unpacked"
+          test "$(/usr/libexec/PlistBuddy -c 'Print SUPublicEDKey' "$unpacked/Contents/Info.plist")" = 'SDsuoQo3jF5WNHSC1yo6B92Nanc9bBdjHJ8O474h9LU='
+          lipo "$unpacked/Contents/Frameworks/Sparkle.framework/Sparkle" -verify_arch arm64 x86_64
+          lipo "$unpacked/Contents/MacOS/MacSync" -verify_arch arm64 x86_64
+          lipo "$unpacked/Contents/MacOS/MacSyncRecovery" -verify_arch arm64 x86_64
+          codesign --verify --strict "$unpacked/Contents/MacOS/MacSyncRecovery"
+          lipo "$unpacked/Contents/Helpers/rclone" -verify_arch arm64 x86_64
+          codesign --verify --strict --all-architectures "$unpacked/Contents/Helpers/rclone"
+          "$unpacked/Contents/Helpers/rclone" version | grep -F "rclone v1.76.0"
+          (cd dist && shasum -a 256 "$zip" > "$zip.sha256")
+      - name: Create graphical DMG and verify mounted contents
+        run: bash Packaging/build-dmg.sh dist/MacSync.app "$RUNNER_TEMP/macsync-branding" dist "$RUNNER_TEMP/macsync-packaging/bin/python"
+      - name: Build debug test bundle required by isolated Sparkle recovery laboratory
+        run: swift build --build-tests -Xswiftc -warnings-as-errors
+      - name: Verify signed v0.19.2 predecessor against the final candidate
+        env:
+          MACSYNC_V0193_ROLLBACK_LAB: '1'
+        run: swift test --skip-build --filter SignedRollbackIntegrationTests
+      - name: Validate Sparkle 2.10.0 with disposable signing keys
+        run: |
+          set -euo pipefail
+          version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' dist/MacSync.app/Contents/Info.plist)"
+          bash Packaging/test-sparkle-signing.sh "dist/MacSync-v$version-macOS-universal.zip"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: MacSync-macOS-universal
+          path: |
+            dist/MacSync-v*-macOS-universal.zip
+            dist/MacSync-v*-macOS-universal.zip.sha256
+            dist/MacSync-v*-macOS-universal.dmg
+            dist/MacSync-v*-macOS-universal.dmg.sha256
+          if-no-files-found: error
+          retention-days: 7
