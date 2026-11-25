@@ -570,6 +570,33 @@ final class MirrorDeletionTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath:f.destination.appendingPathComponent("photo1.dng").path))
     }
 
+    func testV0193VerifiedDuplicateCleanupPreservesDifferentBytesAndCorrectedCopy() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        let fm=FileManager.default
+        for (old,new,oldContent) in [("same:old","same-old","same"),("space ","space","same"),("different:old","different-old","other")] {
+            try Data("same".utf8).write(to:f.source.appendingPathComponent(new))
+            try Data("same".utf8).write(to:f.destination.appendingPathComponent(new))
+            try Data(oldContent.utf8).write(to:f.destination.appendingPathComponent(old))
+        }
+        _ = try LocalInventory(path:f.database).reconcile(rootID:"photos",root:f.source)
+        for job in try f.journal.pendingUploads() { try f.journal.markCompleted(id:job.id) }
+        try f.journal.verifyDirectoryBindings([f.mapping],allowNewTarget:true)
+        for old in ["same:old","space ","different:old"] {
+            _ = try f.journal.enqueue(rootID:"photos",relativePath:old,kind:.delete,origin:.sourceMonitor)
+        }
+        let consent=try MirrorAuthorization.capture(journal:f.journal,mappings:[f.mapping],includePendingDeletes:true)
+        let result=try persistentWorker(f,authorization:consent).runCycle()
+        XCTAssertEqual(result.removed,2)
+        XCTAssertFalse(fm.fileExists(atPath:f.destination.appendingPathComponent("same:old").path))
+        XCTAssertFalse(fm.fileExists(atPath:f.destination.appendingPathComponent("space ").path))
+        XCTAssertEqual(try Data(contentsOf:f.destination.appendingPathComponent("different:old")),Data("other".utf8))
+        for name in ["same-old","space","different-old"] {
+            XCTAssertEqual(try Data(contentsOf:f.destination.appendingPathComponent(name)),Data("same".utf8))
+        }
+        XCTAssertEqual(try f.journal.pending().filter{$0.kind == .delete}.map(\.relativePath),["different:old"])
+    }
+
     func testV0192LiteralExtrasDeleteOnlyExactVisiblePaths() throws {
         let f=try fixture()
         defer { try? FileManager.default.removeItem(at:f.base) }

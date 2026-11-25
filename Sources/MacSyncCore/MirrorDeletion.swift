@@ -65,6 +65,7 @@ public enum MirrorDeletionFailure: Error, LocalizedError {
     case unsupportedObject
     case pendingTransfer
     case destinationChanged
+    case duplicateNotVerified
 
     public var errorDescription: String? {
         switch self {
@@ -77,6 +78,7 @@ public enum MirrorDeletionFailure: Error, LocalizedError {
         case .unsupportedObject: return "Elemento speciale: nessuna cancellazione"
         case .pendingTransfer: return "File ricreato o nuovo evento in coda"
         case .destinationChanged: return "Destinazione modificata durante l'operazione"
+        case .duplicateNotVerified: return "Vecchio e nuovo contenuto non dimostrati identici: nessuna cancellazione"
         }
     }
 }
@@ -681,7 +683,13 @@ public final class MirrorDeletionWorker {
                 continue
             }
             let literalOnly = !WindowsPathSafety.validRelativePath(job.relativePath)
-            if !WindowsPathSafety.validDeletionPath(job.relativePath) || (literalOnly && (authorization == nil || policy.recoveryEnabled)) {
+            // An exceptional source-monitor deletion may be a rectification.
+            // No general colon permission, audit-generated colon extra or
+            // recovery bypass. Candidate spelling is NOT proof of identity.
+            let duplicateCandidate = RectifiedDuplicateProof.candidate(job.relativePath)
+            let duplicateAllowed = duplicateCandidate != nil && authorization != nil &&
+                !policy.recoveryEnabled && (try journal.originOfJob(id:job.id)) == .sourceMonitor
+            if (!WindowsPathSafety.validDeletionPath(job.relativePath) && !duplicateAllowed) || (literalOnly && (authorization == nil || policy.recoveryEnabled)) {
                 result.deferred += 1
                 let reason = !WindowsPathSafety.validDeletionPath(job.relativePath)
                     ? "Percorso incompatibile non ammesso alla cancellazione letterale"
@@ -708,7 +716,7 @@ public final class MirrorDeletionWorker {
                     id: job.id, rootID: job.rootID, relativePath: job.relativePath
                 ) else { throw MirrorDeletionFailure.pendingTransfer }
 
-                guard WindowsPathSafety.validDeletionPath(job.relativePath) else { throw MirrorDeletionFailure.unsafePath }
+                guard WindowsPathSafety.validDeletionPath(job.relativePath) || duplicateAllowed else { throw MirrorDeletionFailure.unsafePath }
                 // Fresh SQLite protection check immediately before any mirror
                 // mutation. It cannot be bypassed by stale plan snapshots.
                 guard try !NameRectification.pendingProtection(journal: journal)
@@ -717,6 +725,41 @@ public final class MirrorDeletionWorker {
                     emit(.deferred, job: job, mapping: mapping,
                          detail: "Rettifica nomi pendente: cancellazione sospesa")
                     continue
+                }
+                if duplicateAllowed,let candidate=duplicateCandidate,let authorization {
+                    // The normal literal branch remains available for an
+                    // ordinary trailing-space deletion with no corrected
+                    // local alias. Colons always require exceptional proof.
+                    let localCandidate=mapping.source.appendingPathComponent(candidate.correctedPath)
+                    if job.relativePath.contains(":") || (try Self.statIfPresent(localCandidate)) != nil {
+                        guard try journal.pendingUploads(limit:1).isEmpty else { throw MirrorDeletionFailure.pendingTransfer }
+                        let proof=try RectifiedDuplicateProof.prepare(candidate,mapping:mapping,
+                            shouldContinue:{!self.cancellation.isCancelled && self.operationAllowed()})
+                        try verifyRoots(mapping,baseline)
+                        try evaluateProtection(authorization:authorization,now:Date(),verifyEmpty:false)
+                        guard try journal.deletionIsCurrent(id:job.id,rootID:job.rootID,relativePath:job.relativePath),
+                              try journal.pendingUploads(limit:1).isEmpty,
+                              try !NameRectification.pendingProtection(journal:journal).protects(rootID:job.rootID,path:job.relativePath)
+                        else { throw MirrorDeletionFailure.pendingTransfer }
+                        try journal.recordMirrorAttempt(job)
+                        guard !cancellation.isCancelled,operationAllowed() else { break }
+                        try proof.remove(mapping:mapping,shouldContinue:{
+                            !self.cancellation.isCancelled && self.operationAllowed() &&
+                            ((try? self.journal.pendingUploads(limit:1).isEmpty) == true) &&
+                            ((try? self.journal.deletionIsCurrent(id:job.id,rootID:job.rootID,relativePath:job.relativePath)) == true)
+                        })
+                        try verifyRoots(mapping,baseline)
+                        recordedRemoval=true
+                        if proof.old.directory {
+                            result.directories+=1;emit(.directoryRemoved,job:job,mapping:mapping,detail:"Vecchio percorso rettificato verificato")
+                        } else {
+                            result.removed+=1;emit(.deleted,job:job,mapping:mapping,bytes:Int64(proof.old.info.st_size),detail:"Duplicato rettificato verificato per contenuto")
+                        }
+                        try? log.record(level:.success,rootID:job.rootID,action:"mirror_rectified_duplicate",relativePath:job.relativePath,message:"Vecchio oggetto identificato; copia rettificata verificata")
+                        appliedDuringSession+=1
+                        _ = try journal.acknowledgeDeletion(id:job.id,rootID:job.rootID,relativePath:job.relativePath)
+                        continue
+                    }
                 }
                 let source:URL
                 let destination:URL
