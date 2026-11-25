@@ -203,6 +203,31 @@ final class LocalInventoryTests: XCTestCase {
         XCTAssertEqual(try ChangeJournal(path: db.path).pending(), before)
     }
 
+    func testV0193FourFileRenameDoesNotDuplicatePendingPaths() throws {
+        let (base,root,db)=try temporaryFixture()
+        defer { try? FileManager.default.removeItem(at:base) }
+        let old=root.appendingPathComponent("before")
+        let new=root.appendingPathComponent("after")
+        try FileManager.default.createDirectory(at:old,withIntermediateDirectories:true)
+        for name in ["a.jpg","b.png","c.dng","d.psd"] {
+            try Data(name.utf8).write(to:old.appendingPathComponent(name))
+        }
+        let inventory=try LocalInventory(path:db.path)
+        _ = try inventory.reconcile(rootID:"photos",root:root,origin:.initialInventory)
+        try FileManager.default.moveItem(at:old,to:new)
+        let result=try inventory.reconcile(rootID:"photos",root:root)
+        XCTAssertEqual(result.queuedUpserts,5)
+        XCTAssertEqual(result.queuedDeletes,5)
+        let journal=try ChangeJournal(path:db.path)
+        let first=try journal.pending()
+        XCTAssertEqual(first.count,10)
+        XCTAssertEqual(Set(first.map(\.relativePath)).count,10)
+        XCTAssertEqual(try journal.pendingUploads().count,5)
+        XCTAssertEqual(try journal.pendingDeletePage(afterID:0,throughID:Int64.max).last?.relativePath,"before")
+        _ = try inventory.reconcile(rootID:"photos",root:root)
+        XCTAssertEqual(try journal.pending(),first)
+    }
+
     func testDirectoryRenameDiscoversBothSides() throws {
         let (base, root, db) = try temporaryFixture()
         defer { try? FileManager.default.removeItem(at: base) }

@@ -1299,6 +1299,10 @@ public final class ChangeJournal {
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             guard job.kind == .delete,let map=maps[job.rootID],
                   WindowsPathSafety.validDeletionPath(job.relativePath),
+                  // SMB can hide an incompatible server-side name even when
+                  // enumeration and stat report no object. Only native local
+                  // target filesystems may prove literal absence this way.
+                  WindowsPathSafety.validRelativePath(job.relativePath) || ["apfs","hfs"].contains(map.targetVolume.fileSystem.lowercased()),
                   !FileExclusionPolicy.excludes(job.relativePath,enabled:FileExclusionPolicy.ignoreDSStore) else { continue }
             do {
                 if try absent(job.relativePath,under:map.source),

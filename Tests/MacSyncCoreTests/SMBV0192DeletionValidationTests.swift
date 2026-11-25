@@ -3,6 +3,58 @@ import XCTest
 @testable import MacSyncCore
 
 final class SMBV0192DeletionValidationTests:XCTestCase {
+    func testV0193HiddenLiteralJobsAndColonDiagnosticRemainNonDestructive() throws {
+        let env=ProcessInfo.processInfo.environment
+        guard env["MACSYNC_V0192_REQUIRE_SMB"]=="1" else { throw XCTSkip("Disposable SMB fixture opt-in") }
+        guard env["MACSYNC_TEST_SMB_HOST"]=="127.0.0.1",env["MACSYNC_TEST_SMB_SHARE"]=="MacSyncCI" else {
+            XCTFail("Unexpected SMB fixture");return
+        }
+        let mount=URL(fileURLWithPath:try XCTUnwrap(env["MACSYNC_TEST_SMB_MOUNT"]))
+        let binding=try DirectoryBinding.read(mount)
+        guard binding.volume.fileSystem.lowercased()=="smbfs",binding.volume.isStrongIdentity else {
+            XCTFail("Genuine SMB mount required");return
+        }
+        let fixture=URL(fileURLWithPath:try XCTUnwrap(env["MACSYNC_TEST_SMB_ROOT"]))
+        let rawPath=try String(contentsOf:fixture.appendingPathComponent("share-path"),encoding:.utf8).trimmingCharacters(in:.whitespacesAndNewlines)
+        guard rawPath.hasPrefix("/private/tmp/macsync-ci-share.") else { XCTFail("Unexpected disposable root");return }
+        let raw=URL(fileURLWithPath:rawPath).appendingPathComponent("macsync-ci-colon")
+        let target=mount.appendingPathComponent("macsync-ci-colon")
+        let fm=FileManager.default
+        let base=fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let source=base.appendingPathComponent("source")
+        try fm.createDirectory(at:source,withIntermediateDirectories:true)
+        defer { try? fm.removeItem(at:base) }
+        let corrected=source.appendingPathComponent("SFM-old")
+        try fm.createDirectory(at:corrected,withIntermediateDirectories:true)
+        let dst=target.appendingPathComponent("SFM-old/child.jpg")
+        let src=corrected.appendingPathComponent("child.jpg")
+        try Data(contentsOf:dst).write(to:src)
+        try fm.setAttributes([.modificationDate:try XCTUnwrap(fm.attributesOfItem(atPath:dst.path)[.modificationDate] as? Date)],ofItemAtPath:src.path)
+        let db=base.appendingPathComponent("queue.sqlite")
+        _ = try LocalInventory(path:db.path).reconcile(rootID:"photos",root:source,origin:.initialInventory)
+        let journal=try ChangeJournal(path:db.path)
+        let map=try MountedFolderMapping(rootID:"photos",source:source,target:target)
+        try journal.verifyDirectoryBindings([map],allowNewTarget:true)
+        for name in ["Raw:old","SFM:old","SFM:old/child.jpg","unseen."] {
+            _ = try journal.enqueue(rootID:"photos",relativePath:name,kind:.delete,origin:.sourceMonitor)
+        }
+        let session=try SeededArchiveSession(database:db,mappings:[map])
+        let report=try session.auditPreservingQueuedChanges(mode:.quick,repair:true,reconcileOrdinaryJobs:true)
+        XCTAssertEqual(report.bytesRead,0)
+        XCTAssertEqual(report.recognizedAbsentDeletes,0)
+        XCTAssertTrue(Set(try journal.pending().map(\.relativePath)).isSuperset(of:["Raw:old","SFM:old","SFM:old/child.jpg","unseen."]))
+        let names=try fm.contentsOfDirectory(atPath:target.path)
+        for name in names where name != "SFM-old" {
+            print("Synthetic SMB name UTF-8: "+name.utf8.map{String(format:"%02X",$0)}.joined(separator:" "))
+            if let url=try? map.verificationURL(relativePath:name,destination:true) {
+                print("Exact read-only path verified: "+String(url.lastPathComponent.utf8.elementsEqual(name.utf8)))
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf:raw.appendingPathComponent("Raw:old/child.jpg")),Data("raw colon bytes".utf8))
+        XCTAssertEqual(try Data(contentsOf:raw.appendingPathComponent("SFM\u{F022}old/child.jpg")),Data("sfm colon bytes".utf8))
+        XCTAssertEqual(try Data(contentsOf:raw.appendingPathComponent("SFM-old/child.jpg")),Data("corrected bytes".utf8))
+    }
+
     func testExactVisibleExtraDeletionAndHiddenOrEquivalentNameProtection() throws {
         let env=ProcessInfo.processInfo.environment
         guard env["MACSYNC_V0192_REQUIRE_SMB"]=="1" else { throw XCTSkip("Disposable SMB fixture opt-in") }
