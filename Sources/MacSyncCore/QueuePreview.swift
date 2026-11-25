@@ -53,4 +53,5 @@ public struct QueuePreviewRow: Identifiable, Sendable, Equatable {
 public struct QueuePreviewPage: Sendable {
     public let rows:[QueuePreviewRow]
     public let hasMore:Bool
+    public init(rows:[QueuePreviewRow],hasMore:Bool) { self.rows=rows;self.hasMore=hasMore }
 }

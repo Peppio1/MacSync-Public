@@ -1030,7 +1030,9 @@ public final class ChangeJournal {
                              now:Date=Date()) throws -> QueuePreviewPage {
         let cutoff=cursor == nil ? mirrorCutoff : cursor?.mirrorCutoff
         let phase=cursor?.phase.rawValue ?? "idle"
-        let held=paused || (try queueRebuildToken()) != nil || (try mirrorBlockReason()) != nil
+        let rebuilding=try queueRebuildToken() != nil
+        let mirrorBlocked=try mirrorBlockReason() != nil
+        let held=paused || rebuilding || mirrorBlocked
         let sql="""
             WITH classified AS (
               SELECT id,root_id,relative_path,kind,recorded_at,origin,
@@ -1053,19 +1055,21 @@ public final class ChangeJournal {
               FROM change_queue q WHERE completed=0 AND (?10='all' OR kind=?10)
                 AND (?11='' OR instr(lower(relative_path),lower(?11))>0 OR instr(lower(root_id),lower(?11))>0)
             ), selected AS (
-              SELECT * FROM classified WHERE ?12='all'
-                OR (?12='planned' AND state IN ('current','planned','waitingCopies'))
-                OR (?12='blocked' AND state NOT IN ('current','planned','waitingCopies'))
-              ORDER BY CASE WHEN state='current' THEN 0
+              SELECT *, CASE WHEN state='current' THEN 0
                   WHEN state IN ('planned','waitingCopies') AND kind='upsert' THEN 1
                   WHEN state IN ('planned','waitingCopies') AND kind='delete' THEN 2
-                  WHEN kind='upsert' THEN 3 ELSE 4 END,
+                  WHEN kind='upsert' THEN 3 ELSE 4 END AS sort_rank
+              FROM classified WHERE ?12='all'
+                OR (?12='planned' AND state IN ('current','planned','waitingCopies'))
+                OR (?12='blocked' AND state NOT IN ('current','planned','waitingCopies'))
+              ORDER BY sort_rank,
                 CASE WHEN kind='delete' THEN \(QueueExecutionOrder.deleteLengthSQL) ELSE 0 END DESC,
                 \(QueueExecutionOrder.idSQL) LIMIT ?13 OFFSET ?14
             )
             SELECT s.id,s.root_id,s.relative_path,s.kind,s.recorded_at,s.origin,
                    COALESCE(f.kind,''),s.state
-              FROM selected s LEFT JOIN file_inventory f ON f.root_id=s.root_id AND f.relative_path=s.relative_path;
+              FROM selected s LEFT JOIN file_inventory f ON f.root_id=s.root_id AND f.relative_path=s.relative_path
+              ORDER BY s.sort_rank, CASE WHEN s.kind='delete' THEN length(s.relative_path) ELSE 0 END DESC, s.id;
             """
         let stmt=try prepare(sql)
         defer { sqlite3_finalize(stmt) }

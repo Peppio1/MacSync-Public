@@ -124,6 +124,42 @@ final class V0191MaintenanceTests: XCTestCase {
         XCTAssertEqual(skipped.answer(at:101),false)
     }
 
+    func testV0193QueuePreviewWorkerPriorityCursorAndMirrorHold() throws {
+        let base=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:base,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:base) }
+        let path=base.appendingPathComponent("queue.sqlite").path
+        _ = try LocalInventory(path:path)
+        let journal=try ChangeJournal(path:path)
+        _ = try journal.enqueue(rootID:"demo",relativePath:"old",kind:.delete)
+        _ = try journal.enqueue(rootID:"demo",relativePath:"new/a.jpg",kind:.upsert)
+        _ = try journal.enqueue(rootID:"demo",relativePath:"old/a.jpg",kind:.delete)
+        _ = try journal.enqueue(rootID:"demo",relativePath:"new/b.jpg",kind:.upsert)
+        let all=try journal.pending()
+        let uploads=try journal.pendingUploads()
+        let deletes=try journal.pendingDeletePage(afterID:0,throughID:Int64.max)
+        let reader=try ChangeJournal(path:path,readOnly:true)
+        let page=try reader.queuePreview(mirrorCutoff:0,limit:2)
+        XCTAssertEqual(page.rows.map(\.job),uploads)
+        XCTAssertTrue(page.hasMore)
+        let next=try reader.queuePreview(mirrorCutoff:0,offset:2,limit:2)
+        XCTAssertEqual(next.rows.map(\.job),deletes)
+        XCTAssertTrue(next.rows.allSatisfy{$0.status == .waitingCopies})
+        let off=try reader.queuePreview()
+        XCTAssertTrue(off.rows.filter{$0.job.kind == .delete}.allSatisfy{$0.status == .mirrorOff})
+        var cursor=QueueExecutionCursor(upperID:try XCTUnwrap(all.last?.id),mirrorCutoff:0)
+        cursor.consider(uploads[0])
+        XCTAssertEqual(try reader.queuePreview(cursor:cursor).rows.first?.status,.current)
+        cursor.currentID=nil
+        let resumed=try reader.queuePreview(cursor:cursor)
+        XCTAssertEqual(resumed.rows.first?.job,uploads[1])
+        XCTAssertEqual(resumed.rows.last(where:{$0.job.id==uploads[0].id})?.status,.laterCycle)
+        let held=try reader.queuePreview(mirrorCutoff:0,paused:true)
+        XCTAssertTrue(held.rows.allSatisfy{$0.status == .hold})
+        XCTAssertEqual(try reader.queuePreview(search:"a.jpg",kind:"delete").rows.map(\.job),[deletes[0]])
+        XCTAssertEqual(try journal.pending(),all)
+    }
+
     func testV0193LiveDeferredSummaryDoesNotRewriteHistory() throws {
         let base=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at:base,withIntermediateDirectories:true)
