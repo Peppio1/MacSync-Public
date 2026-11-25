@@ -1,7 +1,7 @@
 name: v0.19.3 mounted SMB deletion validation
 on:
   push:
-    branches: [validate-v0.19.3-smb]
+    branches: [validate-v0.19.3-smb-duplicate]
   workflow_dispatch:
 permissions:
   contents: read
