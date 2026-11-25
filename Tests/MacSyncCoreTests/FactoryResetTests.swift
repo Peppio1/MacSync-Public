@@ -20,15 +20,16 @@ final class FactoryResetTests: XCTestCase {
         let original = photos.appendingPathComponent("original.jpg")
         try Data([1]).write(to: original)
 
-        try FactoryReset.completeIfScheduled(in: storage) { XCTFail("No reset was confirmed") }
+        XCTAssertFalse(try FactoryReset.completeIfScheduled(in: storage) { XCTFail("No reset was confirmed") })
         XCTAssertTrue(fm.fileExists(atPath: storage.appendingPathComponent("inventory.sqlite").path))
         XCTAssertThrowsError(try FactoryReset.schedule(in: storage, configuredPaths: [backups.path]))
+        XCTAssertThrowsError(try FactoryReset.schedule(in: storage, configuredPaths: [base.path]))
         try FactoryReset.schedule(in: storage, configuredPaths: [photos.path])
         var preferencesCleared = false
-        try FactoryReset.completeIfScheduled(in: storage) { preferencesCleared = true }
+        XCTAssertTrue(try FactoryReset.completeIfScheduled(in: storage) { preferencesCleared = true })
         XCTAssertTrue(preferencesCleared)
         XCTAssertEqual(try fm.contentsOfDirectory(atPath: storage.path), ["archive.lock"])
         XCTAssertEqual(try Data(contentsOf: original), Data([1]))
-        try FactoryReset.completeIfScheduled(in: storage) { XCTFail("The reset must not repeat") }
+        XCTAssertFalse(try FactoryReset.completeIfScheduled(in: storage) { XCTFail("The reset must not repeat") })
     }
 }

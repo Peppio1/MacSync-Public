@@ -12,6 +12,23 @@ import MacSyncCore
 final class MacSyncRuntime: ObservableObject {
     static weak var operationalRuntime: MacSyncRuntime?
     private let storageGuard: RuntimeStorageGuard?
+    private var startupWindowPresented=false
+    /// Only maintenance launches request foreground; normal login behavior is unchanged.
+    func presentStartupWindowIfNeeded() {
+        guard !previewOnly, !startupWindowPresented, let storageGuard,storageGuard.presentWindowOnStartup else { return }
+        NSApp.activate(ignoringOtherApps:true)
+        guard let window=NSApp.windows.first(where:{$0.title=="MacSync"}) else { return }
+        startupWindowPresented=true
+        window.deminiaturize(nil)
+        window.makeKeyAndOrderFront(nil)
+        if storageGuard.completedReset {
+            let alert=NSAlert()
+            alert.messageText="Azzeramento completato"
+            alert.informativeText="I precedenti dati interni (configurazione, database, coda, registri, inventari e backup interni) sono stati eliminati e verificati. MacSync ha creato un archivio nuovo. I file nelle cartelle sincronizzate e le voci del Portachiavi non sono stati modificati."
+            alert.addButton(withTitle:"Continua")
+            alert.beginSheetModal(for:window,completionHandler:nil)
+        }
+    }
     @Published private(set) var shuttingDown = false
     private var shutdownCompletion: (@MainActor () -> Void)?
     private var shutdownWorkersDrained = false
@@ -407,9 +424,9 @@ final class MacSyncRuntime: ObservableObject {
         let confirmation = NSAlert()
         confirmation.alertStyle = .warning
         confirmation.messageText = "Azzerare tutti i dati di MacSync?"
-        confirmation.informativeText = "Verranno eliminati configurazione, database, coda, registri e backup interni. I file nelle cartelle sincronizzate e le voci del Portachiavi restano intatti. MacSync si chiuderà e completerà il ripristino alla prossima apertura."
+        confirmation.informativeText = "Verranno eliminati configurazione, database, coda, registri e backup interni. I file nelle cartelle sincronizzate e le voci del Portachiavi restano intatti. MacSync chiuderà le attività, si riavvierà automaticamente e mostrerà la conferma solo dopo il ripristino verificato."
         confirmation.addButton(withTitle: "Annulla")
-        confirmation.addButton(withTitle: "Azzera dati e chiudi")
+        confirmation.addButton(withTitle: "Azzera e riavvia")
         guard confirmation.runModal() == .alertSecondButtonReturn else { return }
         let paths = model.configuredPairs().flatMap { [$0.path, $0.destination] } +
             [model.photoUploads, model.photoEditing, model.destinationUploads, model.destinationEditing]
@@ -420,12 +437,23 @@ final class MacSyncRuntime: ObservableObject {
                 if service.status == .enabled || service.status == .requiresApproval {
                     try service.unregister()
                 }
+                let executable=Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/MacSyncRecovery")
+                guard FileManager.default.isExecutableFile(atPath:executable.path) else {
+                    throw JournalError.database("Strumento di riavvio mancante.")
+                }
                 try storageGuard.scheduleFactoryReset(configuredPaths: paths)
+                let helper=Process()
+                helper.executableURL=executable
+                helper.arguments=["--restart-after-reset",Bundle.main.bundleURL.path,String(ProcessInfo.processInfo.processIdentifier)]
+                helper.standardInput=FileHandle.nullDevice
+                helper.standardOutput=FileHandle.nullDevice
+                helper.standardError=FileHandle.nullDevice
+                try helper.run()
             } catch {
                 let alert = NSAlert()
                 alert.alertStyle = .warning
-                alert.messageText = "Ripristino non avviato"
-                alert.informativeText = error.localizedDescription
+                alert.messageText = "Riavvio automatico non confermato"
+                alert.informativeText = error.localizedDescription+"\n\nRiapri manualmente MacSync. Il ripristino sarà confermato solo se effettivamente completato."
                 alert.addButton(withTitle: "Chiudi MacSync")
                 alert.runModal()
             }

@@ -598,6 +598,7 @@ struct MacSyncConfigurationView: View {
         .frame(minWidth: 980, minHeight: 660)
         .onAppear {
             guard !runtime.previewOnly else { return }
+            DispatchQueue.main.async { runtime.presentStartupWindowIfNeeded() }
             copy.loadLastAudit()
             copy.refreshIncompatibleNames(pairs:model.configuredPairs())
             copy.loadLastCycle()

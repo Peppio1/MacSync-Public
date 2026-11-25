@@ -9,9 +9,13 @@ import MacSyncCore
 final class RuntimeStorageGuard {
     private let lock: ExclusiveArchiveLock
     private let folder: URL
-    private init(lock: ExclusiveArchiveLock, folder: URL) {
+    let presentWindowOnStartup:Bool
+    let completedReset:Bool
+    private init(lock: ExclusiveArchiveLock, folder: URL,presentWindowOnStartup:Bool,completedReset:Bool) {
         self.lock = lock
         self.folder = folder
+        self.presentWindowOnStartup=presentWindowOnStartup
+        self.completedReset=completedReset
     }
 
     /// Only called by the drained runtime while this guard owns the lock.
@@ -44,6 +48,7 @@ final class RuntimeStorageGuard {
             "\n\nCopie automatiche, cancellazioni e verifiche pianificate restano disattivate. Controlla le impostazioni e riabilitale esplicitamente."
         alert.addButton(withTitle: "Continua")
         alert.addButton(withTitle: "Apri backup ed esci")
+        NSApp.activate(ignoringOtherApps:true)
         if alert.runModal() != .alertFirstButtonReturn {
             NSWorkspace.shared.open(pending.snapshot)
             Darwin.exit(0)
@@ -60,13 +65,17 @@ final class RuntimeStorageGuard {
             let lock = try ExclusiveArchiveLock(url:folder.appendingPathComponent("archive.lock"))
             let db = folder.appendingPathComponent("inventory.sqlite")
             let defaults = UserDefaults.standard
-            try FactoryReset.completeIfScheduled(in: folder) {
+            let completedReset=try FactoryReset.completeIfScheduled(in: folder) {
                 if let identifier = Bundle.main.bundleIdentifier {
                     defaults.removePersistentDomain(forName: identifier)
                 }
                 let legacyKeys = defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix("MacSync.") }
                 for key in legacyKeys { defaults.removeObject(forKey: key) }
                 guard defaults.synchronize() else { throw CocoaError(.fileWriteUnknown) }
+                if let identifier=Bundle.main.bundleIdentifier,
+                   let remaining=defaults.persistentDomain(forName:identifier),!remaining.isEmpty {
+                    throw JournalError.database("Preferenze non completamente eliminate; ripristino non concluso.")
+                }
             }
             let exists = FileManager.default.fileExists(atPath:db.path)
             let previousIdentity = defaults.string(forKey:"MacSync.databaseFileIdentity.v014")
@@ -117,7 +126,8 @@ final class RuntimeStorageGuard {
                 } else { try ArchiveDatabaseSafety.verify(day,readOnly:true) }
             }
             if let pendingUpdate { try UpdateRecoveryCoordinator(root: folder).complete(pendingUpdate, defaults: defaults) }
-            return RuntimeStorageGuard(lock:lock, folder:folder)
+            let foreground=completedReset || pendingUpdate != nil || CommandLine.arguments.contains("--macsync-show-window")
+            return RuntimeStorageGuard(lock:lock,folder:folder,presentWindowOnStartup:foreground,completedReset:completedReset)
         } catch {
             let alert = NSAlert()
             alert.alertStyle = .critical

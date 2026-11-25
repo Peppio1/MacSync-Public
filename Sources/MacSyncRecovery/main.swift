@@ -3,6 +3,46 @@ import Darwin
 import AppKit
 import MacSyncCore
 
+/// Relaunch the same verified bundle only after its original process has exited.
+if CommandLine.arguments.count==4,CommandLine.arguments[1]=="--restart-after-reset" {
+    do {
+        guard let parent=Int32(CommandLine.arguments[3]),parent>1,parent != getpid() else {
+            throw ApplicationRollback.Failure("Processo di origine non valido.")
+        }
+        let target=URL(fileURLWithPath:CommandLine.arguments[2],isDirectory:true).standardizedFileURL.resolvingSymlinksInPath()
+        let executable=URL(fileURLWithPath:CommandLine.arguments[0]).standardizedFileURL.resolvingSymlinksInPath()
+        let expected=target.appendingPathComponent("Contents/MacOS/MacSyncRecovery")
+        guard executable.path==expected.path,
+              let version=Bundle(url:target)?.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String else {
+            throw ApplicationRollback.Failure("Applicazione di riavvio non valida.")
+        }
+        try ApplicationRollback.validateBundle(target,version:version)
+        let deadline=ProcessInfo.processInfo.systemUptime+45
+        while kill(parent,0)==0 || errno != ESRCH {
+            guard ProcessInfo.processInfo.systemUptime<deadline else {
+                throw ApplicationRollback.Failure("MacSync non si è chiuso.")
+            }
+            Thread.sleep(forTimeInterval:0.2)
+        }
+        let launch=Process()
+        launch.executableURL=URL(fileURLWithPath:"/usr/bin/open")
+        launch.arguments=["-n",target.path,"--args","--macsync-show-window"]
+        try launch.run();launch.waitUntilExit()
+        guard launch.terminationStatus==0 else { throw ApplicationRollback.Failure("Apertura automatica non riuscita.") }
+        exit(0)
+    } catch {
+        let app=NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        let alert=NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText="Riavvio MacSync"
+        alert.informativeText=error.localizedDescription+"\n\nApri MacSync manualmente. L’azzeramento non è ancora confermato."
+        app.activate(ignoringOtherApps:true)
+        alert.runModal()
+        exit(1)
+    }
+}
+
 /// Independent binary launched from the verified snapshot, no sudo.
 if CommandLine.arguments.count==5,CommandLine.arguments[1]=="--signed-rollback" {
     do {
@@ -35,7 +75,7 @@ if CommandLine.arguments.count==5,CommandLine.arguments[1]=="--signed-rollback" 
         try installStopped()
         let launch=Process()
         launch.executableURL=URL(fileURLWithPath:"/usr/bin/open")
-        launch.arguments=["-n",target.path]
+        launch.arguments=["-n",target.path,"--args","--macsync-show-window"]
         try launch.run();launch.waitUntilExit()
         guard launch.terminationStatus==0 else {
             throw ApplicationRollback.Failure("Ripristino completato; apri MacSync da Applicazioni.")
