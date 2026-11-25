@@ -1,0 +1,22 @@
+name: v0.19.3 published-package rollback laboratory
+on:
+  push:
+    branches: [validate-v0.19.3-rollback]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macsync-v0193-rollback-validation
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Verify actual previous release and isolated offline rollback
+        env:
+          MACSYNC_V0193_ROLLBACK_LAB: '1'
+        run: swift test -Xswiftc -warnings-as-errors --filter SignedRollbackIntegrationTests
