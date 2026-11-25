@@ -90,9 +90,11 @@ final class SeededArchiveVerifierTests: XCTestCase {
         try write("keep on server",to:f.target.appendingPathComponent("extra.jpg"))
         try write("local",to:f.source.appendingPathComponent("recreated.jpg"))
         try write("keep alias",to:f.target.appendingPathComponent("Alias.jpg"))
+        try write("keep corrected spelling",to:f.target.appendingPathComponent("alias"))
+        try write("keep literal old item",to:f.target.appendingPathComponent("present."))
         _ = try LocalInventory(path:f.db.path).reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
         try f.journal.verifyDirectoryBindings([f.mapping],allowNewTarget:true)
-        for name in ["gone.jpg","extra.jpg","recreated.jpg","alias.jpg","unsafe.","newer.jpg"] {
+        for name in ["gone.jpg","extra.jpg","recreated.jpg","alias.jpg","unsafe.","gone ","gone-parent./child.jpg","alias.","present.","unsafe:ads","newer.jpg"] {
             _ = try f.journal.enqueue(rootID:"photos",relativePath:name,kind:.delete,origin:.sourceMonitor)
         }
         let session=try SeededArchiveSession(database:f.db,mappings:[f.mapping])
@@ -104,10 +106,12 @@ final class SeededArchiveVerifierTests: XCTestCase {
             }
         },reconcileOrdinaryJobs:true)
         XCTAssertTrue(inserted)
-        XCTAssertEqual(report.recognizedAbsentDeletes,1)
+        XCTAssertEqual(report.recognizedAbsentDeletes,4)
         let paths=Set(try f.journal.pending().map(\.relativePath))
-        XCTAssertFalse(paths.contains("gone.jpg"))
-        XCTAssertTrue(paths.isSuperset(of:["extra.jpg","recreated.jpg","alias.jpg","unsafe.","newer.jpg"]))
+        XCTAssertTrue(paths.isDisjoint(with:["gone.jpg","unsafe.","gone ","gone-parent./child.jpg"]))
+        XCTAssertTrue(paths.isSuperset(of:["extra.jpg","recreated.jpg","alias.jpg","alias.","present.","unsafe:ads","newer.jpg"]))
+        XCTAssertTrue(FileManager.default.fileExists(atPath:f.target.appendingPathComponent("alias").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath:f.target.appendingPathComponent("present.").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath:f.target.appendingPathComponent("extra.jpg").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath:f.target.appendingPathComponent("Alias.jpg").path))
     }

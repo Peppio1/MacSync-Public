@@ -1298,7 +1298,7 @@ public final class ChangeJournal {
         for job in entries {
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             guard job.kind == .delete,let map=maps[job.rootID],
-                  WindowsPathSafety.validRelativePath(job.relativePath),
+                  WindowsPathSafety.validDeletionPath(job.relativePath),
                   !FileExclusionPolicy.excludes(job.relativePath,enabled:FileExclusionPolicy.ignoreDSStore) else { continue }
             do {
                 if try absent(job.relativePath,under:map.source),
@@ -1329,10 +1329,19 @@ public final class ChangeJournal {
             for job in verified {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 guard let map=maps[job.rootID],!protection.protects(rootID:job.rootID,path:job.relativePath) else { continue }
-                let url=try map.fileURL(relativePath:job.relativePath,destination:false)
+                // Only metadata reads on the local source in the write transaction.
+                // Recheck the same strict absence predicate for repairable
+                // literal names; an equivalent spelling is not absence.
+                guard WindowsPathSafety.validDeletionPath(job.relativePath) else { continue }
+                let url=map.source.appendingPathComponent(job.relativePath)
                 var info=stat()
                 guard url.resolvingSymlinksInPath().path==url.path,
                       url.path.withCString({lstat($0,&info)}) != 0,errno==ENOENT else { continue }
+                if !WindowsPathSafety.validRelativePath(job.relativePath) {
+                    do { guard try absent(job.relativePath,under:map.source) else { continue } }
+                    catch SeedVerificationError.cancelled { throw SeedVerificationError.cancelled }
+                    catch { cache.invalidate(); continue }
+                }
                 sqlite3_reset(stmt);sqlite3_clear_bindings(stmt)
                 guard sqlite3_bind_int64(stmt,1,job.id)==SQLITE_OK else { throw databaseFailure() }
                 try bind(job.rootID,at:2,in:stmt);try bind(job.relativePath,at:3,in:stmt)
