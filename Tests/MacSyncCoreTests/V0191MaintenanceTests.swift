@@ -124,6 +124,27 @@ final class V0191MaintenanceTests: XCTestCase {
         XCTAssertEqual(skipped.answer(at:101),false)
     }
 
+    func testV0193LiveDeferredSummaryDoesNotRewriteHistory() throws {
+        let base=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:base,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:base) }
+        let path=base.appendingPathComponent("queue.sqlite").path
+        let journal=try ChangeJournal(path:path)
+        _ = try journal.enqueue(rootID:"demo",relativePath:"file.jpg",kind:.upsert)
+        let job=try XCTUnwrap(journal.pending().first)
+        let history=try SyncCycleHistory(path:path)
+        try history.begin(id:"cycle",sessionID:"session",at:Date())
+        let deferred=SyncCycleEvent(kind:.deferred,job:job,mapping:nil)
+        try history.append(cycleID:"cycle",event:deferred)
+        try history.append(cycleID:"cycle",event:deferred)
+        try history.finish(id:"cycle",at:Date(),seconds:1,state:"partial")
+        XCTAssertEqual(try history.pendingDeferredCount(cycleID:"cycle"),1)
+        _ = try journal.resetPendingQueue(backup:base.appendingPathComponent("backup.sqlite"))
+        let reader=try SyncCycleHistory(path:path,readOnly:true)
+        XCTAssertEqual(try reader.pendingDeferredCount(cycleID:"cycle"),0)
+        XCTAssertEqual(try reader.totals(cycleID:"cycle").stats.deferred,2)
+    }
+
     func testFinalizedTotalsSurviveMissingDetailRow() throws {
         let base=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at:base,withIntermediateDirectories:true)

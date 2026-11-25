@@ -681,9 +681,12 @@ public final class MirrorDeletionWorker {
             let literalOnly = !WindowsPathSafety.validRelativePath(job.relativePath)
             if !WindowsPathSafety.validDeletionPath(job.relativePath) || (literalOnly && (authorization == nil || policy.recoveryEnabled)) {
                 result.deferred += 1
-                emit(.deferred,job:job,mapping:mapping,detail:"Nome incompatibile: nessuna cancellazione consentita")
+                let reason = !WindowsPathSafety.validDeletionPath(job.relativePath)
+                    ? "Percorso incompatibile non ammesso alla cancellazione letterale"
+                    : (authorization == nil ? "Cancellazione letterale senza autorizzazione mirror" : "Cancellazione letterale incompatibile con recupero attivo")
+                emit(.deferred,job:job,mapping:mapping,detail:reason)
                 if try journal.noteBlockedName(job) {
-                    try? log.record(level:.warning,rootID:job.rootID,action:"name_blocked",relativePath:job.relativePath,message:"Nome incompatibile: cancellazione sospesa; coda preservata")
+                    try? log.record(level:.warning,rootID:job.rootID,action:"name_blocked",relativePath:job.relativePath,message:reason+"; coda preservata")
                 }
                 continue
             }
@@ -835,12 +838,13 @@ public final class MirrorDeletionWorker {
                     throw MirrorDeletionFailure.bulkDeletion(reason)
                 }
                 result.deferred += 1
-                if !recordedRemoval { emit(.deferred,job:job,mapping:mapping,detail:error.localizedDescription) }
+                let detail = (error as? MirrorDeletionFailure)?.localizedDescription ?? SyncDiagnostic.describe(error)
+                if !recordedRemoval { emit(.deferred,job:job,mapping:mapping,detail:detail) }
                 try? log.record(
                     level: .warning, rootID: job.rootID, action: "mirror_deferred",
                     relativePath: job.relativePath,
                     message: "Operazione non eseguita o non completata: "
-                        + ((error as? MirrorDeletionFailure)?.localizedDescription ?? "filesystem/volume non disponibile")
+                        + detail
                 )
             }
         }

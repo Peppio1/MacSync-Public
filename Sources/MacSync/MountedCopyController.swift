@@ -134,6 +134,33 @@ final class MountedCopyController: ObservableObject {
     }
     @Published var mirrorStatus = "Cancellazioni speculari non attive"
     @Published var lastCycleStats = SyncDashboardStats()
+    @Published private(set) var pendingLastCycleDeferred: Int?
+    private var pendingSummaryReadBusy=false
+    private var pendingSummaryReadAgain=false
+    var currentCycleStats: SyncDashboardStats {
+        var stats=lastCycleStats
+        if let pendingLastCycleDeferred {
+            stats.deferred=pendingLastCycleDeferred
+            if pendingLastCycleDeferred==0 && queueRebuildRequired { stats.deletionsBlocked=false }
+        }
+        return stats
+    }
+    func refreshPendingCycleSummary() {
+        guard !previewOnly,let cycleID=lastRecordedCycle?.id,let path=try? historyPath() else { return }
+        if pendingSummaryReadBusy { pendingSummaryReadAgain=true;return }
+        pendingSummaryReadBusy=true
+        logReadQueue.async { [weak self] in
+            let count=try? SyncCycleHistory(path:path,readOnly:true).pendingDeferredCount(cycleID:cycleID)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.pendingSummaryReadBusy=false
+                if self.lastRecordedCycle?.id==cycleID { self.pendingLastCycleDeferred=count }
+                let again=self.pendingSummaryReadAgain
+                self.pendingSummaryReadAgain=false
+                if again { self.refreshPendingCycleSummary() }
+            }
+        }
+    }
     @Published private(set) var liveProgress: SyncLiveProgress?
     @Published private(set) var lastRecordedCycle: SyncCycleRecord?
     @Published private(set) var historyWarning = ""
@@ -161,6 +188,7 @@ final class MountedCopyController: ObservableObject {
                     guard let self, self.historySessionID==session, !self.active, self.lastRecordedCycle == nil else { return }
                     self.lastRecordedCycle = cycle
                     self.lastCycleStats = stats
+                    self.refreshPendingCycleSummary()
                     self.sessionStats = stats
                     self.lastCycleAt = cycle?.ended
                 }
@@ -284,6 +312,8 @@ final class MountedCopyController: ObservableObject {
                 self.rectificationProgress=nil
                 if auditRequired {
                     self.queueRebuildRequired=true
+                    self.pendingLastCycleDeferred=0
+                    self.refreshPendingCycleSummary()
                     self.auditReport=nil
                     self.auditStatus="Rinomina unilaterale: prepara una nuova verifica archivio manuale"
                 }
@@ -1067,6 +1097,8 @@ final class MountedCopyController: ObservableObject {
                         self.historyWarning = warning
                         self.lastRecordedCycle = saved?.id == cycleID ? saved : SyncCycleRecord(id:cycleID,sessionID:sessionID,started:startedAt,ended:endedAt,seconds:endedAt.timeIntervalSince(startedAt),state:finalOutcome.contains("history_incomplete") ? finalOutcome : finalOutcome + "_history_incomplete",automatic:automatic)
                         self.lastCycleStats = finalStats
+                        self.pendingLastCycleDeferred=nil
+                        self.refreshPendingCycleSummary()
                         self.sessionStats = finalStats
                         self.completedCycles += 1
                         self.lastCycleAt = endedAt

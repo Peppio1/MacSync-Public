@@ -296,6 +296,25 @@ public final class SyncCycleHistory {
             result.append(SyncHistoryRow(id:sqlite3_column_int64(s,0),cycleID:col(s,1),event:event))
         }
     }
+    /// Live projection of the last cycle, not a rewrite of historical events.
+    /// Count distinct deferred jobs only if their exact ID/path still exists
+    /// in the pending queue. A newer job for the same path is not the same job.
+    public func pendingDeferredCount(cycleID: String) throws -> Int {
+        let s=try prepare("""
+            SELECT COUNT(DISTINCT q.id)
+            FROM sync_cycle_events_v1 e
+            JOIN change_queue q ON q.id=json_extract(e.payload,'$.jobID')
+                AND q.root_id=e.root_id AND q.relative_path=e.relative_path
+            WHERE e.cycle_id=? AND e.kind='deferred' AND q.completed=0;
+            """)
+        defer { sqlite3_finalize(s) }
+        try bind(cycleID,1,s)
+        guard sqlite3_step(s)==SQLITE_ROW else { throw failure() }
+        let count=Int(sqlite3_column_int64(s,0))
+        guard sqlite3_step(s)==SQLITE_DONE else { throw failure() }
+        return count
+    }
+
     public func totals(cycleID: String? = nil, sessionID: String? = nil) throws -> SyncHistoryTotals {
         if let cycleID,sessionID==nil {
             // Preserve observed worker counts even when a detail row failed

@@ -625,8 +625,14 @@ struct MacSyncConfigurationView: View {
         .onReceive(Timer.publish(every:3,on:.main,in:.common).autoconnect()) { _ in
             if !runtime.previewOnly && page == .history { copy.refresh() }
         }
+        .onChange(of:model.pendingCount) { _ in
+            if !runtime.previewOnly { copy.refreshPendingCycleSummary() }
+        }
         .onChange(of:copy.auditReport?.ended) { _ in
-            if !runtime.previewOnly { copy.refreshIncompatibleNames(pairs:model.configuredPairs()) }
+            if !runtime.previewOnly {
+                copy.refreshIncompatibleNames(pairs:model.configuredPairs())
+                copy.refreshPendingCycleSummary()
+            }
         }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for:NSWorkspace.didWakeNotification)) { _ in runtime.refreshFolderHealth() }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for:NSWorkspace.didMountNotification)) { _ in runtime.refreshFolderHealth() }
@@ -751,7 +757,7 @@ struct MacSyncConfigurationView: View {
                         Button {
                             initialMetric = metric; showSummary = true
                         } label: {
-                            SyncSummaryMetric(title: metric.title, count: metric.count(copy.lastCycleStats), symbol: metric.symbol)
+                            SyncSummaryMetric(title: metric.title, count: metric.count(copy.currentCycleStats), symbol: metric.symbol)
                         }.buttonStyle(.plain).disabled(copy.lastRecordedCycle == nil).help("Apri dettaglio: " + metric.title)
                     }
                 }
@@ -761,7 +767,7 @@ struct MacSyncConfigurationView: View {
                     Spacer()
                     Button("Riepiloghi precedenti…") { initialMetric = nil; showSummary = true }
                 }
-                if copy.lastCycleStats.deletionsBlocked {
+                if copy.currentCycleStats.deletionsBlocked {
                     Text("Cancellazioni sospese nell’ultimo ciclo: controlla i job pendenti e il registro.").font(.caption).foregroundStyle(.orange)
                 }
             }
@@ -777,7 +783,7 @@ struct MacSyncConfigurationView: View {
                         }
                         Text("Inizio: " + macSyncDateTime(cycle.started) + "\nFine: " + (cycle.ended.map(macSyncDateTime) ?? "—")).font(.caption).foregroundStyle(.secondary)
                         HStack {
-                            Text("Errori: \(copy.lastCycleStats.failed) · Rimandati: \(copy.lastCycleStats.deferred)").font(.caption)
+                            Text("Errori: \(copy.lastCycleStats.failed) · Rimandati ancora in coda: "+(copy.pendingLastCycleDeferred.map(String.init) ?? "—")).font(.caption)
                             Spacer(minLength: 4)
                             Button("Storico…") { page = .history }
                         }

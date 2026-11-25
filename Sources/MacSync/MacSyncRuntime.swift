@@ -89,6 +89,7 @@ final class MacSyncRuntime: ObservableObject {
         copy.onQueueChanged = { [weak self] in
             guard let self, !self.shuttingDown else { return }
             self.model.refreshPendingCount()
+            self.copy.refreshPendingCycleSummary()
             if !self.copy.active && self.nextAutomaticAttempt == nil { self.scheduleNextAutomaticAttempt() }
             if !self.copy.queueRebuildRequired && self.nextAuditAt == nil { self.scheduleArchiveAudit() }
         }
