@@ -163,7 +163,12 @@ struct RectifiedDuplicateProof {
         guard !names.contains(where:{$0.utf8.elementsEqual(old.url.lastPathComponent.utf8)}) else {
             throw MirrorDeletionFailure.destinationChanged
         }
-        let n=try Self.exact(mapping.target,candidate.corrected,shouldContinue:shouldContinue)
+        var removedStat=stat()
+        guard old.url.path.withCString({lstat($0,&removedStat)}) != 0,errno==ENOENT else {
+            throw MirrorDeletionFailure.destinationChanged
+        }
+        let n=try Self.exact(mapping.target,candidate.corrected,alternateAt:candidate.changed,
+            alternate:candidate.old[candidate.changed],shouldContinue:shouldContinue)
         guard n.fingerprint==corrected.fingerprint else { throw MirrorDeletionFailure.destinationChanged }
     }
 }
