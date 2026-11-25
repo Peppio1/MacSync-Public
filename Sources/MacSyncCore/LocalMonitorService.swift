@@ -181,7 +181,7 @@ public final class LocalMonitorService: @unchecked Sendable {
             let rows=try NameRectification.localMaintenanceRows(baseRows,journal:journal)
             let current=Dictionary(uniqueKeysWithValues:rows.map{($0.id,$0)})
             let selected=approved.filter { row in
-                current[row.id] == row && NameRectification.proposedName(row.name) != nil
+                current[row.id] == row && row.selectableProposal != nil
             }
             guard !selected.isEmpty else { return NameRectification.Result() }
             let localRoots=Dictionary(uniqueKeysWithValues:roots.map{($0.id,$0.url.path)})

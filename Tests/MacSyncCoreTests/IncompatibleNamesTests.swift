@@ -3,6 +3,30 @@ import XCTest
 @testable import MacSyncCore
 
 final class IncompatibleNamesTests:XCTestCase {
+    func testV0193LocalProposalsExcludeSelfAndDetectOccupiedAndManyToOneNames() throws {
+        let base=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let source=base.appendingPathComponent("source")
+        try FileManager.default.createDirectory(at:source,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:base) }
+        for name in ["Solo ", "Punto.", "M.Y", "Collisione:", "Collisione-", "Doppio:", "Doppio?"] {
+            try FileManager.default.createDirectory(at:source.appendingPathComponent(name),withIntermediateDirectories:false)
+        }
+        let db=base.appendingPathComponent("inventory.sqlite").path
+        let inventory=try LocalInventory(path:db)
+        _ = try inventory.reconcile(rootID:"demo",root:source)
+        let journal=try ChangeJournal(path:db)
+        let rows=try journal.classifyLocalNameProposals(inventory.incompatibleNames(rootID:"demo",sourcePath:source.path))
+        func available(_ name:String)->Bool? { rows.first{$0.name==name}?.proposedNameAvailable }
+        XCTAssertEqual(available("Solo "),true)
+        XCTAssertEqual(available("Punto."),true)
+        XCTAssertEqual(available("Collisione:"),false)
+        XCTAssertEqual(available("Doppio:"),false)
+        XCTAssertEqual(available("Doppio?"),false)
+        XCTAssertFalse(rows.contains{$0.name=="M.Y"})
+        XCTAssertTrue(WindowsPathSafety.validComponent("M.Y"))
+        XCTAssertEqual(NameRectification.proposedName("Punto."),"Punto-")
+    }
+
     func testDirectNamesAndDescendantsSeparated() {
         let items=[("bad ","directory"),("bad /okay.jpg","file"),("bad /nested.","directory"),("bad /nested./okay.jpg","file"),("bad /CON.png","file"),("regular.jpg","file")].map{
             TrackedItem(relativePath:$0.0,kind:$0.1,size:0,modifiedAt:0)

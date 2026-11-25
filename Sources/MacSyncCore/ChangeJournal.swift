@@ -920,6 +920,47 @@ public final class ChangeJournal {
         }
     }
 
+    /// Read-only indexed local proposal check. Exclude the original itself.
+    public func classifyLocalNameProposals(_ rows:[IncompatibleName]) throws -> [IncompatibleName] {
+        guard !rows.isEmpty else { return rows }
+        let stmt=try prepare("""
+            SELECT EXISTS(SELECT 1 FROM source_name_index_ready WHERE root_id=?1),
+                   EXISTS(SELECT 1 FROM source_name_members WHERE root_id=?1
+                     AND parent_path=?2 AND folded_leaf=?3 AND relative_path<>?4 COLLATE BINARY);
+            """)
+        defer { sqlite3_finalize(stmt) }
+        var proposals:[String:Int]=[:]
+        func proposalKey(_ row:IncompatibleName,_ proposed:String)->String {
+            let parent=row.relativePath.split(separator:"/").dropLast().joined(separator:"/")
+            return row.rootID+"\0"+parent+"\0"+WindowsPathSafety.comparisonFold(proposed)
+        }
+        for row in rows where row.side == .source {
+            if let proposed=NameRectification.proposedName(row.name) {
+                proposals[proposalKey(row,proposed),default:0] += 1
+            }
+        }
+        var result:[IncompatibleName]=[]
+        result.reserveCapacity(rows.count)
+        for var row in rows {
+            guard row.side == .source,let proposed=NameRectification.proposedName(row.name) else {
+                result.append(row);continue
+            }
+            let parent=row.relativePath.split(separator:"/").dropLast().joined(separator:"/")
+            try bind(row.rootID,at:1,in:stmt)
+            try bind(parent,at:2,in:stmt)
+            try bind(WindowsPathSafety.comparisonFold(proposed),at:3,in:stmt)
+            try bind(row.relativePath,at:4,in:stmt)
+            guard sqlite3_step(stmt)==SQLITE_ROW else { throw databaseFailure() }
+            let ready=sqlite3_column_int(stmt,0)==1
+            let occupied=sqlite3_column_int(stmt,1)==1
+            guard sqlite3_step(stmt)==SQLITE_DONE else { throw databaseFailure() }
+            sqlite3_reset(stmt);sqlite3_clear_bindings(stmt)
+            row.proposedNameAvailable=ready ? (!occupied && proposals[proposalKey(row,proposed),default:0]==1) : nil
+            result.append(row)
+        }
+        return result
+    }
+
     /// Persistent, derived name-maintenance queue. Only incompatible local
     /// leaves with an outstanding upload (including an invalid ancestor of
     /// a pending child) belong here. Do not duplicate jobs or consult SMB.
@@ -962,7 +1003,7 @@ public final class ChangeJournal {
             code=sqlite3_step(stmt)
         }
         guard code==SQLITE_DONE else { throw databaseFailure() }
-        return result
+        return try classifyLocalNameProposals(result)
     }
 
     public func pendingUploadUpperBound() throws -> Int64? {

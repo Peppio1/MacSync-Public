@@ -543,7 +543,7 @@ final class MacSyncRuntime: ObservableObject {
         guard !previewOnly,!items.isEmpty,!shuttingDown,!folderConfigurationBusy,!savingSchedule,
               !copy.auditBusy,!copy.seedBusy,!copy.maintaining,!copy.rectifyingNames,!copy.namesBusy,
               !preparingSignedUpdate,!finalShutdownHolding else { return }
-        let permitted=Set(copy.incompatibleNames.filter{ NameRectification.proposedName($0.name) != nil }.map(\.id))
+        let permitted=Set(copy.incompatibleNames.filter{ $0.selectableProposal != nil }.map(\.id))
         let approved=items.filter{permitted.contains($0.id) && $0.side == .source}
         guard !approved.isEmpty else { return }
         performNameRectification(approved)

@@ -14,12 +14,19 @@ public struct IncompatibleName: Identifiable, Equatable, Codable, Sendable {
     public let side: Side
     public let reason: String
     public var affectedDescendants: Int
+    /// nil = proposal not yet checked against the local index; false = collision.
+    public var proposedNameAvailable: Bool? = nil
+    public var selectableProposal: String? {
+        guard proposedNameAvailable != false else { return nil }
+        return NameRectification.proposedName(name)
+    }
     public var id: String { side.rawValue + "\0" + rootID + "\0" + relativePath }
     public var name: String { relativePath.split(separator:"/").last.map(String.init) ?? relativePath }
     public var isDirectory: Bool { objectKind == "directory" }
     public var displayName: String {
-        let trailing=name.reversed().prefix{$0 == " "}.count
-        return String(name.dropLast(trailing))+String(repeating:"␠",count:trailing)
+        let trailing=name.reversed().prefix{$0 == " " || $0 == "."}.count
+        let suffix=name.suffix(trailing).map{$0 == " " ? "␠" : "."}.joined()
+        return String(name.dropLast(trailing))+suffix
     }
     public init(rootID:String,rootPath:String,relativePath:String,objectKind:String,side:Side,reason:String,affectedDescendants:Int=0) {
         self.rootID=rootID; self.rootPath=rootPath; self.relativePath=relativePath
@@ -219,7 +226,7 @@ public enum IncompatibleNameListing {
         var destinationFolders = 0, destinationFiles = 0
         for (index, item) in items.enumerated() {
             if index % 128 == 0 && !shouldContinue() { return nil }
-            let selectable = NameRectification.proposedName(item.name) != nil
+            let selectable = item.selectableProposal != nil
             if selectable { selectableIDs.append(item.id) }
             if item.side == .source {
                 if item.isDirectory { sourceFolders += 1 } else { sourceFiles += 1 }
@@ -254,7 +261,7 @@ public enum IncompatibleNameSelection {
         var selectedPaths: Set<String> = []
         for (index, item) in items.enumerated() {
             if index % 128 == 0 && !shouldContinue() { return nil }
-            if selectedIDs.contains(item.id), NameRectification.proposedName(item.name) != nil {
+            if selectedIDs.contains(item.id), item.selectableProposal != nil {
                 selectedPaths.insert(item.rootID + "\0" + item.relativePath)
             }
         }
@@ -263,7 +270,7 @@ public enum IncompatibleNameSelection {
         for (index, item) in items.enumerated() {
             if index % 128 == 0 && !shouldContinue() { return nil }
             if selectedPaths.contains(item.rootID + "\0" + item.relativePath),
-               NameRectification.proposedName(item.name) != nil {
+               item.selectableProposal != nil {
                 result.append(item)
             }
         }

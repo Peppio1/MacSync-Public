@@ -1,0 +1,24 @@
+name: MacSync v0.19.3 focused development
+on:
+  push:
+    branches: [develop-v0.19.3]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macsync-v0193-development-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  focused:
+    runs-on: macos-15-intel
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Name and archive regressions
+        run: swift test -Xswiftc -warnings-as-errors --filter 'IncompatibleNamesTests|NameRectificationTests|V0191MaintenanceTests|ArchiveAuditAndHistoryTests|SeededArchiveVerifierTests'
+      - name: Compile app and recovery
+        run: |
+          swift build -Xswiftc -warnings-as-errors --product MacSync
+          swift build -Xswiftc -warnings-as-errors --product MacSyncRecovery

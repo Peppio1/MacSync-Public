@@ -51,7 +51,7 @@ struct IncompatibleNamesPanel:View {
     }
     private var canSelect: Bool { canRectify }
     private func selectable(_ item:IncompatibleName)->Bool {
-        NameRectification.proposedName(item.name) != nil
+        item.selectableProposal != nil
     }
     var body:some View {
         // Rendering uses only a bounded snapshot. Filtering and counting are
@@ -137,7 +137,14 @@ struct IncompatibleNamesPanel:View {
                                     Text(item.displayName).font(.subheadline.weight(.semibold))
                                     Text(item.side.label+" · "+item.reason).font(.caption).foregroundStyle(.secondary)
                                     if let name=NameRectification.proposedName(item.name) {
-                                        Text("Nuovo nome: "+name).foregroundStyle(.green).font(.caption)
+                                        if item.proposedNameAvailable == false {
+                                            Text("Collisione: "+name).foregroundStyle(.red).font(.caption)
+                                            Text("Correzione manuale necessaria").font(.caption).foregroundStyle(.secondary)
+                                        } else if item.proposedNameAvailable == true {
+                                            Text("Nuovo nome: "+name).foregroundStyle(.green).font(.caption)
+                                        } else {
+                                            Text("Proposta da verificare: "+name).foregroundStyle(.orange).font(.caption)
+                                        }
                                     } else {
                                         Text("Correzione manuale").font(.caption).foregroundStyle(.orange)
                                     }

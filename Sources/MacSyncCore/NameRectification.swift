@@ -272,7 +272,7 @@ public enum NameRectification {
     /// The latter may already have changed their on-disk spelling before a
     /// crash; do not hide them merely because the incompatible leaf vanished.
     public static func localMaintenanceRows(_ rows:[IncompatibleName],journal:ChangeJournal) throws -> [IncompatibleName] {
-        var byID=Dictionary(uniqueKeysWithValues:rows.filter{$0.side == .source}.map{($0.id,$0)})
+        var byID=Dictionary(uniqueKeysWithValues:try journal.classifyLocalNameProposals(rows.filter{$0.side == .source}).map{($0.id,$0)})
         for row in try pendingCoordinatedRows(journal:journal) where row.side == .source {
             byID[row.id]=row
         }

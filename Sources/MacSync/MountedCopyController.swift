@@ -1131,7 +1131,7 @@ final class MountedCopyController: ObservableObject {
                         throw MirrorDeletionFailure.bulkDeletion(reason)
                     }
                     guard gate.isReady else { throw JournalError.database("Inventario sorgenti non pronto; ciclo sospeso") }
-                    let incompatible=try journal.pendingLocalNameRectifications()
+                    let incompatible=try journal.pendingLocalNameRectifications().filter { $0.selectableProposal != nil }
                     if !incompatible.isEmpty {
                         progress.phase="Rettifica nomi · attesa conferma (60 s)"
                         publish(force:true)
