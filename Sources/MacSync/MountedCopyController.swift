@@ -167,6 +167,21 @@ final class MountedCopyController: ObservableObject {
     private(set) var historySessionID = UUID().uuidString
 
     func historyPath() throws -> String { try Self.databaseURL().path }
+    /// Independent SQLite read, never waits behind the transfer worker.
+    func queuePreview(search:String,kind:String,status:String,offset:Int) async throws -> QueuePreviewPage {
+        guard !previewOnly else { return .init(rows:[],hasMore:false) }
+        let path=try historyPath()
+        let cursor=liveProgress?.queueCursor
+        let cutoff=mirrorEnabled ? mirrorAuthorization?.queuePreviewCutoff : nil
+        let paused=queueRebuildRequired || maintaining || auditBusy || seedBusy || !monitorGate.isReady
+        return try await Task.detached(priority:.utility) {
+            guard FileManager.default.fileExists(atPath:path) else {
+                return QueuePreviewPage(rows:[],hasMore:false)
+            }
+            return try ChangeJournal(path:path,readOnly:true).queuePreview(cursor:cursor,
+                mirrorCutoff:cutoff,paused:paused,search:search,kind:kind,statusFilter:status,offset:offset)
+        }.value
+    }
     func recordBlockedStart(reason:String) {
         guard !previewOnly else { return }
         DispatchQueue.global(qos:.utility).async {
@@ -1040,12 +1055,14 @@ final class MountedCopyController: ObservableObject {
                 func observe(_ event: SyncCycleEvent) {
                     totals.add(event)
                     progress.observe(event)
+                    if event.kind.isJob && progress.queueCursor?.currentID==event.jobID { progress.queueCursor?.currentID=nil }
                     do { try history?.append(cycleID:cycleID,event:event) }
                     catch { historyError = "Storico incompleto: " + error.localizedDescription }
                     publish()
                 }
                 func jobStarted(_ job: QueuedChange) {
                     log.currentJob=job
+                    progress.queueCursor?.consider(job)
                     progress.inFlightCopyBytes = 0
                     progress.inFlightCopySeconds = 0
                     progress.currentFile = job.rootID + " / " + job.relativePath
@@ -1233,6 +1250,7 @@ final class MountedCopyController: ObservableObject {
                     try mirrorWorker?.verifyBeforeSynchronization()
                     if StageTransferEngine.applicationDefault().diagnosticName == "rclone-direct" { try journal.clearLegacyPublicationRetries() }
                     let highWater = try journal.queueSequence()
+                    progress.queueCursor=QueueExecutionCursor(upperID:highWater,mirrorCutoff:policy.enabled ? authorization?.queuePreviewCutoff : nil)
                     progress.planned = try journal.plannedUploadCount(throughID:highWater)
                     progress.planned += try mirrorWorker?.plannedCount(throughID:highWater) ?? 0
                     try? log.record(level:.info,rootID:"app",action:"queue_plan",message:"Operazioni pianificate: \(progress.planned) — motore " + StageTransferEngine.applicationDefault().diagnosticName)
@@ -1281,6 +1299,7 @@ final class MountedCopyController: ObservableObject {
                         // Never remove the old server file before pending
                         // uploads have been completed, including after failure.
                         if try journal.pendingUploads(limit: 1).isEmpty {
+                            progress.queueCursor?.phase = .deletes
                             progress.phase = "Cancellazioni"
                             publish(force:true)
                             mirrorSummary = try mirrorWorker.runCycle(pageSize: 100, throughID:highWater)
@@ -1292,6 +1311,8 @@ final class MountedCopyController: ObservableObject {
                             mirrorSummary.detail = "Cancellazioni sospese: copie o aggiornamenti ancora in coda"
                         }
                     }
+                    progress.queueCursor?.phase = .finished
+                    progress.queueCursor?.currentID=nil
                     progress.phase = "Finalizzazione"
                     progress.currentFile = ""
                     publish(force:true)

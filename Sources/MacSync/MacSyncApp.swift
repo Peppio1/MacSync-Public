@@ -493,6 +493,7 @@ struct MacSyncConfigurationView: View {
     @ObservedObject var destinations: DestinationStatusController
     @State private var showSummary = false
     @State private var showTechnicalLog = false
+    @State private var showQueue = false
     @State private var initialMetric: HistoryMetric?
     @StateObject private var loginAtStartup: LaunchAtLoginController
     private let previewScheme: ColorScheme?
@@ -641,6 +642,7 @@ struct MacSyncConfigurationView: View {
             SyncHistorySheet(copy:copy,model:model,initialMetric:initialMetric)
         }
         .sheet(isPresented:$showTechnicalLog) { TechnicalLogSheet(copy:copy) }
+        .sheet(isPresented:$showQueue) { QueuePreviewSheet(copy:copy,model:model) }
     }
     private var globalActivity: String {
         if copy.interruptionRequested { return "Interruzione richiesta" }
@@ -715,6 +717,7 @@ struct MacSyncConfigurationView: View {
                 }
                 HStack {
                     Label("\(model.pendingCount.formatted()) operazioni in coda", systemImage: "list.bullet.rectangle").font(.subheadline.weight(.medium))
+                    Button("Consulta coda…") { showQueue=true }.disabled(runtime.previewOnly)
                     Spacer()
                     if let next = visibleNextCopy { Text("Prossimo: " + macSyncDateTime(next)).font(.caption).foregroundStyle(Color.accentColor) }
                 }

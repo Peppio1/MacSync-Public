@@ -131,6 +131,8 @@ public struct MirrorAuthorization: Codable, Equatable, Sendable {
     fileprivate let roots: [String: Root]
     fileprivate let databaseID: String
     fileprivate let cutoff: Int64
+    /// Advisory queue inspection only; no permission is granted by this value.
+    public var queuePreviewCutoff:Int64 { cutoff }
 
     public static func capture(journal: ChangeJournal, mappings: [MountedFolderMapping],
                                includePendingDeletes: Bool = false,
@@ -660,6 +662,7 @@ public final class MirrorDeletionWorker {
                 result.detail = "Nuove copie in coda: cancellazioni sospese"
                 break
             }
+            onJobStarted?(job)
             if pendingNameProtection.protects(rootID: job.rootID, path: job.relativePath) {
                 result.deferred += 1
                 emit(.deferred, job: job, mapping: mappings[job.rootID],
@@ -671,7 +674,6 @@ public final class MirrorDeletionWorker {
                 // cannot evade the window by arriving mid-page.
                 try evaluateProtection(authorization: authorization, now: Date(), verifyEmpty: false)
             }
-            onJobStarted?(job)
             guard let mapping = mappings[job.rootID],
                   let baseline = baselines[job.rootID] else {
                 result.deferred += 1

@@ -92,6 +92,7 @@ public struct SyncLiveProgress: Equatable, Sendable {
     public var failedOperations = 0
     public var phase = "Verifica"
     public var currentFile = ""
+    public var queueCursor:QueueExecutionCursor? = nil
     public var lastCopyRate: Double?
     public var copiedBytes: Int64 = 0
     public var copySeconds: Double = 0

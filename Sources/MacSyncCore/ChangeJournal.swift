@@ -1022,13 +1022,85 @@ public final class ChangeJournal {
             ? nil : sqlite3_column_int64(stmt, 0)
     }
 
+    /// A bounded, read-only projection of worker priority and known local gates.
+    /// No SMB reads, no queue acknowledgement, no change to actual worker order.
+    public func queuePreview(cursor:QueueExecutionCursor? = nil, mirrorCutoff:Int64? = nil,
+                             paused:Bool=false, search:String="", kind:String="all",
+                             statusFilter:String="all", offset:Int=0, limit:Int=200,
+                             now:Date=Date()) throws -> QueuePreviewPage {
+        let cutoff=cursor == nil ? mirrorCutoff : cursor?.mirrorCutoff
+        let phase=cursor?.phase.rawValue ?? "idle"
+        let held=paused || (try queueRebuildToken()) != nil || (try mirrorBlockReason()) != nil
+        let sql="""
+            WITH classified AS (
+              SELECT id,root_id,relative_path,kind,recorded_at,origin,
+                CASE
+                  WHEN id=?5 THEN 'current'
+                  WHEN ?8=1 THEN 'hold'
+                  WHEN kind='delete' AND ?7<0 THEN 'mirrorOff'
+                  WHEN kind='delete' AND id<=?7 THEN 'beforeConsent'
+                  WHEN id>?1 OR ?6='finished' THEN 'laterCycle'
+                  WHEN kind='upsert' AND (?6='deletes' OR id<=?2) THEN 'laterCycle'
+                  WHEN kind='delete' AND ?6='deletes' AND
+                    (length(relative_path)>?3 OR (length(relative_path)=?3 AND id<=?4)) THEN 'laterCycle'
+                  WHEN kind='upsert' AND EXISTS(SELECT 1 FROM upload_retry r
+                    WHERE r.root_id=q.root_id AND (r.job_id=q.id OR r.scope='root') AND r.next_at>?9) THEN 'retry'
+                  WHEN kind='upsert' AND EXISTS(SELECT 1 FROM blocked_name_jobs b WHERE b.job_id=q.id) THEN 'nameBlocked'
+                  WHEN kind='delete' AND EXISTS(SELECT 1 FROM change_queue u
+                    WHERE u.completed=0 AND u.kind='upsert') THEN 'waitingCopies'
+                  ELSE 'planned'
+                END AS state
+              FROM change_queue q WHERE completed=0 AND (?10='all' OR kind=?10)
+                AND (?11='' OR instr(lower(relative_path),lower(?11))>0 OR instr(lower(root_id),lower(?11))>0)
+            ), selected AS (
+              SELECT * FROM classified WHERE ?12='all'
+                OR (?12='planned' AND state IN ('current','planned','waitingCopies'))
+                OR (?12='blocked' AND state NOT IN ('current','planned','waitingCopies'))
+              ORDER BY CASE WHEN state='current' THEN 0
+                  WHEN state IN ('planned','waitingCopies') AND kind='upsert' THEN 1
+                  WHEN state IN ('planned','waitingCopies') AND kind='delete' THEN 2
+                  WHEN kind='upsert' THEN 3 ELSE 4 END,
+                CASE WHEN kind='delete' THEN \(QueueExecutionOrder.deleteLengthSQL) ELSE 0 END DESC,
+                \(QueueExecutionOrder.idSQL) LIMIT ?13 OFFSET ?14
+            )
+            SELECT s.id,s.root_id,s.relative_path,s.kind,s.recorded_at,s.origin,
+                   COALESCE(f.kind,''),s.state
+              FROM selected s LEFT JOIN file_inventory f ON f.root_id=s.root_id AND f.relative_path=s.relative_path;
+            """
+        let stmt=try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        let size=max(1,min(limit,500))
+        let values:[(Int32,Int64)]=[(1,cursor?.upperID ?? Int64.max),(2,cursor?.uploadCursor ?? 0),
+            (3,cursor?.deleteLength ?? Int64.max),(4,cursor?.deleteCursor ?? 0),
+            (5,cursor?.currentID ?? -1),(7,cutoff ?? -1),(8,held ? 1:0),
+            (13,Int64(size+1)),(14,Int64(max(0,offset)))]
+        for (index,value) in values {
+            guard sqlite3_bind_int64(stmt,index,value)==SQLITE_OK else { throw databaseFailure() }
+        }
+        try bind(phase,at:6,in:stmt)
+        guard sqlite3_bind_double(stmt,9,now.timeIntervalSince1970)==SQLITE_OK else { throw databaseFailure() }
+        try bind(kind,at:10,in:stmt);try bind(search,at:11,in:stmt);try bind(statusFilter,at:12,in:stmt)
+        var rows:[QueuePreviewRow]=[]
+        while true {
+            let rc=sqlite3_step(stmt)
+            if rc==SQLITE_DONE { break }
+            guard rc==SQLITE_ROW,let kind=ChangeKind(rawValue:columnText(stmt,at:3)),
+                  let state=QueuePreviewStatus(rawValue:columnText(stmt,at:7)) else { throw databaseFailure() }
+            let job=QueuedChange(id:sqlite3_column_int64(stmt,0),rootID:columnText(stmt,at:1),
+                relativePath:columnText(stmt,at:2),kind:kind,
+                recordedAt:Date(timeIntervalSince1970:sqlite3_column_double(stmt,4)))
+            rows.append(.init(job:job,origin:columnText(stmt,at:5),objectKind:columnText(stmt,at:6),status:state))
+        }
+        return .init(rows:Array(rows.prefix(size)),hasMore:rows.count>size)
+    }
+
     public func pendingUploads(limit: Int = 100, afterID: Int64 = 0,
                                throughID: Int64 = Int64.max) throws -> [QueuedChange] {
         let statement = try prepare("""
             SELECT id, root_id, relative_path, kind, recorded_at
               FROM change_queue
              WHERE completed = 0 AND kind = 'upsert' AND id > ? AND id <= ?
-             ORDER BY id LIMIT ?;
+             ORDER BY \(QueueExecutionOrder.idSQL) LIMIT ?;
             """)
         defer { sqlite3_finalize(statement) }
         guard sqlite3_bind_int64(statement, 1, max(0, afterID)) == SQLITE_OK,
@@ -1644,7 +1716,7 @@ public final class ChangeJournal {
             SELECT id,root_id,relative_path,kind,recorded_at FROM change_queue
             WHERE completed=0 AND kind='delete' AND id>? AND id<=?
               AND (length(relative_path)<? OR (length(relative_path)=? AND id>?))
-            ORDER BY length(relative_path) DESC, id LIMIT ?;
+            ORDER BY \(QueueExecutionOrder.deleteSQL) LIMIT ?;
             """)
         defer { sqlite3_finalize(stmt) }
         for (index, value) in [afterID, throughID, previousLength, previousLength, previousID,
