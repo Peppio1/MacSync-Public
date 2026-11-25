@@ -40,6 +40,13 @@ mkdir -m 770 "$share/macsync-ci-colon/Raw:old" "$share/macsync-ci-colon/$sfm_col
 printf '%s' 'raw colon bytes' > "$share/macsync-ci-colon/Raw:old/child.jpg"
 printf '%s' 'sfm colon bytes' > "$share/macsync-ci-colon/$sfm_colon/child.jpg"
 printf '%s' 'corrected bytes' > "$share/macsync-ci-colon/SFM-old/child.jpg"
+# Positive exact-duplicate test: SFM-encoded old directory and an
+# independently created corrected directory with identical contents.
+mkdir -m 770 "$share/macsync-ci-duplicate"
+duplicate_colon="$(printf 'Same\357\200\242old')"
+mkdir -m 770 "$share/macsync-ci-duplicate/$duplicate_colon" "$share/macsync-ci-duplicate/Same-old"
+printf '%s' 'verified same bytes' > "$share/macsync-ci-duplicate/$duplicate_colon/child.jpg"
+printf '%s' 'verified same bytes' > "$share/macsync-ci-duplicate/Same-old/child.jpg"
 prefix="$(brew --prefix)"
 smbd="$prefix/sbin/samba-dot-org-smbd"
 test -x "$smbd"

@@ -687,8 +687,10 @@ public final class MirrorDeletionWorker {
             // No general colon permission, audit-generated colon extra or
             // recovery bypass. Candidate spelling is NOT proof of identity.
             let duplicateCandidate = RectifiedDuplicateProof.candidate(job.relativePath)
-            let duplicateAllowed = duplicateCandidate != nil && authorization != nil &&
-                !policy.recoveryEnabled && (try journal.originOfJob(id:job.id)) == .sourceMonitor
+            let duplicateAllowed:Bool
+            if duplicateCandidate != nil && authorization != nil && !policy.recoveryEnabled {
+                duplicateAllowed = try journal.originOfJob(id:job.id) == .sourceMonitor
+            } else { duplicateAllowed=false }
             if (!WindowsPathSafety.validDeletionPath(job.relativePath) && !duplicateAllowed) || (literalOnly && (authorization == nil || policy.recoveryEnabled)) {
                 result.deferred += 1
                 let reason = !WindowsPathSafety.validDeletionPath(job.relativePath)
@@ -731,7 +733,8 @@ public final class MirrorDeletionWorker {
                     // ordinary trailing-space deletion with no corrected
                     // local alias. Colons always require exceptional proof.
                     let localCandidate=mapping.source.appendingPathComponent(candidate.correctedPath)
-                    if job.relativePath.contains(":") || (try Self.statIfPresent(localCandidate)) != nil {
+                    let correctedExists = try Self.statIfPresent(localCandidate) != nil
+                    if job.relativePath.contains(":") || correctedExists {
                         guard try journal.pendingUploads(limit:1).isEmpty else { throw MirrorDeletionFailure.pendingTransfer }
                         let proof=try RectifiedDuplicateProof.prepare(candidate,mapping:mapping,
                             shouldContinue:{!self.cancellation.isCancelled && self.operationAllowed()})

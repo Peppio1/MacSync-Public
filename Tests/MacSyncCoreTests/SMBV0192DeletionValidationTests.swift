@@ -3,6 +3,49 @@ import XCTest
 @testable import MacSyncCore
 
 final class SMBV0192DeletionValidationTests:XCTestCase {
+    func testV0193VerifiedColonDuplicateRemovalOnMountedSMB() throws {
+        let env=ProcessInfo.processInfo.environment
+        guard env["MACSYNC_V0192_REQUIRE_SMB"]=="1" else { throw XCTSkip("Disposable SMB fixture opt-in") }
+        guard env["MACSYNC_TEST_SMB_HOST"]=="127.0.0.1",env["MACSYNC_TEST_SMB_SHARE"]=="MacSyncCI" else {
+            XCTFail("Unexpected SMB fixture");return
+        }
+        let mount=URL(fileURLWithPath:try XCTUnwrap(env["MACSYNC_TEST_SMB_MOUNT"]))
+        let binding=try DirectoryBinding.read(mount)
+        guard binding.volume.fileSystem.lowercased()=="smbfs",binding.volume.isStrongIdentity else {
+            XCTFail("Genuine SMB mount required");return
+        }
+        let fixture=URL(fileURLWithPath:try XCTUnwrap(env["MACSYNC_TEST_SMB_ROOT"]))
+        let rawPath=try String(contentsOf:fixture.appendingPathComponent("share-path"),encoding:.utf8).trimmingCharacters(in:.whitespacesAndNewlines)
+        guard rawPath.hasPrefix("/private/tmp/macsync-ci-share.") else { XCTFail("Unexpected disposable root");return }
+        let raw=URL(fileURLWithPath:rawPath).appendingPathComponent("macsync-ci-duplicate")
+        let target=mount.appendingPathComponent("macsync-ci-duplicate")
+        let fm=FileManager.default
+        let base=fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let source=base.appendingPathComponent("source")
+        try fm.createDirectory(at:source.appendingPathComponent("Same-old"),withIntermediateDirectories:true)
+        defer { try? fm.removeItem(at:base) }
+        try Data("verified same bytes".utf8).write(to:source.appendingPathComponent("Same-old/child.jpg"))
+        let db=base.appendingPathComponent("queue.sqlite").path
+        _ = try LocalInventory(path:db).reconcile(rootID:"photos",root:source,origin:.initialInventory)
+        let journal=try ChangeJournal(path:db)
+        let map=try MountedFolderMapping(rootID:"photos",source:source,target:target)
+        try journal.verifyDirectoryBindings([map],allowNewTarget:true)
+        XCTAssertTrue(try fm.contentsOfDirectory(atPath:target.path).contains("Same:old"))
+        for name in ["Same:old","Same:old/child.jpg"] {
+            _ = try journal.enqueue(rootID:"photos",relativePath:name,kind:.delete,origin:.sourceMonitor)
+        }
+        let consent=try MirrorAuthorization.capture(journal:journal,mappings:[map],includePendingDeletes:true)
+        let worker=try MirrorDeletionWorker(journal:journal,manifest:RecoveryManifest(path:db),
+            log:SyncActivityLog(path:db),mappings:[map],
+            policy:MirrorDeletionPolicy(enabled:true,recoveryEnabled:false,retentionDays:nil),authorization:consent)
+        let result=try worker.runCycle()
+        XCTAssertEqual(result.removed,1)
+        XCTAssertEqual(result.directories,1)
+        XCTAssertFalse(fm.fileExists(atPath:raw.appendingPathComponent("Same\u{F022}old").path))
+        XCTAssertEqual(try Data(contentsOf:raw.appendingPathComponent("Same-old/child.jpg")),Data("verified same bytes".utf8))
+        XCTAssertTrue(try journal.pending().isEmpty)
+    }
+
     func testV0193HiddenLiteralJobsAndColonDiagnosticRemainNonDestructive() throws {
         let env=ProcessInfo.processInfo.environment
         guard env["MACSYNC_V0192_REQUIRE_SMB"]=="1" else { throw XCTSkip("Disposable SMB fixture opt-in") }
