@@ -52,5 +52,8 @@ public struct DiagnosticTiming: Codable, Equatable, Sendable {
         "metric_job_wall","metric_job_reconciliation","metric_job_retry_preparation",
         "metric_audit_destination_lstat"
     ]
+    public static let uiActions:Set<String> = [
+        "metric_ui_main_queue_delay","metric_ui_queue_query","metric_ui_queue_first_result"
+    ]
     public static let prefix="timing_distribution_"
 }

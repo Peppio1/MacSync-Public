@@ -103,12 +103,21 @@ struct QueuePreviewSheet: View {
         .onChange(of:status) { _ in offset=0 }
         .task(id:request) {
             let wanted=request
+            let requestedAt=ProcessInfo.processInfo.systemUptime
+            var firstResult=true
             do { try await Task.sleep(nanoseconds:200_000_000) } catch { return }
             while !Task.isCancelled {
                 do {
+                    let queryStarted=ProcessInfo.processInfo.systemUptime
                     let next=try await copy.queuePreview(search:wanted.search,kind:wanted.kind,status:wanted.status,offset:wanted.offset)
                     guard !Task.isCancelled,request==wanted else { return }
+                    let returned=ProcessInfo.processInfo.systemUptime
+                    copy.uiResponsiveness.record("metric_ui_queue_query",seconds:returned-queryStarted)
                     snapshot=next;warning="";updated=Date()
+                    if firstResult {
+                        copy.uiResponsiveness.record("metric_ui_queue_first_result",seconds:returned-requestedAt)
+                        firstResult=false
+                    }
                 } catch {
                     guard !Task.isCancelled,request==wanted else { return }
                     warning="Coda temporaneamente non disponibile; ultimo elenco conservato."

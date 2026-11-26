@@ -73,7 +73,7 @@ public enum DiagnosticReport {
                 // Decode numeric-only, whitelisted timing distributions.
                 if entry.action.hasPrefix(DiagnosticTiming.prefix) {
                     let action=String(entry.action.dropFirst(DiagnosticTiming.prefix.count))
-                    if DiagnosticTiming.transferActions.contains(action),
+                    if DiagnosticTiming.transferActions.contains(action) || DiagnosticTiming.uiActions.contains(action),
                        let timing=try? JSONDecoder().decode(DiagnosticTiming.self,from:Data(entry.message.utf8)),timing.isValid {
                         timingDistributions.append(.init(timestamp:entry.timestamp,action:action,
                             cycle:row.cycleID.map { alias($0,in:&cycles) },samples:timing,

@@ -6,6 +6,7 @@ import MacSyncCore
 /// macOS Finder must mount SMB shares and supply its saved credentials.
 @MainActor
 final class MountedCopyController: ObservableObject {
+    let uiResponsiveness=UIResponsivenessProbe()
     private let previewOnly: Bool
     private let monitorGate: MonitorSafetyGate
     var onQueueChanged: (() -> Void)?

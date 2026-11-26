@@ -96,6 +96,7 @@ final class MacSyncRuntime: ObservableObject {
             return
         }
         Self.operationalRuntime = self
+        if let path=try? copy.historyPath() { copy.uiResponsiveness.start(path:path) }
         model.onSourceNamesUpdated = { [weak self] names in
             self?.copy.acceptMonitoredSourceNames(names)
         }
@@ -480,10 +481,12 @@ final class MacSyncRuntime: ObservableObject {
         stopAllOperations()
         copy.invalidateSeedReport()
         // A blocked SMB call may take time; do not terminate during a write.
-        copy.afterWorkerStopped { [weak self] in
-            self?.model.afterMonitorStopped { [weak self] in
-                self?.shutdownWorkersDrained = true
-                self?.finishShutdownIfReady()
+        copy.uiResponsiveness.stop { [weak self] in
+            self?.copy.afterWorkerStopped { [weak self] in
+                self?.model.afterMonitorStopped { [weak self] in
+                    self?.shutdownWorkersDrained = true
+                    self?.finishShutdownIfReady()
+                }
             }
         }
     }
