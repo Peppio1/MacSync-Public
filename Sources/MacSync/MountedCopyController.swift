@@ -637,6 +637,12 @@ final class MountedCopyController: ObservableObject {
                     try? auditLog?.record(level: .info, rootID: "app", action: action,
                         bytes: metrics.detectedBytes, durationSeconds: metrics.scanSeconds, message: "Scansione archivio")
                 }
+                if let timing=report.destinationMetrics?.metadataTiming,
+                   let data=try? JSONEncoder().encode(timing) {
+                    try? auditLog?.record(level:.info,rootID:"app",
+                        action:DiagnosticTiming.prefix+"metric_audit_destination_lstat",
+                        durationSeconds:timing.totalSeconds,message:String(decoding:data,as:UTF8.self))
+                }
                 if let seconds = report.comparisonSeconds {
                     try? auditLog?.record(level: .info, rootID: "app", action: "metric_audit_comparison",
                         bytes: report.bytesRead, durationSeconds: seconds, message: report.mode == .quick ? "Confronto metadati QUICK · nessuna lettura contenuto per hash" : "Confronto "+report.mode.label+" · calcoli hash avviati: "+String(report.hashCalculations ?? 0))

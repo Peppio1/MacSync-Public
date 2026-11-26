@@ -7,7 +7,7 @@ public struct DiagnosticTiming: Codable, Equatable, Sendable {
     public private(set) var count:Int = 0
     public private(set) var totalSeconds:Double = 0
     public private(set) var maximumSeconds:Double = 0
-    public private(set) var buckets:[Int] = Array(repeating:0,count:bounds.count+1)
+    public private(set) var buckets:[Int] = Array(repeating:0,count:DiagnosticTiming.bounds.count+1)
     public init() {}
     public mutating func observe(_ seconds:Double) {
         guard seconds.isFinite,seconds>=0,count<Int.max,totalSeconds+seconds<Double.greatestFiniteMagnitude else { return }
@@ -22,6 +22,14 @@ public struct DiagnosticTiming: Codable, Equatable, Sendable {
             maximumSeconds.isFinite,maximumSeconds>=0,buckets.count==Self.bounds.count+1,
             buckets.allSatisfy({$0>=0 && $0<=count}) else { return false }
         return buckets.reduce(0,+)==count
+    }
+    public mutating func merge(_ other:Self) {
+        guard isValid,other.isValid,count+other.count<=100_000_000,
+              (totalSeconds+other.totalSeconds).isFinite else { return }
+        count+=other.count
+        totalSeconds+=other.totalSeconds
+        maximumSeconds=max(maximumSeconds,other.maximumSeconds)
+        for index in buckets.indices { buckets[index]+=other.buckets[index] }
     }
     public var meanSeconds:Double? { count>0 ? totalSeconds/Double(count) : nil }
     public func percentileUpperBound(_ fraction:Double)->Double? {
@@ -41,7 +49,8 @@ public struct DiagnosticTiming: Codable, Equatable, Sendable {
     public static let transferActions:Set<String> = [
         "metric_copy_preflight","metric_copy_postflight","metric_queue_acknowledgment",
         "metric_rclone_process_launch","metric_rclone_total_process","metric_rclone_mkdir",
-        "metric_job_wall","metric_job_reconciliation","metric_job_retry_preparation"
+        "metric_job_wall","metric_job_reconciliation","metric_job_retry_preparation",
+        "metric_audit_destination_lstat"
     ]
     public static let prefix="timing_distribution_"
 }

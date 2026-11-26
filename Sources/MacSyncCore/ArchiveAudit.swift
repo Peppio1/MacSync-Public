@@ -102,6 +102,8 @@ public struct AuditSideMetrics: Codable, Equatable, Sendable {
     public var bytesRead: Int64 = 0
     public var readSeconds: Double = 0
     public var scanSeconds: Double = 0
+    /// Actual syscall timings; not a count of SMB packets or content bytes.
+    public var metadataTiming:DiagnosticTiming? = nil
     public init() {}
     public var meanReadRate: Double? { readSeconds > 0 && bytesRead > 0 ? Double(bytesRead)/readSeconds : nil }
     public var scanRate: Double? { scanSeconds > 0 ? Double(files)/scanSeconds : nil }
@@ -381,7 +383,7 @@ public final class ArchiveAudit {
             let targetPrior = state.destination.scanSeconds
             scanStart = ProcessInfo.processInfo.systemUptime
             state.phase = "Analisi destinazione"; state.currentPath = mapping.rootID; report(force:true)
-            enum ScanUpdate: Sendable { case visit(String), item(TrackedItem) }
+            enum ScanUpdate: Sendable { case visit(String), item(TrackedItem), metadata(DiagnosticTiming) }
             let target = try InventoryReadLane.archive.read(
                 shouldContinue: { !cancellation.isCancelled }, onUpdate: { (updates: [ScanUpdate]) in
                     for update in updates {
@@ -389,6 +391,10 @@ public final class ArchiveAudit {
                         case .visit(let path):
                             state.currentPath = mapping.rootID + " / " + path
                             diagnosticSnapshot()
+                        case .metadata(let timing):
+                            var aggregate=state.destination.metadataTiming ?? DiagnosticTiming()
+                            aggregate.merge(timing)
+                            state.destination.metadataTiming=aggregate
                         case .item(let item):
                             state.destination.scanSeconds = targetPrior + ProcessInfo.processInfo.systemUptime - scanStart
                             scanned(item)
@@ -396,7 +402,8 @@ public final class ArchiveAudit {
                     }
                 }, work: { active, report in
                     try LocalScanner.scan(root: mapping.target, excludeManaged: true, preferPOSIXMetadata: true,
-                        shouldContinue: active, onVisit: { report(.visit($0)) }, onItem: { report(.item($0)) })
+                        shouldContinue: active, onVisit: { report(.visit($0)) }, onItem: { report(.item($0)) },
+                        onPOSIXMetadataTiming: { report(.metadata($0)) })
                 })
             state.destination.scanSeconds = targetPrior + ProcessInfo.processInfo.systemUptime-scanStart
             try mapping.verify()

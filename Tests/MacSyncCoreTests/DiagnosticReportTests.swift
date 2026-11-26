@@ -31,6 +31,25 @@ final class DiagnosticReportTests: XCTestCase {
         XCTAssertNotNil(report["environment"])
     }
 
+    func testPOSIXMetadataTimingMeasuresExistingEnumerationWithoutAdditionalReads() throws {
+        let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:dir) }
+        for name in ["one.jpg","two.jpg"] {
+            try Data(name.utf8).write(to:dir.appendingPathComponent(name))
+        }
+        var observed=DiagnosticTiming()
+        let baseline=try LocalScanner.scan(root:dir,preferPOSIXMetadata:true)
+        let instrumented=try LocalScanner.scan(root:dir,preferPOSIXMetadata:true,onPOSIXMetadataTiming:{observed=$0})
+        XCTAssertEqual(Set(baseline.map(\.relativePath)),Set(instrumented.map(\.relativePath)))
+        XCTAssertEqual(observed.count,2)
+        XCTAssertTrue(observed.isValid)
+        var aggregate=observed
+        aggregate.merge(observed)
+        XCTAssertEqual(aggregate.count,4)
+        XCTAssertEqual(aggregate.totalSeconds,observed.totalSeconds*2)
+    }
+
     func testExportPaginatesAndRemovesFreeTextAndIdentifiers() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
