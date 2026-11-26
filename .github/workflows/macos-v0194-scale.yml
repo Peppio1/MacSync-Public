@@ -1,7 +1,7 @@
-name: MacSync v0.19.4 operational audit scalability
+name: MacSync v0.19.4 operational audit scalability SMB alternate Intel
 on:
   push:
-    branches: [benchmark-v0.19.4-scale, benchmark-v0.19.4-scale-local-alt, benchmark-v0.19.4-scale-smb-alt]
+    branches: [benchmark-v0.19.4-scale-smb-alt]
   workflow_dispatch:
 permissions:
   contents: read
@@ -14,10 +14,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - location: local
-            runner: macos-15-intel
           - location: smb
-            runner: macos-15
+            runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     env:
