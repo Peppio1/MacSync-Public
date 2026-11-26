@@ -4,7 +4,7 @@ import XCTest
 
 final class SignedRollbackIntegrationTests:XCTestCase {
     func testPublishedPredecessorReplacesFixtureWithoutRestoringOldDatabase() async throws {
-        guard ProcessInfo.processInfo.environment["MACSYNC_V0193_ROLLBACK_LAB"]=="1" else {
+        guard ProcessInfo.processInfo.environment["MACSYNC_V0194_ROLLBACK_LAB"]=="1" else {
             throw XCTSkip("Published rollback laboratory opt-in")
         }
         let fm=FileManager.default
@@ -18,7 +18,7 @@ final class SignedRollbackIntegrationTests:XCTestCase {
         let source=state.appendingPathComponent("source")
         try fm.createDirectory(at:source,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
         let app=root.appendingPathComponent("MacSync.app")
-        let package=try XCTUnwrap(SignedRollbackPackage.previous(for:"0.19.3"))
+        let package=try XCTUnwrap(SignedRollbackPackage.previous(for:"0.19.4"))
         let download=root.appendingPathComponent("download")
         try fm.createDirectory(at:download,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
         // Real released archive + signature, verified by production code.
@@ -27,8 +27,8 @@ final class SignedRollbackIntegrationTests:XCTestCase {
         try fm.copyItem(at:previous,to:app)
         let info=app.appendingPathComponent("Contents/Info.plist")
         var plist=try XCTUnwrap(PropertyListSerialization.propertyList(from:Data(contentsOf:info),format:nil) as? [String:Any])
-        plist["CFBundleShortVersionString"]="0.19.3"
-        plist["CFBundleVersion"]="201"
+        plist["CFBundleShortVersionString"]="0.19.4"
+        plist["CFBundleVersion"]="202"
         try PropertyListSerialization.data(fromPropertyList:plist,format:.xml,options:0).write(to:info)
         let sign=Process()
         sign.executableURL=URL(fileURLWithPath:"/usr/bin/codesign")
@@ -37,7 +37,7 @@ final class SignedRollbackIntegrationTests:XCTestCase {
         sign.standardError=FileHandle.nullDevice
         try sign.run();sign.waitUntilExit()
         XCTAssertEqual(sign.terminationStatus,0)
-        try ApplicationRollback.validateBundle(app,version:"0.19.3")
+        try ApplicationRollback.validateBundle(app,version:"0.19.4")
         let coordinator=UpdateRecoveryCoordinator(root:state,allowsLocation:{$0.path==app.path})
         let db=coordinator.database
         try Data("photo".utf8).write(to:source.appendingPathComponent("photo.jpg"))
@@ -63,19 +63,19 @@ final class SignedRollbackIntegrationTests:XCTestCase {
             try Data("invalid".utf8).write(to:signatureURL)
             XCTAssertThrowsError(try SignedRollbackTransaction.install(root:state,snapshot:snapshot,target:app,
                 defaults:defaults,allowsLocation:{$0.path==app.path}))
-            try ApplicationRollback.validateBundle(app,version:"0.19.3")
+            try ApplicationRollback.validateBundle(app,version:"0.19.4")
             XCTAssertEqual(try journal.pending(),before)
             try correct.write(to:signatureURL)
             try SignedRollbackTransaction.install(root:state,snapshot:snapshot,target:app,
                 defaults:defaults,allowsLocation:{$0.path==app.path})
             try package.validateApplication(app)
-            try ApplicationRollback.validateBundle(snapshot.appendingPathComponent("MacSync.app"),version:"0.19.3")
+            try ApplicationRollback.validateBundle(snapshot.appendingPathComponent("MacSync.app"),version:"0.19.4")
             XCTAssertEqual(try ChangeJournal(path:db.path).pending(),before)
             XCTAssertEqual(try ApplicationRollback.databaseDigest(savedDB,scratch:state),savedDigest)
             XCTAssertFalse(defaults.bool(forKey:"MacSync.autoCopiesEnabled.v2"))
             XCTAssertNil(defaults.object(forKey:"MacSync.mirrorAuthorization.v2"))
             XCTAssertEqual(defaults.string(forKey:"MacSync.fixture"),"preserve")
-            XCTAssertEqual(defaults.string(forKey:"MacSync.updates.skippedStableTag"),"v0.19.3")
+            XCTAssertEqual(defaults.string(forKey:"MacSync.updates.skippedStableTag"),"v0.19.4")
             XCTAssertFalse(fm.fileExists(atPath:coordinator.markerURL.path))
             try ArchiveDatabaseSafety.verify(db,readOnly:true)
         }

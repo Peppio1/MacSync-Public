@@ -3,7 +3,7 @@ import Darwin
 import SQLite3
 
 /// Offline voluntary rollback, separate from Sparkle's forward transaction.
-/// Only the reviewed 0.19.3 -> 0.19.2 schema is supported; do not extend without validation.
+/// Only the reviewed 0.19.4 -> 0.19.3 schema is supported; do not extend without validation.
 /// The caller must hold the exclusive operational archive lock.
 public enum SignedRollbackTransaction {
     private static func open(_ url:URL,write:Bool=false) throws -> OpaquePointer {
@@ -111,7 +111,7 @@ public enum SignedRollbackTransaction {
               snapshot.lastPathComponent.hasPrefix("update-backup-"),
               let uuid=UUID(uuidString:String(snapshot.lastPathComponent.dropFirst("update-backup-".count))),
               snapshot.lastPathComponent=="update-backup-"+uuid.uuidString,
-              let package=SignedRollbackPackage.previous(for:"0.19.3") else {
+              let package=SignedRollbackPackage.previous(for:"0.19.4") else {
             throw ApplicationRollback.Failure("Destinazione o versione rollback non autorizzata.")
         }
         let stage=snapshot.appendingPathComponent("signed-rollback",isDirectory:true)
@@ -122,8 +122,8 @@ public enum SignedRollbackTransaction {
         try requireAbsent(root.appendingPathComponent("factory-reset.pending"))
         let saved=snapshot.appendingPathComponent("inventory.sqlite")
         let current=coordinator.database
-        try ApplicationRollback.validateBundle(target,version:"0.19.3")
-        try ApplicationRollback.validateBundle(snapshot.appendingPathComponent("MacSync.app"),version:"0.19.3")
+        try ApplicationRollback.validateBundle(target,version:"0.19.4")
+        try ApplicationRollback.validateBundle(snapshot.appendingPathComponent("MacSync.app"),version:"0.19.4")
         try validateCompatibility(database:current)
         try ArchiveDatabaseSafety.verify(saved,readOnly:true)
         guard try ApplicationRollback.databaseDigest(current,scratch:stage)==ApplicationRollback.databaseDigest(saved,scratch:stage) else {
@@ -132,7 +132,7 @@ public enum SignedRollbackTransaction {
         let candidate=try package.extractVerified(in:stage)
         try Self.validateCompatibility(database:current)
         try UpdateRecoveryCoordinator.disableCopyAuthorizations(defaults)
-        defaults.set("v0.19.3",forKey:"MacSync.updates.skippedStableTag")
+        defaults.set("v0.19.4",forKey:"MacSync.updates.skippedStableTag")
         guard defaults.synchronize() else { throw ApplicationRollback.Failure("Preferenze non salvate.") }
         try invalidateDerivedNameIndex(database:current)
         _ = try ApplicationRollback.replaceApplication(target:target,backup:candidate) {
