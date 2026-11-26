@@ -622,14 +622,36 @@ public struct SeededArchiveSession: Sendable {
             diagnostic: diagnostic, progress: progress
         )
         try checkFileIdentity()
+        var auditTargetMissingPrefixes:[Int64:String]=[:]
         if repair {
             if operational {
                 let matching=Set(result.findings.lazy.filter{$0.kind == .matching}.map(\.id))
                 matches.removeAll{!matching.contains($0.rootID+"\0"+$0.relativePath)}
                 let observed=Set(result.findings.map(\.id))
                 pendingDeletes.removeAll{observed.contains($0.rootID+"\0"+$0.relativePath)}
+                // Reuse the complete destination inventory already acquired.
+                // Exact UTF-8 keys: a snapshot is only a planning hint; the
+                // journal must still verify absence live and recheck the job.
+                let targetPaths=Dictionary(grouping:result.findings.lazy.filter{$0.targetObjectKind != nil},by:{$0.rootID})
+                    .mapValues{Set($0.map{Data($0.relativePath.utf8)})}
+                for job in pendingDeletes {
+                    guard !cancellation.isCancelled else { throw SeedVerificationError.cancelled }
+                    // Do not broaden eligibility for incompatible SMB names.
+                    guard WindowsPathSafety.validRelativePath(job.relativePath) else { continue }
+                    let known=targetPaths[job.rootID] ?? []
+                    var prefix=""
+                    for part in job.relativePath.split(separator:"/") {
+                        prefix=prefix.isEmpty ? String(part) : prefix+"/"+part
+                        if !known.contains(Data(prefix.utf8)) {
+                            auditTargetMissingPrefixes[job.id]=prefix
+                            break
+                        }
+                    }
+                }
             }
-            // No destination scan/read during reconciliation. An FSEvents
+            // No second complete destination scan during reconciliation.
+            // Missing-delete candidates still require targeted live checks.
+            // An FSEvents
             // cycle can briefly set ready=false after the expensive audit;
             // do not discard its snapshot simply because the commit gate
             // temporarily closes. Never wait while holding a SQLite lock.
@@ -656,6 +678,7 @@ public struct SeededArchiveSession: Sendable {
                         deleteProgress.phase="Verifica cancellazioni già soddisfatte"
                         progress(deleteProgress)
                         let deletes=try journal.acknowledgeAbsentAuditDeletes(pendingDeletes,mappings:mappings,
+                            auditTargetMissingPrefixes:auditTargetMissingPrefixes,
                             shouldContinue:{cancellation.mayCommit})
                         result.recognizedAbsentDeletes=deletes
                         break

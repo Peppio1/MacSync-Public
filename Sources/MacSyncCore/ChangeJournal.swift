@@ -1334,7 +1334,8 @@ public final class ChangeJournal {
     /// authorization change and no increase to actual deletion statistics.
     /// Caller provides pre-audit IDs absent from both complete inventories.
     public func acknowledgeAbsentAuditDeletes(_ entries:[QueuedChange],
-        mappings:[MountedFolderMapping],shouldContinue:()->Bool) throws -> Int {
+        mappings:[MountedFolderMapping],auditTargetMissingPrefixes:[Int64:String] = [:],
+        shouldContinue:()->Bool) throws -> Int {
         guard !entries.isEmpty else { return 0 }
         try verifyDirectoryBindings(mappings)
         if try queueRebuildToken() != nil { return 0 }
@@ -1407,7 +1408,17 @@ public final class ChangeJournal {
                     ?? absentPrefix(job.relativePath,under:map.source,native:nativeSources.contains(job.rootID))
                 guard let sourcePrefix else { continue }
                 sourceProofs.insert(ProofKey(rootID:job.rootID,prefix:Data(sourcePrefix.utf8)))
+                // A complete audit can supply a grouping hint, not proof.
+                // Skip the redundant preliminary remote probe, but require
+                // the same fresh literal-absence check below before ACK.
+                let hint=auditTargetMissingPrefixes[job.id].flatMap { prefix -> String? in
+                    guard WindowsPathSafety.validRelativePath(prefix),
+                          job.relativePath.utf8.elementsEqual(prefix.utf8) ||
+                          job.relativePath.utf8.starts(with:(prefix+"/").utf8) else { return nil }
+                    return prefix
+                }
                 let targetPrefix=try knownPrefix(job.relativePath,rootID:job.rootID,proofs:targetProofs)
+                    ?? hint
                     ?? absentPrefix(job.relativePath,under:map.target,native:["apfs","hfs"].contains(map.targetVolume.fileSystem.lowercased()))
                 guard let targetPrefix else { continue }
                 targetProofs.insert(ProofKey(rootID:job.rootID,prefix:Data(targetPrefix.utf8)))

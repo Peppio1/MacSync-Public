@@ -160,6 +160,30 @@ final class SeededArchiveVerifierTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf:f.target.appendingPathComponent("present/child.jpg"),encoding:.utf8),"keep")
     }
 
+    func testV0194AuditMissingAncestorHintNeverAcknowledgesReappearingTarget() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        _=try LocalInventory(path:f.db.path).reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        try f.journal.verifyDirectoryBindings([f.mapping],allowNewTarget:true)
+        for path in ["missing/sub/child.jpg","gone/child.jpg"] {
+            _=try f.journal.enqueue(rootID:"photos",relativePath:path,kind:.delete,origin:.sourceMonitor)
+        }
+        var inserted=false
+        let report=try SeededArchiveSession(database:f.db,mappings:[f.mapping]).auditPreservingQueuedChanges(
+            mode:.quick,repair:true,progress:{ p in
+                guard !inserted,p.phase=="Verifica cancellazioni già soddisfatte" else { return }
+                inserted=true
+                do {
+                    try FileManager.default.createDirectory(at:f.target.appendingPathComponent("missing/sub"),withIntermediateDirectories:true)
+                    try self.write("keep",to:f.target.appendingPathComponent("missing/sub/child.jpg"))
+                } catch { XCTFail("Cannot create changing target: "+String(describing:error)) }
+            },reconcileOrdinaryJobs:true)
+        XCTAssertTrue(inserted)
+        XCTAssertEqual(report.recognizedAbsentDeletes,1)
+        XCTAssertEqual(Set(try f.journal.pending().map(\.relativePath)),Set(["missing/sub/child.jpg"]))
+        XCTAssertEqual(try String(contentsOf:f.target.appendingPathComponent("missing/sub/child.jpg"),encoding:.utf8),"keep")
+    }
+
     func testQuickRepairTransactionRollsBackAndRetriesAfterTransientMonitorEvent() throws {
         let f=try fixture()
         defer { try? FileManager.default.removeItem(at:f.base) }
