@@ -261,10 +261,10 @@ public final class MountedFolderCopyWorker {
     private var rectificationScopes: [String: [String]] = [:]
     private var pendingNameProtection = NameRectification.PendingProtection(relations: [])
     private var pendingLocalNamePaths:[String:Set<String>] = [:]
-    private var transferDiagnostics: [String: Double] = [:]
+    private var transferDiagnostics: [String: DiagnosticTiming] = [:]
 
     private func recordDuration(_ action: String, since started: Double) {
-        transferDiagnostics[action, default: 0] += ProcessInfo.processInfo.systemUptime - started
+        transferDiagnostics[action, default: DiagnosticTiming()].observe(ProcessInfo.processInfo.systemUptime - started)
     }
     private var publicationMethods: [String:ExclusivePublicationMethod] = [:]
     private var unsupportedNewPublicationRoots=Set<String>()
@@ -373,9 +373,13 @@ public final class MountedFolderCopyWorker {
 
     private func flushTransferDiagnostics() {
         guard stageEngine.isDirect, log.cycleID != nil else { return }
-        for (action, seconds) in transferDiagnostics.sorted(by: { $0.key < $1.key }) {
-            try? log.record(level: .info, rootID: "app", action: action, durationSeconds: seconds,
+        for (action, timing) in transferDiagnostics.sorted(by: { $0.key < $1.key }) {
+            try? log.record(level: .info, rootID: "app", action: action, durationSeconds: timing.totalSeconds,
                 message: "Tempo cumulativo del ciclo")
+            if let encoded=try? JSONEncoder().encode(timing) {
+                try? log.record(level:.info,rootID:"app",action:DiagnosticTiming.prefix+action,
+                    durationSeconds:timing.totalSeconds,message:String(decoding:encoded,as:UTF8.self))
+            }
         }
     }
 
@@ -389,6 +393,8 @@ public final class MountedFolderCopyWorker {
             }
             nextAfterID = job.id
             let started = Date()
+            let jobTick=ProcessInfo.processInfo.systemUptime
+            defer { recordDuration("metric_job_wall",since:jobTick) }
             onJobStarted?(job)
             guard let mapping = mappings[job.rootID] else {
                 summary.failed += 1
@@ -438,7 +444,13 @@ public final class MountedFolderCopyWorker {
                     job.relativePath == $0 || job.relativePath.hasPrefix($0 + "/")
                 } == true
                 let mayAlreadyMatch = previousPublication || rectified || ((try? metadataMayMatch(job,mapping:mapping)) == true)
-                if mayAlreadyMatch, let verifiedBytes = try reconcilePublished(job,mapping:mapping) {
+                let reconcileTick=ProcessInfo.processInfo.systemUptime
+                let verifiedMatch:Int64?
+                if mayAlreadyMatch {
+                    defer { recordDuration("metric_job_reconciliation",since:reconcileTick) }
+                    verifiedMatch=try reconcilePublished(job,mapping:mapping)
+                } else { verifiedMatch=nil }
+                if let verifiedBytes=verifiedMatch {
                     recoverConfirmedStage(job,mapping:mapping)
                     try? journal.clearRetry(job)
                     summary.reconciled += 1
@@ -448,7 +460,11 @@ public final class MountedFolderCopyWorker {
                         relativePath:job.relativePath,bytes:rectified ? verifiedBytes : 0,message:message+"; nessuna nuova copia")
                     continue
                 }
-                try prepareRetry(job,mapping:mapping,publicationUncertain:previousPublication)
+                let retryTick=ProcessInfo.processInfo.systemUptime
+                do {
+                    defer { recordDuration("metric_job_retry_preparation",since:retryTick) }
+                    try prepareRetry(job,mapping:mapping,publicationUncertain:previousPublication)
+                }
                 let outcome = try transfer(job, mapping: mapping)
                 let acknowledgeStarted = ProcessInfo.processInfo.systemUptime
                 let acknowledged = try journal.acknowledgeUpload(job)
@@ -825,6 +841,8 @@ public final class MountedFolderCopyWorker {
         if source.kind == .directory {
             if original == nil {
                 try? log.record(level:.info,rootID:job.rootID,action:"rclone_mkdir",relativePath:job.relativePath,message:"Rclone: creazione cartella")
+                let mkdirTick=ProcessInfo.processInfo.systemUptime
+                defer { recordDuration("metric_rclone_mkdir",since:mkdirTick) }
                 try stageEngine.pathOperation("mkdir",url:dst,shouldContinue:operationAllowed,diagnostic:{ self.recordRcloneDiagnostic($0,$1,job:job) })
             }
             try mapping.verify()
@@ -842,11 +860,13 @@ public final class MountedFolderCopyWorker {
         onPhase?("Trasferimento")
         let started = ProcessInfo.processInfo.systemUptime
         recordDuration("metric_copy_preflight", since: checksStarted)
+        do {
+        defer { recordDuration("metric_rclone_total_process", since: started) }
         try stageEngine.copyDirect(source:src,destination:dst,newFile:original == nil,shouldContinue:operationAllowed,
             diagnostic:{ self.recordRcloneDiagnostic($0,$1,job:job) },
             launched:{ self.recordDuration("metric_rclone_process_launch", since: started) },
             progress:{ [weak self] bytes, seconds in self?.onTransferProgress?(bytes,seconds) })
-        recordDuration("metric_rclone_total_process", since: started)
+        }
         let verification = ProcessInfo.processInfo.systemUptime
         defer { recordDuration("metric_copy_postflight", since: verification) }
         onPhase?("Verifica del trasferimento")

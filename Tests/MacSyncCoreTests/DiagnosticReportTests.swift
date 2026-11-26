@@ -3,6 +3,34 @@ import XCTest
 @testable import MacSyncCore
 
 final class DiagnosticReportTests: XCTestCase {
+    func testTimingDistributionsAreBoundedAndExportedWithoutMessages() throws {
+        var timing=DiagnosticTiming()
+        for x in [0.001,0.002,0.003,1.2] { timing.observe(x) }
+        timing.observe(-1);timing.observe(.infinity)
+        XCTAssertEqual(timing.count,4)
+        XCTAssertEqual(timing.maximumSeconds,1.2)
+        XCTAssertEqual(timing.percentileUpperBound(0.5),0.002)
+        XCTAssertEqual(timing.percentileUpperBound(0.95),1.2)
+        XCTAssertEqual(timing.buckets.count,DiagnosticTiming.bounds.count+1)
+        let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:dir) }
+        let db=dir.appendingPathComponent("test.sqlite").path
+        let log=try SyncActivityLog(path:db)
+        log.cycleID="private-cycle"
+        let encoded=String(decoding:try JSONEncoder().encode(timing),as:UTF8.self)
+        try log.record(level:.info,rootID:"app",action:DiagnosticTiming.prefix+"metric_job_wall",durationSeconds:timing.totalSeconds,message:encoded)
+        try log.record(level:.info,rootID:"app",action:DiagnosticTiming.prefix+"metric_copy_preflight",message:"private-message")
+        let data=try DiagnosticReport.make(databasePath:db,since:.distantPast,appVersion:"0.19.4")
+        XCTAssertFalse(String(decoding:data,as:UTF8.self).contains("private-"))
+        let report=try XCTUnwrap(JSONSerialization.jsonObject(with:data) as? [String:Any])
+        XCTAssertEqual(report["schemaVersion"] as? Int,2)
+        let records=try XCTUnwrap(report["timingDistributions"] as? [[String:Any]])
+        XCTAssertEqual(records.count,1)
+        XCTAssertEqual(records[0]["p95UpperBoundSeconds"] as? Double,1.2)
+        XCTAssertNotNil(report["environment"])
+    }
+
     func testExportPaginatesAndRemovesFreeTextAndIdentifiers() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

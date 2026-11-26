@@ -1,0 +1,24 @@
+name: MacSync v0.19.4 focused development
+on:
+  push:
+    branches: [develop-v0.19.4]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macsync-v0194-development-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  focused:
+    runs-on: macos-15-intel
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Diagnostics and copy regressions
+        run: swift test -Xswiftc -warnings-as-errors --filter 'DiagnosticReportTests|MountedFolderCopyTests|TechnicalLogTests'
+      - name: Compile app and recovery
+        run: |
+          swift build -Xswiftc -warnings-as-errors --product MacSync
+          swift build -Xswiftc -warnings-as-errors --product MacSyncRecovery
