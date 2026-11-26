@@ -123,7 +123,7 @@ final class SoftwareUpdateController: ObservableObject {
         alert.messageText = "È disponibile un aggiornamento"
         let notes=release.userChangelog
         let changes=notes.isEmpty ? "Riepilogo delle novità non disponibile." : notes.map{"• "+$0}.joined(separator:"\n")
-        alert.informativeText = "MacSync v\(installed) → \(release.tagName)\n\nNovità per l’utente\n"+changes+
+        alert.informativeText = "MacSync v\(installed) → \(release.tagName)\n\nNovità per l’utente\n" + changes +
             "\n\nLe note sono informative. Premendo Aggiorna, MacSync fermerà le operazioni in sicurezza e creerà un backup verificato; Sparkle verificherà l’aggiornamento e chiederà conferma per l’installazione. Premendo Annulla, MacSync continuerà a funzionare normalmente."
         alert.addButton(withTitle: "Aggiorna")
         let cancel=alert.addButton(withTitle: "Annulla")
