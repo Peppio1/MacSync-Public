@@ -2,7 +2,8 @@ import Foundation
 
 public enum DiagnosticReport {
     private struct Report: Encodable {
-        let schemaVersion = 2
+        let schemaVersion = 3
+        let resourceSamples:[ResourceRecord]
         let environment: Environment
         let timingDistributions: [TimingRecord]
         let appVersion: String
@@ -23,6 +24,10 @@ public enum DiagnosticReport {
             activeProcessors=process.activeProcessorCount
             physicalMemoryBytes=process.physicalMemory
         }
+    }
+    private struct ResourceRecord:Encodable {
+        let timestamp:Date
+        let sample:DiagnosticResourceSample
     }
     private struct TimingRecord:Encodable {
         let timestamp:Date
@@ -63,6 +68,7 @@ public enum DiagnosticReport {
         var jobs: [Int64: Int] = [:]
         var events: [Event] = []
         var timingDistributions:[TimingRecord]=[]
+        var resourceSamples:[ResourceRecord]=[]
         var before: Int64?
         repeat {
             let page = try reader.technicalPage(limit: 500, beforeID: before, since: since)
@@ -70,6 +76,10 @@ public enum DiagnosticReport {
                 let entry = row.entry
                 let root = alias(entry.rootID, in: &roots)
                 let item = entry.relativePath.isEmpty ? nil : alias(String(root) + "/" + entry.relativePath, in: &items)
+                if entry.action==DiagnosticResourceSample.action,
+                   let sample=try? JSONDecoder().decode(DiagnosticResourceSample.self,from:Data(entry.message.utf8)),sample.isValid {
+                    resourceSamples.append(.init(timestamp:entry.timestamp,sample:sample))
+                }
                 // Decode numeric-only, whitelisted timing distributions.
                 if entry.action.hasPrefix(DiagnosticTiming.prefix) {
                     let action=String(entry.action.dropFirst(DiagnosticTiming.prefix.count))
@@ -91,6 +101,6 @@ public enum DiagnosticReport {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return try encoder.encode(Report(environment:Environment(),timingDistributions:timingDistributions,appVersion: appVersion, exportedAt: Date(), since: since, events: events))
+        return try encoder.encode(Report(resourceSamples:resourceSamples,environment:Environment(),timingDistributions:timingDistributions,appVersion: appVersion, exportedAt: Date(), since: since, events: events))
     }
 }

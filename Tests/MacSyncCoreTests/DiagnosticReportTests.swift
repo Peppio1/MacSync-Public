@@ -25,11 +25,43 @@ final class DiagnosticReportTests: XCTestCase {
         let data=try DiagnosticReport.make(databasePath:db,since:.distantPast,appVersion:"0.19.4")
         XCTAssertFalse(String(decoding:data,as:UTF8.self).contains("private-"))
         let report=try XCTUnwrap(JSONSerialization.jsonObject(with:data) as? [String:Any])
-        XCTAssertEqual(report["schemaVersion"] as? Int,2)
+        XCTAssertEqual(report["schemaVersion"] as? Int,3)
         let records=try XCTUnwrap(report["timingDistributions"] as? [[String:Any]])
         XCTAssertEqual(records.count,2)
         XCTAssertEqual(records[0]["p95UpperBoundSeconds"] as? Double,1.2)
         XCTAssertNotNil(report["environment"])
+    }
+
+    func testResourceCounterIntervalsAndRedactedExport() throws {
+        let start=DiagnosticResourceCounters(uptime:10,processCPUSeconds:2,completedChildrenCPUSeconds:3,
+            processPeakResidentBytes:100,processInputBlocks:10,processOutputBlocks:20,thermal:.nominal,lowPower:false)
+        let end=DiagnosticResourceCounters(uptime:20,processCPUSeconds:7,completedChildrenCPUSeconds:15,
+            processPeakResidentBytes:200,processInputBlocks:12,processOutputBlocks:25,thermal:.fair,lowPower:true)
+        let sample=try XCTUnwrap(DiagnosticResourceSample.between(start,end))
+        XCTAssertEqual(sample.processCPUPercentOfOneCore,50)
+        XCTAssertEqual(sample.completedChildrenCPUSeconds,12)
+        XCTAssertEqual(sample.processPeakResidentBytes,200)
+        XCTAssertEqual(sample.processInputBlocks,2)
+        XCTAssertEqual(sample.processOutputBlocks,5)
+        XCTAssertNil(DiagnosticResourceSample.between(end,start))
+        XCTAssertNil(DiagnosticResourceSample.between(start,start))
+        XCTAssertNotNil(DiagnosticResourceCounters.read())
+        let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:dir) }
+        let db=dir.appendingPathComponent("test.sqlite").path
+        let log=try SyncActivityLog(path:db)
+        let encoded=String(decoding:try JSONEncoder().encode(sample),as:UTF8.self)
+        try log.record(level:.info,rootID:"app",action:DiagnosticResourceSample.action,durationSeconds:sample.intervalSeconds,message:encoded)
+        try log.record(level:.warning,rootID:"private-root",action:DiagnosticResourceSample.action,message:"private-host")
+        let data=try DiagnosticReport.make(databasePath:db,since:.distantPast,appVersion:"0.19.4")
+        XCTAssertFalse(String(decoding:data,as:UTF8.self).contains("private-"))
+        let report=try XCTUnwrap(JSONSerialization.jsonObject(with:data) as? [String:Any])
+        let records=try XCTUnwrap(report["resourceSamples"] as? [[String:Any]])
+        XCTAssertEqual(records.count,1)
+        let measured=try XCTUnwrap(records[0]["sample"] as? [String:Any])
+        XCTAssertEqual(measured["processCPUPercentOfOneCore"] as? Double,50)
+        XCTAssertEqual(measured["thermal"] as? String,"fair")
     }
 
     func testPOSIXMetadataTimingMeasuresExistingEnumerationWithoutAdditionalReads() throws {

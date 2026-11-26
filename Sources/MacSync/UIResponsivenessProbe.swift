@@ -12,6 +12,9 @@ final class UIResponsivenessProbe: @unchecked Sendable {
     private var databasePath:String?
     private var stats:[String:DiagnosticTiming]=[:]
     private var lastFlush:Double=0
+    private var resourceBaseline:DiagnosticResourceCounters?
+    private var resourceSamples:[DiagnosticResourceSample]=[]
+    private var droppedResourceSamples=0
     private var generation=0
 
     func start(path:String) {
@@ -21,6 +24,7 @@ final class UIResponsivenessProbe: @unchecked Sendable {
             self.generation+=1
             self.databasePath=path
             self.lastFlush=ProcessInfo.processInfo.systemUptime
+            self.resourceBaseline=DiagnosticResourceCounters.read()
             let timer=DispatchSource.makeTimerSource(queue:self.lane)
             timer.schedule(deadline:.now()+1,repeating:.seconds(1),leeway:.milliseconds(200))
             timer.setEventHandler { [weak self] in self?.tick() }
@@ -32,7 +36,7 @@ final class UIResponsivenessProbe: @unchecked Sendable {
     private func tick() {
         guard running else { return }
         let now=ProcessInfo.processInfo.systemUptime
-        if now-lastFlush>=60 { flush();lastFlush=now }
+        if now-lastFlush>=60 { sampleResources();flush();lastFlush=now }
         guard !pending else { return }
         pending=true
         let epoch=generation
@@ -57,10 +61,39 @@ final class UIResponsivenessProbe: @unchecked Sendable {
         }
     }
 
+    private func sampleResources() {
+        guard let next=DiagnosticResourceCounters.read() else { return }
+        if let previous=resourceBaseline,let sample=DiagnosticResourceSample.between(previous,next) {
+            if resourceSamples.count>=4 {
+                resourceSamples.removeFirst()
+                droppedResourceSamples=min(Int.max-1,droppedResourceSamples+1)
+            }
+            resourceSamples.append(sample)
+        }
+        resourceBaseline=next
+    }
+
     private func flush() {
-        guard !stats.isEmpty,let path=databasePath,
+        guard !stats.isEmpty || !resourceSamples.isEmpty || droppedResourceSamples>0,
+              let path=databasePath,
               FileManager.default.fileExists(atPath:path),
               let writer=try? SyncActivityLog(path:path) else { return }
+        // Bound failures: never accumulate an unbounded backlog.
+        while let sample=resourceSamples.first,
+              let data=try? JSONEncoder().encode(sample) {
+            do {
+                try writer.record(level:.info,rootID:"app",action:DiagnosticResourceSample.action,
+                    durationSeconds:sample.intervalSeconds,message:String(decoding:data,as:UTF8.self))
+                resourceSamples.removeFirst()
+            } catch { break }
+        }
+        if droppedResourceSamples>0 {
+            do {
+                try writer.record(level:.warning,rootID:"app",action:"metric_resource_samples_dropped",
+                    message:String(droppedResourceSamples))
+                droppedResourceSamples=0
+            } catch {}
+        }
         for (action,timing) in stats {
             guard let data=try? JSONEncoder().encode(timing) else { continue }
             do {
@@ -80,7 +113,9 @@ final class UIResponsivenessProbe: @unchecked Sendable {
                 self.pending=false
                 self.timer?.cancel()
                 self.timer=nil
+                self.sampleResources()
                 self.flush()
+                self.resourceBaseline=nil
             }
             DispatchQueue.main.async { completion() }
         }
