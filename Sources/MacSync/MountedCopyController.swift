@@ -986,6 +986,8 @@ final class MountedCopyController: ObservableObject {
             // These workers are initialized only at the first healthy
             // scheduled slot, on the serial utility queue.
             var maps: [MountedFolderMapping] = []
+            var absencePreviousLength=Int64.max
+            var absencePreviousID:Int64=0
             var worker: MountedFolderCopyWorker?
             // Initial source audit can be expensive on a large archive.
             // Create the armed deletion worker on the serial background queue.
@@ -1299,6 +1301,41 @@ final class MountedCopyController: ObservableObject {
                     )
                     var mirrorSummary = MirrorDeletionSummary()
                     var expired = 0
+                    var absentDeletes=0
+                    // Non-mutating acknowledgment is independent of mirror
+                    // consent. Bounded page, no recursive destination scan.
+                    if gate.isReady,!cancellation.isCancelled,!summary.interrupted,
+                       try journal.pendingUploads(limit:1).isEmpty {
+                        let page=try journal.pendingDeletePage(afterID:0,throughID:highWater,
+                            previousLength:absencePreviousLength,previousID:absencePreviousID,limit:1000)
+                        if page.count==1000,let last=page.last {
+                            absencePreviousLength=Int64(last.relativePath.unicodeScalars.count)
+                            absencePreviousID=last.id
+                        } else { absencePreviousLength=Int64.max;absencePreviousID=0 }
+                        let eligible=page.filter { job in
+                            WindowsPathSafety.validRelativePath(job.relativePath) ||
+                            (WindowsPathSafety.validDeletionPath(job.relativePath) &&
+                             maps.contains{ $0.rootID==job.rootID && ["apfs","hfs"].contains($0.targetVolume.fileSystem.lowercased()) })
+                        }
+                        if !eligible.isEmpty {
+                            progress.phase="Verifica eliminazioni già soddisfatte"
+                            publish(force:true)
+                            let tick=ProcessInfo.processInfo.systemUptime
+                            do {
+                                absentDeletes=try journal.acknowledgeAbsentAuditDeletes(eligible,mappings:maps,
+                                    shouldContinue:{gate.isReady && !cancellation.isCancelled})
+                                try? log.record(level:.info,rootID:"app",action:"queue_absent_reconciled",
+                                    durationSeconds:ProcessInfo.processInfo.systemUptime-tick,
+                                    message:"Eliminazioni già soddisfatte: \(absentDeletes); nessuna rimozione fisica")
+                            } catch SeedVerificationError.cancelled {
+                                // The monitor may have changed while checking.
+                                // A failed check does not authorize deletion.
+                            } catch {
+                                try? log.record(level:.warning,rootID:"app",action:"queue_absence_check_deferred",
+                                    message:"Verifica assenze non conclusa: "+SyncDiagnostic.describe(error))
+                            }
+                        }
+                    }
                     if let mirrorWorker, gate.isReady, !cancellation.isCancelled, !summary.interrupted {
                         // Repeat the protection check even if uploads remain.
                         try mirrorWorker.verifyBeforeSynchronization()
@@ -1339,7 +1376,7 @@ final class MountedCopyController: ObservableObject {
                         rootID: "app", action: "cycle",
                         bytes: summary.bytes,
                         durationSeconds: max(0, Date().timeIntervalSince(startedAt)),
-                        message: (cancellation.isCancelled || summary.interrupted ? "Ciclo interrotto: " : "Ciclo concluso: ") + "\(summary.copied) copie, \(summary.reconciled) pubblicazioni precedenti riconciliate, \(summary.deferred) rimandate, \(summary.failed) errori." + mirrorDetails
+                        message: (cancellation.isCancelled || summary.interrupted ? "Ciclo interrotto: " : "Ciclo concluso: ") + "\(summary.copied) copie, \(summary.reconciled) pubblicazioni precedenti riconciliate, \(summary.deferred) rimandate, \(summary.failed) errori." + " Eliminazioni già soddisfatte: \(absentDeletes)." + mirrorDetails
                     )
                     // Only the SQLite activity table is pruned, never file
                     // inventory, queue, photographs, backups or staging.

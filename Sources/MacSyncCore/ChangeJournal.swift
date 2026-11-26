@@ -1276,7 +1276,7 @@ public final class ChangeJournal {
         // Check only the absent candidates, never walk a remote tree.
         // A visible alias, symlink, inaccessible parent or ambiguous name
         // is not proof of absence. No SQLite write lock while reading SMB.
-        func absent(_ path:String,under root:URL) throws -> Bool {
+        func absent(_ path:String,under root:URL,native:Bool) throws -> Bool {
             var parent=root
             for part in path.split(separator:"/").map(String.init) {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
@@ -1285,7 +1285,19 @@ public final class ChangeJournal {
                 var info=stat()
                 let rc=url.path.withCString{lstat($0,&info)}
                 if rc != 0 {
-                    return errno==ENOENT && aliases.isEmpty
+                    let code=errno
+                    guard code==ENOENT else { return false }
+                    if aliases.isEmpty { return true }
+                    // APFS/HFS can enumerate the exact old spelling even when
+                    // Win32 comparison folds its corrected trailing-space name
+                    // together with it. ENOENT plus that sole exact corrected
+                    // spelling is proof of absence only on a native filesystem.
+                    // Never apply this exception to SMB or to case-only aliases.
+                    guard native,!WindowsPathSafety.validRelativePath(part),
+                          let corrected=NameRectification.proposedName(part),
+                          aliases.count==1,
+                          aliases[0].utf8.elementsEqual(corrected.utf8) else { return false }
+                    return !aliases[0].utf8.elementsEqual(part.utf8)
                 }
                 guard aliases.count==1,aliases[0].utf8.elementsEqual(part.utf8),
                       info.st_mode & mode_t(S_IFMT) != mode_t(S_IFLNK) else { return false }
@@ -1295,6 +1307,11 @@ public final class ChangeJournal {
             return false
         }
         var verified:[QueuedChange]=[]
+        var nativeSources=Set<String>()
+        for map in mappings {
+            if let binding=try? verifyLocalSourceBinding(rootID:map.rootID,root:map.source),
+               ["apfs","hfs"].contains(binding.volume.fileSystem.lowercased()) { nativeSources.insert(map.rootID) }
+        }
         for job in entries {
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             guard job.kind == .delete,let map=maps[job.rootID],
@@ -1305,8 +1322,8 @@ public final class ChangeJournal {
                   WindowsPathSafety.validRelativePath(job.relativePath) || ["apfs","hfs"].contains(map.targetVolume.fileSystem.lowercased()),
                   !FileExclusionPolicy.excludes(job.relativePath,enabled:FileExclusionPolicy.ignoreDSStore) else { continue }
             do {
-                if try absent(job.relativePath,under:map.source),
-                   try absent(job.relativePath,under:map.target) { verified.append(job) }
+                if try absent(job.relativePath,under:map.source,native:nativeSources.contains(job.rootID)),
+                   try absent(job.relativePath,under:map.target,native:["apfs","hfs"].contains(map.targetVolume.fileSystem.lowercased())) { verified.append(job) }
             } catch SeedVerificationError.cancelled { throw SeedVerificationError.cancelled }
             catch { cache.invalidate() }
         }
@@ -1342,7 +1359,7 @@ public final class ChangeJournal {
                 guard url.resolvingSymlinksInPath().path==url.path,
                       url.path.withCString({lstat($0,&info)}) != 0,errno==ENOENT else { continue }
                 if !WindowsPathSafety.validRelativePath(job.relativePath) {
-                    do { guard try absent(job.relativePath,under:map.source) else { continue } }
+                    do { guard try absent(job.relativePath,under:map.source,native:nativeSources.contains(job.rootID)) else { continue } }
                     catch SeedVerificationError.cancelled { throw SeedVerificationError.cancelled }
                     catch { cache.invalidate(); continue }
                 }

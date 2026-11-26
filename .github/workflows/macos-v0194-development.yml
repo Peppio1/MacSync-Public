@@ -17,7 +17,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Diagnostics and copy regressions
-        run: swift test -Xswiftc -warnings-as-errors --filter 'DiagnosticReportTests|MountedFolderCopyTests|TechnicalLogTests|ArchiveAuditAndHistoryTests|LocalInventoryTests'
+        run: swift test -Xswiftc -warnings-as-errors --filter 'DiagnosticReportTests|MountedFolderCopyTests|TechnicalLogTests|ArchiveAuditAndHistoryTests|LocalInventoryTests|SeededArchiveVerifierTests|MirrorDeletionTests'
       - name: Compile app and recovery
         run: |
           swift build -Xswiftc -warnings-as-errors --product MacSync

@@ -24,6 +24,19 @@ struct DiagnosticReportPanel: View {
                 .onChange(of:level) { value in
                     profilingUntil=value==DiagnosticCollectionLevel.profiling.rawValue ? Date().addingTimeInterval(900).timeIntervalSince1970 : 0
                 }
+                TimelineView(.periodic(from:Date(),by:1)) { context in
+                    let effective=DiagnosticCollectionLevel.effective(raw:level,until:profilingUntil,now:context.date)
+                    if level==DiagnosticCollectionLevel.profiling.rawValue {
+                        if effective == .profiling {
+                            Text("Profilazione: ancora \(max(0,Int(ceil(profilingUntil-context.date.timeIntervalSince1970)))) s")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            Text("Profilazione conclusa · Avanzata attiva")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .onAppear { if !previewOnly { level=DiagnosticCollectionLevel.advanced.rawValue } }
+                        }
+                    }
+                }
                 Text("La profilazione torna automaticamente al livello avanzato dopo 15 minuti. I log tecnici ordinari restano attivi.")
                     .font(.caption).foregroundStyle(.secondary)
                 Picker("Conservazione statistiche",selection:$retention) {

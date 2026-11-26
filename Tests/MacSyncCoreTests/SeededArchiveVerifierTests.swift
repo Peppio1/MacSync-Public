@@ -116,6 +116,34 @@ final class SeededArchiveVerifierTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath:f.target.appendingPathComponent("Alias.jpg").path))
     }
 
+    func testV0194CorrectedTrailingSpaceDirectoryAndChildrenAreAcknowledgedWithoutDeletion() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        guard ["apfs","hfs"].contains(f.mapping.targetVolume.fileSystem.lowercased()) else { throw XCTSkip("Native macOS fixture required") }
+        for root in [f.source,f.target] {
+            let folder=root.appendingPathComponent("corrected")
+            try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true)
+            try write("keep",to:folder.appendingPathComponent("child.jpg"))
+        }
+        _=try LocalInventory(path:f.db.path).reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        try f.journal.verifyDirectoryBindings([f.mapping],allowNewTarget:true)
+        for path in ["corrected ","corrected /child.jpg"] {
+            _=try f.journal.enqueue(rootID:"photos",relativePath:path,kind:.delete,origin:.sourceMonitor)
+        }
+        let jobs=try f.journal.pending().filter{$0.kind == .delete}
+        XCTAssertEqual(try f.journal.acknowledgeAbsentAuditDeletes(jobs,mappings:[f.mapping],shouldContinue:{true}),2)
+        XCTAssertFalse(try f.journal.pending().contains{$0.kind == .delete})
+        XCTAssertEqual(try String(contentsOf:f.target.appendingPathComponent("corrected/child.jpg"),encoding:.utf8),"keep")
+        for path in ["corrected ","corrected /child.jpg"] {
+            _=try f.journal.enqueue(rootID:"photos",relativePath:path,kind:.delete,origin:.sourceMonitor)
+        }
+        let report=try SeededArchiveSession(database:f.db,mappings:[f.mapping]).auditPreservingQueuedChanges(
+            mode:.quick,repair:true,reconcileOrdinaryJobs:true)
+        XCTAssertEqual(report.recognizedAbsentDeletes,2)
+        XCTAssertFalse(try f.journal.pending().contains{$0.kind == .delete})
+        XCTAssertEqual(try String(contentsOf:f.target.appendingPathComponent("corrected/child.jpg"),encoding:.utf8),"keep")
+    }
+
     func testQuickRepairTransactionRollsBackAndRetriesAfterTransientMonitorEvent() throws {
         let f=try fixture()
         defer { try? FileManager.default.removeItem(at:f.base) }
