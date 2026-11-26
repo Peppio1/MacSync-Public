@@ -144,6 +144,22 @@ final class SeededArchiveVerifierTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf:f.target.appendingPathComponent("corrected/child.jpg"),encoding:.utf8),"keep")
     }
 
+    func testV0194AbsentParentReconcilesManyChildrenButPreservesPresentSibling() throws {
+        let f=try fixture()
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        try FileManager.default.createDirectory(at:f.target.appendingPathComponent("present"),withIntermediateDirectories:true)
+        try write("keep",to:f.target.appendingPathComponent("present/child.jpg"))
+        _=try LocalInventory(path:f.db.path).reconcile(rootID:"photos",root:f.source,origin:.initialInventory)
+        try f.journal.verifyDirectoryBindings([f.mapping],allowNewTarget:true)
+        for path in ["missing","present","present/child.jpg"]+(0..<200).map({"missing/sub/\($0).jpg"}) {
+            _=try f.journal.enqueue(rootID:"photos",relativePath:path,kind:.delete,origin:.sourceMonitor)
+        }
+        let jobs=try f.journal.pending().filter{$0.kind == .delete}
+        XCTAssertEqual(try f.journal.acknowledgeAbsentAuditDeletes(jobs,mappings:[f.mapping],shouldContinue:{true}),201)
+        XCTAssertEqual(Set(try f.journal.pending().map(\.relativePath)),Set(["present","present/child.jpg"]))
+        XCTAssertEqual(try String(contentsOf:f.target.appendingPathComponent("present/child.jpg"),encoding:.utf8),"keep")
+    }
+
     func testQuickRepairTransactionRollsBackAndRetriesAfterTransientMonitorEvent() throws {
         let f=try fixture()
         defer { try? FileManager.default.removeItem(at:f.base) }

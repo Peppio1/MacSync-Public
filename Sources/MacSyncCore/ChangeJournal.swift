@@ -1336,18 +1336,20 @@ public final class ChangeJournal {
         // Check only the absent candidates, never walk a remote tree.
         // A visible alias, symlink, inaccessible parent or ambiguous name
         // is not proof of absence. No SQLite write lock while reading SMB.
-        func absent(_ path:String,under root:URL,native:Bool) throws -> Bool {
+        func absentPrefix(_ path:String,under root:URL,native:Bool) throws -> String? {
             var parent=root
+            var components:[String]=[]
             for part in path.split(separator:"/").map(String.init) {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                components.append(part)
                 let aliases=try cache.aliases(for:part,in:parent)
                 let url=parent.appendingPathComponent(part)
                 var info=stat()
                 let rc=url.path.withCString{lstat($0,&info)}
                 if rc != 0 {
                     let code=errno
-                    guard code==ENOENT else { return false }
-                    if aliases.isEmpty { return true }
+                    guard code==ENOENT else { return nil }
+                    if aliases.isEmpty { return components.joined(separator:"/") }
                     // APFS/HFS can enumerate the exact old spelling even when
                     // Win32 comparison folds its corrected trailing-space name
                     // together with it. ENOENT plus that sole exact corrected
@@ -1356,23 +1358,35 @@ public final class ChangeJournal {
                     guard native,!WindowsPathSafety.validRelativePath(part),
                           let corrected=NameRectification.proposedName(part),
                           aliases.count==1,
-                          aliases[0].utf8.elementsEqual(corrected.utf8) else { return false }
-                    return !aliases[0].utf8.elementsEqual(part.utf8)
+                          aliases[0].utf8.elementsEqual(corrected.utf8),
+                          !aliases[0].utf8.elementsEqual(part.utf8) else { return nil }
+                    return components.joined(separator:"/")
                 }
                 guard aliases.count==1,aliases[0].utf8.elementsEqual(part.utf8),
-                      info.st_mode & mode_t(S_IFMT) != mode_t(S_IFLNK) else { return false }
-                if info.st_mode & mode_t(S_IFMT) != mode_t(S_IFDIR) { return false }
+                      info.st_mode & mode_t(S_IFMT) != mode_t(S_IFLNK) else { return nil }
+                if info.st_mode & mode_t(S_IFMT) != mode_t(S_IFDIR) { return nil }
                 parent=url
             }
-            return false
+            return nil
         }
-        var verified:[QueuedChange]=[]
+        struct ProofKey:Hashable { let rootID:String;let prefix:Data }
+        var sourceProofs=Set<ProofKey>(),targetProofs=Set<ProofKey>()
+        var verified:[(job:QueuedChange,targetPrefix:String)]=[]
+        // Exact UTF-8 prefix keys; never reuse a case-folded alias as proof.
+        func knownPrefix(_ path:String,rootID:String,proofs:Set<ProofKey>)->String? {
+            var prefix=""
+            for part in path.split(separator:"/") {
+                prefix=prefix.isEmpty ? String(part) : prefix+"/"+part
+                if proofs.contains(ProofKey(rootID:rootID,prefix:Data(prefix.utf8))) { return prefix }
+            }
+            return nil
+        }
         var nativeSources=Set<String>()
         for map in mappings {
             if let binding=try? verifyLocalSourceBinding(rootID:map.rootID,root:map.source),
                ["apfs","hfs"].contains(binding.volume.fileSystem.lowercased()) { nativeSources.insert(map.rootID) }
         }
-        for job in entries {
+        for job in entries.sorted(by:{ $0.relativePath.utf8.count < $1.relativePath.utf8.count }) {
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             guard job.kind == .delete,let map=maps[job.rootID],
                   WindowsPathSafety.validDeletionPath(job.relativePath),
@@ -1382,13 +1396,37 @@ public final class ChangeJournal {
                   WindowsPathSafety.validRelativePath(job.relativePath) || ["apfs","hfs"].contains(map.targetVolume.fileSystem.lowercased()),
                   !FileExclusionPolicy.excludes(job.relativePath,enabled:FileExclusionPolicy.ignoreDSStore) else { continue }
             do {
-                if try absent(job.relativePath,under:map.source,native:nativeSources.contains(job.rootID)),
-                   try absent(job.relativePath,under:map.target,native:["apfs","hfs"].contains(map.targetVolume.fileSystem.lowercased())) { verified.append(job) }
+                let sourcePrefix=try knownPrefix(job.relativePath,rootID:job.rootID,proofs:sourceProofs)
+                    ?? absentPrefix(job.relativePath,under:map.source,native:nativeSources.contains(job.rootID))
+                guard let sourcePrefix else { continue }
+                sourceProofs.insert(ProofKey(rootID:job.rootID,prefix:Data(sourcePrefix.utf8)))
+                let targetPrefix=try knownPrefix(job.relativePath,rootID:job.rootID,proofs:targetProofs)
+                    ?? absentPrefix(job.relativePath,under:map.target,native:["apfs","hfs"].contains(map.targetVolume.fileSystem.lowercased()))
+                guard let targetPrefix else { continue }
+                targetProofs.insert(ProofKey(rootID:job.rootID,prefix:Data(targetPrefix.utf8)))
+                verified.append((job,targetPrefix))
             } catch SeedVerificationError.cancelled { throw SeedVerificationError.cancelled }
-            catch { cache.invalidate() }
+            catch { cache.invalidate();sourceProofs.removeAll();targetProofs.removeAll() }
+        }
+        // Recheck each distinct absent target ancestor once, with fresh
+        // listings. A failure invalidates only that group. Never hold the
+        // SQLite writer while reading the remote filesystem.
+        cache.invalidate()
+        var confirmed=Set<ProofKey>(),rejected=Set<ProofKey>()
+        for entry in verified {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            let key=ProofKey(rootID:entry.job.rootID,prefix:Data(entry.targetPrefix.utf8))
+            guard !confirmed.contains(key),!rejected.contains(key),let map=maps[entry.job.rootID] else { continue }
+            do {
+                if try absentPrefix(entry.targetPrefix,under:map.target,native:["apfs","hfs"].contains(map.targetVolume.fileSystem.lowercased())) != nil {
+                    confirmed.insert(key)
+                } else { rejected.insert(key) }
+            } catch SeedVerificationError.cancelled { throw SeedVerificationError.cancelled }
+            catch { rejected.insert(key);cache.invalidate() }
         }
         try verifyDirectoryBindings(mappings)
-        guard !verified.isEmpty else { return 0 }
+        guard !confirmed.isEmpty else { return 0 }
+        cache.invalidate()
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
@@ -1407,7 +1445,9 @@ public final class ChangeJournal {
                 """)
             defer { sqlite3_finalize(stmt) }
             var count=0
-            for job in verified {
+            for entry in verified {
+                let job=entry.job
+                guard confirmed.contains(ProofKey(rootID:job.rootID,prefix:Data(entry.targetPrefix.utf8))) else { continue }
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 guard let map=maps[job.rootID],!protection.protects(rootID:job.rootID,path:job.relativePath) else { continue }
                 // Only metadata reads on the local source in the write transaction.
@@ -1419,7 +1459,7 @@ public final class ChangeJournal {
                 guard url.resolvingSymlinksInPath().path==url.path,
                       url.path.withCString({lstat($0,&info)}) != 0,errno==ENOENT else { continue }
                 if !WindowsPathSafety.validRelativePath(job.relativePath) {
-                    do { guard try absent(job.relativePath,under:map.source,native:nativeSources.contains(job.rootID)) else { continue } }
+                    do { guard try absentPrefix(job.relativePath,under:map.source,native:nativeSources.contains(job.rootID)) != nil else { continue } }
                     catch SeedVerificationError.cancelled { throw SeedVerificationError.cancelled }
                     catch { cache.invalidate(); continue }
                 }
