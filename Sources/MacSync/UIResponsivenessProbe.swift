@@ -12,6 +12,8 @@ final class UIResponsivenessProbe: @unchecked Sendable {
     private var databasePath:String?
     private var stats:[String:DiagnosticTiming]=[:]
     private var lastFlush:Double=0
+    private var lastHeartbeat:Double=0
+    private var lastPrune:Double = -3600
     private var resourceBaseline:DiagnosticResourceCounters?
     private var resourceSamples:[DiagnosticResourceSample]=[]
     private var droppedResourceSamples=0
@@ -36,8 +38,10 @@ final class UIResponsivenessProbe: @unchecked Sendable {
     private func tick() {
         guard running else { return }
         let now=ProcessInfo.processInfo.systemUptime
-        if now-lastFlush>=60 { sampleResources();flush();lastFlush=now }
-        guard !pending else { return }
+        let level=DiagnosticCollectionLevel.current
+        if now-lastFlush>=level.flushInterval { sampleResources();flush();lastFlush=now }
+        guard !pending,now-lastHeartbeat>=level.heartbeatInterval else { return }
+        lastHeartbeat=now
         pending=true
         let epoch=generation
         let sent=ProcessInfo.processInfo.systemUptime
@@ -74,10 +78,15 @@ final class UIResponsivenessProbe: @unchecked Sendable {
     }
 
     private func flush() {
-        guard !stats.isEmpty || !resourceSamples.isEmpty || droppedResourceSamples>0,
+        let now=ProcessInfo.processInfo.systemUptime
+        let shouldPrune=now-lastPrune>=3600
+        guard shouldPrune || !stats.isEmpty || !resourceSamples.isEmpty || droppedResourceSamples>0,
               let path=databasePath,
               FileManager.default.fileExists(atPath:path),
               let writer=try? SyncActivityLog(path:path) else { return }
+        if shouldPrune {
+            if (try? writer.pruneDiagnostics(maxAgeDays:DiagnosticCollectionLevel.retentionDays)) != nil { lastPrune=now }
+        }
         // Bound failures: never accumulate an unbounded backlog.
         while let sample=resourceSamples.first,
               let data=try? JSONEncoder().encode(sample) {
@@ -101,6 +110,18 @@ final class UIResponsivenessProbe: @unchecked Sendable {
                     durationSeconds:timing.totalSeconds,message:String(decoding:data,as:UTF8.self))
                 stats.removeValue(forKey:action)
             } catch { /* Retain bounded aggregates for the next flush. */ }
+        }
+    }
+
+    /// Include buffered diagnostics before user-initiated export.
+    func flushForExport(completion:@escaping @MainActor ()->Void) {
+        lane.async { [weak self] in
+            if let self,self.running {
+                self.sampleResources()
+                self.flush()
+                self.lastFlush=ProcessInfo.processInfo.systemUptime
+            }
+            DispatchQueue.main.async { completion() }
         }
     }
 

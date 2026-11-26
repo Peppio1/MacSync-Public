@@ -234,16 +234,43 @@ public final class SyncActivityLog {
         }
         let stmt = try prepare("""
             DELETE FROM sync_activity
-             WHERE event_time < ?
-                OR id NOT IN (
-                    SELECT id FROM sync_activity ORDER BY id DESC LIMIT ?
-                );
+             WHERE action NOT GLOB 'timing_distribution_*'
+               AND action NOT IN ('metric_resource_interval','metric_resource_samples_dropped')
+               AND (event_time < ? OR id NOT IN (
+                    SELECT id FROM sync_activity
+                    WHERE action NOT GLOB 'timing_distribution_*'
+                      AND action NOT IN ('metric_resource_interval','metric_resource_samples_dropped')
+                    ORDER BY id DESC LIMIT ?
+                ));
             """)
         defer { sqlite3_finalize(stmt) }
         let cutoff = Date().addingTimeInterval(-Double(maxAgeDays) * 86_400)
         guard sqlite3_bind_double(stmt, 1, cutoff.timeIntervalSince1970) == SQLITE_OK,
               sqlite3_bind_int(stmt, 2, Int32(retainNewest)) == SQLITE_OK,
               sqlite3_step(stmt) == SQLITE_DONE else { throw failure() }
+        return Int(sqlite3_changes(db))
+    }
+
+    /// Separate diagnostic budget without changing the queue or existing tables.
+    /// Older versions can still read the same log and apply their old retention.
+    public func pruneDiagnostics(retainNewest:Int=DiagnosticCollectionLevel.maxRetainedSamples,maxAgeDays:Int)throws->Int {
+        guard (100...100_000).contains(retainNewest),(1...90).contains(maxAgeDays) else {
+            throw JournalError.database("Invalid diagnostic retention policy")
+        }
+        let stmt=try prepare("""
+            DELETE FROM sync_activity
+            WHERE (action GLOB 'timing_distribution_*' OR action IN ('metric_resource_interval','metric_resource_samples_dropped'))
+              AND (event_time < ? OR id NOT IN (
+                SELECT id FROM sync_activity
+                WHERE action GLOB 'timing_distribution_*' OR action IN ('metric_resource_interval','metric_resource_samples_dropped')
+                ORDER BY id DESC LIMIT ?
+              ));
+            """)
+        defer { sqlite3_finalize(stmt) }
+        let cutoff=Date().addingTimeInterval(-Double(maxAgeDays)*86400)
+        guard sqlite3_bind_double(stmt,1,cutoff.timeIntervalSince1970)==SQLITE_OK,
+              sqlite3_bind_int(stmt,2,Int32(retainNewest))==SQLITE_OK,
+              sqlite3_step(stmt)==SQLITE_DONE else { throw failure() }
         return Int(sqlite3_changes(db))
     }
 

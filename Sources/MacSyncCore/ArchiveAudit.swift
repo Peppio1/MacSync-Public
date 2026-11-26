@@ -403,7 +403,7 @@ public final class ArchiveAudit {
                 }, work: { active, report in
                     try LocalScanner.scan(root: mapping.target, excludeManaged: true, preferPOSIXMetadata: true,
                         shouldContinue: active, onVisit: { report(.visit($0)) }, onItem: { report(.item($0)) },
-                        onPOSIXMetadataTiming: { report(.metadata($0)) }, measurePOSIXMetadata: true)
+                        onPOSIXMetadataTiming: { report(.metadata($0)) }, measurePOSIXMetadata: DiagnosticCollectionLevel.current != .standard)
                 })
             state.destination.scanSeconds = targetPrior + ProcessInfo.processInfo.systemUptime-scanStart
             try mapping.verify()

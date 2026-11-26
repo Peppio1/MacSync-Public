@@ -113,6 +113,31 @@ final class DiagnosticReportTests: XCTestCase {
         XCTAssertTrue(tsv.contains("\tcopy\t1\t1\t1\t"))
     }
 
+    func testDiagnosticRetentionDoesNotEvictOrdinaryEventsAndViceVersa() throws {
+        let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:dir) }
+        let log=try SyncActivityLog(path:dir.appendingPathComponent("test.sqlite").path)
+        for _ in 0..<105 {
+            try log.record(level:.info,rootID:"app",action:"copy",message:"")
+            try log.record(level:.info,rootID:"app",action:DiagnosticTiming.prefix+"metric_job_wall",message:"")
+        }
+        XCTAssertEqual(try log.prune(retainNewest:100,maxAgeDays:90),5)
+        XCTAssertEqual(try log.pruneDiagnostics(retainNewest:100,maxAgeDays:30),5)
+        let rows=try log.technicalPage(limit:500)
+        XCTAssertEqual(rows.filter{$0.entry.action=="copy"}.count,100)
+        XCTAssertEqual(rows.filter{$0.entry.action.hasPrefix(DiagnosticTiming.prefix)}.count,100)
+    }
+
+    func testProfilingExpiresAndStandardUsesLowerCadence() {
+        let now=Date(timeIntervalSince1970:1000)
+        XCTAssertEqual(DiagnosticCollectionLevel.effective(raw:"profiling",until:1900,now:now),.profiling)
+        XCTAssertEqual(DiagnosticCollectionLevel.effective(raw:"profiling",until:999,now:now),.advanced)
+        XCTAssertEqual(DiagnosticCollectionLevel.effective(raw:"profiling",until:1901,now:now),.advanced)
+        XCTAssertEqual(DiagnosticCollectionLevel.effective(raw:nil,until:0,now:now),.advanced)
+        XCTAssertGreaterThan(DiagnosticCollectionLevel.standard.flushInterval,DiagnosticCollectionLevel.advanced.flushInterval)
+    }
+
     func testExportPaginatesAndRemovesFreeTextAndIdentifiers() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

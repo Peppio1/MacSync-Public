@@ -5,18 +5,40 @@ import MacSyncCore
 struct DiagnosticReportPanel: View {
     @ObservedObject var copy: MountedCopyController
     let previewOnly: Bool
+    @AppStorage(DiagnosticCollectionLevel.preferenceKey) private var level=DiagnosticCollectionLevel.advanced.rawValue
+    @AppStorage(DiagnosticCollectionLevel.profilingUntilKey) private var profilingUntil:Double=0
+    @AppStorage(DiagnosticCollectionLevel.retentionKey) private var retention=DiagnosticCollectionLevel.defaultRetention
     @State private var days = 7
     @State private var exporting = false
     @State private var status = ""
 
     var body: some View {
-        MacSyncPanel("Diagnostica per i test", icon: "stethoscope", accent: false) {
+        MacSyncPanel("Diagnostica e prestazioni", icon: "stethoscope", accent: false) {
             VStack(alignment: .leading, spacing: 8) {
+                Picker("Livello",selection:$level) {
+                    Text("Standard").tag(DiagnosticCollectionLevel.standard.rawValue)
+                    Text("Avanzata").tag(DiagnosticCollectionLevel.advanced.rawValue)
+                    Text("Profilazione (15 minuti)").tag(DiagnosticCollectionLevel.profiling.rawValue)
+                }
+                .disabled(previewOnly)
+                .onChange(of:level) { value in
+                    profilingUntil=value==DiagnosticCollectionLevel.profiling.rawValue ? Date().addingTimeInterval(900).timeIntervalSince1970 : 0
+                }
+                Text("La profilazione torna automaticamente al livello avanzato dopo 15 minuti. I log tecnici ordinari restano attivi.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Picker("Conservazione statistiche",selection:$retention) {
+                    ForEach(DiagnosticCollectionLevel.retentionOptions,id:\.self) { days in
+                        Text("\(days) giorni").tag(days)
+                    }
+                }.disabled(previewOnly)
+                Text("Massimo 100.000 campioni diagnostici, indipendenti dal registro ordinario.")
+                    .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Picker("Periodo", selection: $days) {
                         Text("Ultime 24 ore").tag(1)
                         Text("Ultimi 7 giorni").tag(7)
                         Text("Ultimi 30 giorni").tag(30)
+                        Text("Ultimi 90 giorni").tag(90)
                     }
                     .frame(maxWidth: 240)
                     Spacer()
@@ -41,6 +63,7 @@ struct DiagnosticReportPanel: View {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
         exporting = true
         status = "Esportazione in corso…"
+        copy.uiResponsiveness.flushForExport {
         DispatchQueue.global(qos: .utility).async {
             let result: String
             do {
@@ -51,6 +74,7 @@ struct DiagnosticReportPanel: View {
                 status = result
                 exporting = false
             }
+        }
         }
     }
 }

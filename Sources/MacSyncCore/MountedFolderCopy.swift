@@ -376,7 +376,7 @@ public final class MountedFolderCopyWorker {
         for (action, timing) in transferDiagnostics.sorted(by: { $0.key < $1.key }) {
             try? log.record(level: .info, rootID: "app", action: action, durationSeconds: timing.totalSeconds,
                 message: "Tempo cumulativo del ciclo")
-            if let encoded=try? JSONEncoder().encode(timing) {
+            if DiagnosticCollectionLevel.current != .standard,let encoded=try? JSONEncoder().encode(timing) {
                 try? log.record(level:.info,rootID:"app",action:DiagnosticTiming.prefix+action,
                     durationSeconds:timing.totalSeconds,message:String(decoding:encoded,as:UTF8.self))
             }
