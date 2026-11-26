@@ -62,7 +62,10 @@ final class V0194PerformanceBenchmarkTests:XCTestCase {
         XCTAssertEqual(summary.deferred,0)
         XCTAssertFalse(summary.interrupted)
         XCTAssertTrue(try journal.pending().isEmpty)
-        let audit=try ArchiveAudit(journal:journal,mappings:[map]).run(mode:.quick)
+        let auditTick=ProcessInfo.processInfo.systemUptime
+        let audit=try SeededArchiveSession(database:database,mappings:[map]).auditPreservingQueuedChanges(
+            mode:.quick,repair:true,reconcileOrdinaryJobs:true)
+        let auditWallSeconds=ProcessInfo.processInfo.systemUptime-auditTick
         XCTAssertEqual(audit.count(.matching),rows.count)
         XCTAssertEqual(audit.bytesRead,0)
         // Correctness checks outside the timed phases; do not mistake
@@ -82,7 +85,7 @@ final class V0194PerformanceBenchmarkTests:XCTestCase {
             "location":location,"filesystem":map.targetVolume.fileSystem,
             "files":files.count,"directories":directories.count,"bytes":bytes,
             "copySeconds":copySeconds,"effectiveMBps":Double(bytes)/copySeconds/1_000_000,
-            "auditSeconds":audit.seconds,"auditSourceSeconds":audit.sourceMetrics?.scanSeconds ?? 0,
+            "auditSeconds":auditWallSeconds,"auditScanAndComparisonSeconds":audit.seconds,"auditSourceSeconds":audit.sourceMetrics?.scanSeconds ?? 0,
             "auditDestinationSeconds":audit.destinationMetrics?.scanSeconds ?? 0,
             "auditComparisonSeconds":audit.comparisonSeconds ?? 0,
             "auditBytesRead":audit.bytesRead,"phaseSeconds":phaseSeconds,

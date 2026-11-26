@@ -625,26 +625,49 @@ public struct SeededArchiveSession: Sendable {
         var auditTargetMissingPrefixes:[Int64:String]=[:]
         if repair {
             if operational {
-                let matching=Set(result.findings.lazy.filter{$0.kind == .matching}.map(\.id))
-                matches.removeAll{!matching.contains($0.rootID+"\0"+$0.relativePath)}
-                let observed=Set(result.findings.map(\.id))
-                pendingDeletes.removeAll{observed.contains($0.rootID+"\0"+$0.relativePath)}
-                // Reuse the complete destination inventory already acquired.
-                // Exact UTF-8 keys: a snapshot is only a planning hint; the
-                // journal must still verify absence live and recheck the job.
-                let targetPaths=Dictionary(grouping:result.findings.lazy.filter{$0.targetObjectKind != nil},by:{$0.rootID})
-                    .mapValues{Set($0.map{Data($0.relativePath.utf8)})}
-                for job in pendingDeletes {
-                    guard !cancellation.isCancelled else { throw SeedVerificationError.cancelled }
-                    // Do not broaden eligibility for incompatible SMB names.
-                    guard WindowsPathSafety.validRelativePath(job.relativePath) else { continue }
-                    let known=targetPaths[job.rootID] ?? []
-                    var prefix=""
-                    for part in job.relativePath.split(separator:"/") {
-                        prefix=prefix.isEmpty ? String(part) : prefix+"/"+part
-                        if !known.contains(Data(prefix.utf8)) {
-                            auditTargetMissingPrefixes[job.id]=prefix
-                            break
+                // Do not build an archive-sized index when there are no
+                // corresponding pending jobs. Index only relevant candidates.
+                if !matches.isEmpty {
+                    let wanted=Set(matches.map{$0.rootID+"\0"+$0.relativePath})
+                    let matching=Set(result.findings.lazy.filter{$0.kind == .matching && wanted.contains($0.id)}.map(\.id))
+                    matches.removeAll{!matching.contains($0.rootID+"\0"+$0.relativePath)}
+                }
+                if !pendingDeletes.isEmpty {
+                    let wanted=Set(pendingDeletes.map{$0.rootID+"\0"+$0.relativePath})
+                    let observed=Set(result.findings.lazy.filter{wanted.contains($0.id)}.map(\.id))
+                    pendingDeletes.removeAll{observed.contains($0.rootID+"\0"+$0.relativePath)}
+                    // Reuse the already acquired inventory, but retain only
+                    // ancestors of Windows-compatible pending delete paths.
+                    var relevant:[String:Set<Data>]=[:]
+                    for job in pendingDeletes {
+                        guard !cancellation.isCancelled else { throw SeedVerificationError.cancelled }
+                        guard WindowsPathSafety.validRelativePath(job.relativePath) else { continue }
+                        var prefix=""
+                        for part in job.relativePath.split(separator:"/") {
+                            prefix=prefix.isEmpty ? String(part) : prefix+"/"+part
+                            relevant[job.rootID,default:[]].insert(Data(prefix.utf8))
+                        }
+                    }
+                    var present:[String:Set<Data>]=[:]
+                    if !relevant.isEmpty {
+                        for finding in result.findings {
+                            guard !cancellation.isCancelled else { throw SeedVerificationError.cancelled }
+                            guard finding.targetObjectKind != nil,let candidates=relevant[finding.rootID] else { continue }
+                            let key=Data(finding.relativePath.utf8)
+                            if candidates.contains(key) { present[finding.rootID,default:[]].insert(key) }
+                        }
+                    }
+                    for job in pendingDeletes {
+                        guard !cancellation.isCancelled else { throw SeedVerificationError.cancelled }
+                        guard WindowsPathSafety.validRelativePath(job.relativePath) else { continue }
+                        let known=present[job.rootID] ?? []
+                        var prefix=""
+                        for part in job.relativePath.split(separator:"/") {
+                            prefix=prefix.isEmpty ? String(part) : prefix+"/"+part
+                            if !known.contains(Data(prefix.utf8)) {
+                                auditTargetMissingPrefixes[job.id]=prefix
+                                break
+                            }
                         }
                     }
                 }
