@@ -101,7 +101,8 @@ final class V0194AuditScaleBenchmarkTests: XCTestCase {
         XCTAssertEqual(report.count(.uncertain),0)
         XCTAssertEqual(report.count(.extra),0)
         XCTAssertEqual(report.bytesRead,0)
-        XCTAssertEqual(report.recognizedFiles,expectedOrdinary)
+        let recognizedFiles=try XCTUnwrap(report.recognizedFiles)
+        XCTAssertEqual(recognizedFiles,expectedOrdinary)
         XCTAssertEqual(try journal.plannedUploadCount(),expectedLegacy+2*groups)
         XCTAssertEqual(try journal.plannedDeleteCount(afterID:0),0)
         // Verify absence of any destination mutation outside the timed phase.
@@ -121,7 +122,7 @@ final class V0194AuditScaleBenchmarkTests: XCTestCase {
             "destinationScanSeconds":report.destinationMetrics?.scanSeconds ?? 0,
             "comparisonSeconds":report.comparisonSeconds ?? 0,
             "matching":report.count(.matching),"missing":report.count(.missing),
-            "different":report.count(.different),"recognizedFiles":report.recognizedFiles,
+            "different":report.count(.different),"recognizedFiles":recognizedFiles,
             "remainingUploads":try journal.plannedUploadCount(),"auditBytesRead":report.bytesRead
         ]
         let data=try JSONSerialization.data(withJSONObject:result,options:[.prettyPrinted,.sortedKeys])
