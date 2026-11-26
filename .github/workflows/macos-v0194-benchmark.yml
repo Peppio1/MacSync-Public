@@ -51,8 +51,9 @@ jobs:
       - name: Build identical release-mode test harnesses
         run: |
           set -euo pipefail
+          # Release optimization is retained; @testable imports require this flag.
           for checkout in stable candidate; do
-            (cd "$checkout" && swift build -c release --build-tests -Xswiftc -warnings-as-errors)
+            (cd "$checkout" && swift build -c release --build-tests -Xswiftc -enable-testing -Xswiftc -warnings-as-errors)
           done
       - name: Run alternating comparative benchmarks
         run: |
@@ -62,7 +63,7 @@ jobs:
             for checkout in $order; do
               export MACSYNC_BENCH_LABEL="$checkout-$round"
               export MACSYNC_BENCH_OUTPUT="$RUNNER_TEMP/macsync-benchmark-results/$checkout-$round.json"
-              (cd "$checkout" && swift test -c release --skip-build --filter V0194PerformanceBenchmarkTests/testRepresentativeCopyAndQuickAudit)
+              (cd "$checkout" && swift test -c release --skip-build -Xswiftc -enable-testing -Xswiftc -warnings-as-errors --filter V0194PerformanceBenchmarkTests/testRepresentativeCopyAndQuickAudit)
               test -s "$MACSYNC_BENCH_OUTPUT"
             done
           done
@@ -85,7 +86,7 @@ jobs:
       - name: Check existing incompatible-name safety on mounted SMB
         if: matrix.location == 'smb'
         working-directory: candidate
-        run: swift test -c release --skip-build --filter SMBV0192DeletionValidationTests
+        run: swift test -c release --skip-build -Xswiftc -enable-testing -Xswiftc -warnings-as-errors --filter SMBV0192DeletionValidationTests
       - uses: actions/upload-artifact@v6
         if: always()
         with:
