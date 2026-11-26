@@ -121,14 +121,16 @@ final class SoftwareUpdateController: ObservableObject {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "È disponibile un aggiornamento"
-        alert.informativeText = "GitHub segnala MacSync \(release.tagName).\n\nMacSync fermerà le operazioni e creerà un backup verificato. Solo dopo verrà aperta la finestra di Sparkle per verificare la firma e confermare l’installazione. Le novità saranno mostrate dal feed firmato. Se annulli, chiudi e riapri MacSync."
-        alert.addButton(withTitle: "Prepara aggiornamento")
-        alert.addButton(withTitle: "Più tardi")
-        alert.addButton(withTitle: "Salta versione")
+        let notes=release.userChangelog
+        let changes=notes.isEmpty ? "Riepilogo delle novità non disponibile." : notes.map{"• "+$0}.joined(separator:"\n")
+        alert.informativeText = "MacSync v\(installed) → \(release.tagName)\n\nNovità per l’utente\n"+changes+
+            "\n\nLe note sono informative. Premendo Aggiorna, MacSync fermerà le operazioni in sicurezza e creerà un backup verificato; Sparkle verificherà l’aggiornamento e chiederà conferma per l’installazione. Premendo Annulla, MacSync continuerà a funzionare normalmente."
+        alert.addButton(withTitle: "Aggiorna")
+        let cancel=alert.addButton(withTitle: "Annulla")
+        cancel.keyEquivalent="\u{1b}"
         NSApplication.shared.activate(ignoringOtherApps: true)
         switch alert.runModal() {
         case .alertFirstButtonReturn: onPrepareSignedUpdate?(release)
-        case .alertThirdButtonReturn: defaults.set(release.tagName, forKey: Self.skipKey)
         default: break
         }
     }

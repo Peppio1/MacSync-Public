@@ -10,6 +10,32 @@ public struct StableUpdateRelease: Decodable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case tagName = "tag_name", prerelease, draft, body
     }
+    /// A deliberately bounded, plain-text user section in the informational
+    /// GitHub release body. Never render HTML, fetch links or grant trust
+    /// based on this text. Sparkle independently verifies the signed update.
+    public var userChangelog:[String] {
+        guard let body else { return [] }
+        var active=false
+        var lines:[String]=[]
+        for raw in body.prefix(32_768).components(separatedBy:.newlines) {
+            let line=raw.trimmingCharacters(in:.whitespacesAndNewlines)
+            if line.hasPrefix("#") {
+                if active { break }
+                let heading=line.drop(while:{$0=="#" || $0==" "})
+                active=heading=="Novità per l'utente" || heading=="Novità per l’utente"
+                continue
+            }
+            guard active,line.hasPrefix("- ") || line.hasPrefix("* ") else { continue }
+            let item=String(line.dropFirst(2))
+            guard !item.isEmpty,item.count<=240,!item.contains("<"),!item.contains(">"),
+                  !item.contains("://"),!item.contains("]("),
+                  !item.unicodeScalars.contains(where:{CharacterSet.controlCharacters.contains($0) || CharacterSet.illegalCharacters.contains($0) || (0x202A...0x202E).contains($0.value) || (0x2066...0x2069).contains($0.value)}) else { continue }
+            lines.append(item)
+            if lines.count==6 { break }
+        }
+        return lines
+    }
+
     public var pageURL: URL? {
         guard Self.version(tagName) != nil else { return nil }
         return URL(string: "https://github.com/Peppio1/MacSync-Public/releases/tag/\(tagName)")

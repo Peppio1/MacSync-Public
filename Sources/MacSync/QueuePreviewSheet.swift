@@ -79,6 +79,13 @@ struct QueuePreviewSheet: View {
                                         Text(path(row)).font(.subheadline).textSelection(.enabled).fixedSize(horizontal:false,vertical:true)
                                         Text("Accodata: "+macSyncDateTime(row.job.recordedAt)+" · "+origin(row.origin))
                                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                                        if row.relatedToRectification {
+                                            Text("Associata a una rettifica automatica").font(.caption).foregroundStyle(.secondary)
+                                        }
+                                        if row.requiresLiteralVerification {
+                                            Text("Vecchio nome incompatibile: l’assenza va verificata sul filesystem. La sola mancata visibilità su SMB non è sufficiente.")
+                                                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                                        }
                                         Text(row.status.label).font(.caption.weight(.medium))
                                             .foregroundStyle(row.status == .current ? Color.accentColor : (row.status.isPlanned ? Color.secondary : Color.orange))
                                             .fixedSize(horizontal:false,vertical:true)

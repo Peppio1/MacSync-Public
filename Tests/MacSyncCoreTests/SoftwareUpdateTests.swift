@@ -20,6 +20,21 @@ final class SoftwareUpdateTests: XCTestCase {
         }
     }
 
+    func testUserChangelogOnlyShowsBoundedInformationalSection() throws {
+        let body=["# Note tecniche","- interna","## Novità per l’utente","- Migliorata la coda",
+            "- <img>","- https://example.invalid","- "+String(repeating:"a",count:241),
+            "* Verifica archivio più chiara","## Dettagli","- interna"].joined(separator:"\n")
+        let data=try JSONSerialization.data(withJSONObject:["tag_name":"v0.19.4","draft":false,"prerelease":false,"body":body])
+        guard case .available(let release)=try StableUpdateDiscovery.interpret(status:200,data:data,installed:"0.19.3") else {
+            return XCTFail("Expected release")
+        }
+        XCTAssertEqual(release.userChangelog,["Migliorata la coda","Verifica archivio più chiara"])
+        guard case .available(let legacy)=try StableUpdateDiscovery.interpret(status:200,data:json("v0.19.4"),installed:"0.19.3") else {
+            return XCTFail("Expected release")
+        }
+        XCTAssertTrue(legacy.userChangelog.isEmpty)
+    }
+
     func testNoStableReleaseIsNotAnUpToDateClaimAndErrorsFailClosed() throws {
         XCTAssertEqual(try StableUpdateDiscovery.interpret(status: 404, data: Data(), installed: "0.16.0"), .noStableRelease)
         for status in [403, 429, 500] { XCTAssertThrowsError(try StableUpdateDiscovery.interpret(status: status, data: Data(), installed: "0.16.0")) }

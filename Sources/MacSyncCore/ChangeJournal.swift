@@ -1132,7 +1132,8 @@ public final class ChangeJournal {
                 \(QueueExecutionOrder.idSQL) LIMIT ?13 OFFSET ?14
             )
             SELECT s.id,s.root_id,s.relative_path,s.kind,s.recorded_at,s.origin,
-                   COALESCE(f.kind,''),s.state
+                   COALESCE(f.kind,''),s.state,
+                   EXISTS(SELECT 1 FROM name_rectification_monitor_links l WHERE l.job_id=s.id)
               FROM selected s LEFT JOIN file_inventory f ON f.root_id=s.root_id AND f.relative_path=s.relative_path
               ORDER BY s.sort_rank, CASE WHEN s.kind='delete' THEN length(s.relative_path) ELSE 0 END DESC, s.id;
             """
@@ -1158,7 +1159,8 @@ public final class ChangeJournal {
             let job=QueuedChange(id:sqlite3_column_int64(stmt,0),rootID:columnText(stmt,at:1),
                 relativePath:columnText(stmt,at:2),kind:kind,
                 recordedAt:Date(timeIntervalSince1970:sqlite3_column_double(stmt,4)))
-            rows.append(.init(job:job,origin:columnText(stmt,at:5),objectKind:columnText(stmt,at:6),status:state))
+            rows.append(.init(job:job,origin:columnText(stmt,at:5),objectKind:columnText(stmt,at:6),status:state,
+                relatedToRectification:sqlite3_column_int(stmt,8) != 0))
         }
         return .init(rows:Array(rows.prefix(size)),hasMore:rows.count>size)
     }

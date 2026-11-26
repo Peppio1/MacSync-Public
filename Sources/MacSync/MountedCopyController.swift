@@ -620,7 +620,7 @@ final class MountedCopyController: ObservableObject {
                 summaryProgress.comparisonStarted = nil
                 progress(summaryProgress)
                 let savedReport = report
-                try? auditLog?.record(level:.info,rootID:"app",action:"audit_queue_preserved",message:settings.mode.label + ": riconosciute " + String((report.recognizedFiles ?? 0) + (report.recognizedDirectories ?? 0)) + " copie pendenti corrispondenti; conservati eventi successivi e operazioni incerte; accodate " + String(report.queuedRepairs) + " differenze sicure; nessuna scrittura sul server")
+                try? auditLog?.record(level:.info,rootID:"app",action:"audit_queue_preserved",message:settings.mode.label + ": riconosciute " + String((report.recognizedFiles ?? 0) + (report.recognizedDirectories ?? 0)) + " copie pendenti corrispondenti; " + String(report.recognizedAbsentDeletes ?? 0) + " eliminazioni già soddisfatte; conservati eventi successivi e operazioni incerte; accodate " + String(report.queuedRepairs) + " differenze sicure; nessuna scrittura sul server")
  
                 var storageWarning = ""
                 do {

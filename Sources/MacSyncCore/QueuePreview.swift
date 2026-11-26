@@ -48,6 +48,10 @@ public struct QueuePreviewRow: Identifiable, Sendable, Equatable {
     public let origin:String
     public let objectKind:String
     public let status:QueuePreviewStatus
+    public var relatedToRectification:Bool = false
+    public var requiresLiteralVerification:Bool {
+        job.kind == .delete && !WindowsPathSafety.validRelativePath(job.relativePath)
+    }
     public var id:Int64 { job.id }
 }
 public struct QueuePreviewPage: Sendable {
