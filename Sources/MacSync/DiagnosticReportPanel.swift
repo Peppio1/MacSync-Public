@@ -32,7 +32,7 @@ struct DiagnosticReportPanel: View {
 
     private func export() {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "MacSync-report-diagnostico.json"
+        panel.nameFieldStringValue = "MacSync-report-diagnostico.zip"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let path: String
         do { path = try copy.historyPath() }
@@ -44,8 +44,7 @@ struct DiagnosticReportPanel: View {
         DispatchQueue.global(qos: .utility).async {
             let result: String
             do {
-                let data = try DiagnosticReport.make(databasePath: path, since: since, appVersion: version)
-                try data.write(to: url, options: .atomic)
+                try DiagnosticReport.exportZIP(databasePath:path,since:since,appVersion:version,to:url)
                 result = "Report diagnostico esportato"
             } catch { result = "Esportazione non riuscita" }
             DispatchQueue.main.async {

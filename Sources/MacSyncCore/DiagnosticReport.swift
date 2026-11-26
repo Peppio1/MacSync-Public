@@ -60,7 +60,7 @@ public enum DiagnosticReport {
         return id
     }
 
-    public static func make(databasePath: String, since: Date, appVersion: String) throws -> Data {
+    private static func collect(databasePath:String,since:Date,appVersion:String) throws -> Report {
         let reader = try SyncActivityLog(path: databasePath, readOnly: true)
         var roots: [String: Int] = [:]
         var items: [String: Int] = [:]
@@ -98,9 +98,107 @@ public enum DiagnosticReport {
             }
             before = page.count == 500 ? page.last?.id : nil
         } while before != nil
-        let encoder = JSONEncoder()
+        return Report(resourceSamples:resourceSamples,environment:Environment(),timingDistributions:timingDistributions,appVersion:appVersion,exportedAt:Date(),since:since,events:events)
+    }
+
+    private static func encoder()->JSONEncoder {
+        let encoder=JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return try encoder.encode(Report(resourceSamples:resourceSamples,environment:Environment(),timingDistributions:timingDistributions,appVersion: appVersion, exportedAt: Date(), since: since, events: events))
+        encoder.outputFormatting=[.prettyPrinted,.sortedKeys]
+        return encoder
+    }
+
+    public static func make(databasePath:String,since:Date,appVersion:String)throws->Data {
+        try encoder().encode(collect(databasePath:databasePath,since:since,appVersion:appVersion))
+    }
+
+    private struct ExportSummary:Encodable {
+        let schemaVersion:Int
+        let appVersion:String
+        let exportedAt:Date
+        let requestedSince:Date
+        let earliestRetainedEvent:Date?
+        let latestRetainedEvent:Date?
+        let eventCount:Int
+        let timingDistributionCount:Int
+        let resourceSampleCount:Int
+        let actionCounts:[String:Int]
+        let notes:[String]
+    }
+    private struct Section:Encodable {
+        let timings:[TimingRecord]
+        let events:[Event]
+    }
+
+    /// User-initiated export only. All sections use a single anonymized
+    /// collection, so aliases stay consistent across the ZIP.
+    public static func exportZIP(databasePath:String,since:Date,appVersion:String,to destination:URL)throws {
+        let report=try collect(databasePath:databasePath,since:since,appVersion:appVersion)
+        let fm=FileManager.default
+        let temporary=fm.temporaryDirectory.appendingPathComponent("macsync-report-"+UUID().uuidString,isDirectory:true)
+        try fm.createDirectory(at:temporary,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
+        defer { try? fm.removeItem(at:temporary) }
+        let contents=temporary.appendingPathComponent("report",isDirectory:true)
+        try fm.createDirectory(at:contents,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
+        let json=encoder()
+        func write<T:Encodable>(_ value:T,_ name:String)throws {
+            try json.encode(value).write(to:contents.appendingPathComponent(name),options:.atomic)
+        }
+        let summary=ExportSummary(schemaVersion:report.schemaVersion,appVersion:report.appVersion,
+            exportedAt:report.exportedAt,requestedSince:report.since,
+            earliestRetainedEvent:report.events.map(\.timestamp).min(),latestRetainedEvent:report.events.map(\.timestamp).max(),
+            eventCount:report.events.count,timingDistributionCount:report.timingDistributions.count,
+            resourceSampleCount:report.resourceSamples.count,
+            actionCounts:Dictionary(grouping:report.events,by:\.action).mapValues(\.count),
+            notes:["Periodo richiesto, limitato agli eventi effettivamente conservati.",
+                   "I percentili delle distribuzioni sono limiti superiori stimati.",
+                   "I tempi delle fasi possono sovrapporsi e non devono essere sommati automaticamente.",
+                   "Le chiamate filesystem non misurano i pacchetti SMB.",
+                   "La CPU dei processi figli è contabilizzata al termine; RSS indica il picco.",
+                   "Le misure UI riguardano consegna e risposta dei risultati, non fotogrammi."])
+        try write(summary,"riepilogo.json")
+        try write(report.environment,"ambiente.json")
+        try write(report.resourceSamples,"risorse.json")
+        func section(_ filename:String,where includes:(String)->Bool)throws {
+            try write(Section(timings:report.timingDistributions.filter{includes($0.action)},
+                events:report.events.filter{includes($0.action)}),filename)
+        }
+        try section("sincronizzazioni.json") {
+            $0=="cycle" || $0=="copy" || $0.hasPrefix("rclone") || $0.hasPrefix("metric_rclone") ||
+            $0.hasPrefix("metric_copy") || $0.hasPrefix("metric_job") || $0.hasPrefix("mirror")
+        }
+        try section("verifiche_archivio.json") { $0.hasPrefix("audit") || $0.hasPrefix("metric_audit") }
+        try section("filesystem.json") {
+            $0=="metric_audit_destination_lstat" || $0.hasPrefix("smb") || $0.hasPrefix("connection")
+        }
+        try section("interfaccia.json") {
+            $0.hasPrefix("metric_ui") || $0=="metric_progress_delivery_delay"
+        }
+        try section("coda.json") {
+            $0.hasPrefix("queue") || $0.hasPrefix("metric_queue") || $0.hasPrefix("retry") ||
+            $0.hasPrefix("monitor") || $0.hasPrefix("fsevent") || $0=="reconciled"
+        }
+        let iso=ISO8601DateFormatter()
+        iso.formatOptions=[.withInternetDateTime,.withFractionalSeconds]
+        var lines=["timestamp\tlevel\taction\troot\titem\tcycle\tjob\tbytes\tseconds"]
+        for event in report.events.reversed() {
+            let fields=[iso.string(from:event.timestamp),event.level,event.action,String(event.root),
+                event.item.map{String($0)} ?? "",event.cycle.map{String($0)} ?? "",event.job.map{String($0)} ?? "",
+                String(event.bytes),String(event.seconds)]
+            lines.append(fields.map{$0.replacingOccurrences(of:"\t",with:" ").replacingOccurrences(of:"\n",with:" ").replacingOccurrences(of:"\r",with:" ")}.joined(separator:"\t"))
+        }
+        try Data((lines.joined(separator:"\n")+"\n").utf8).write(to:contents.appendingPathComponent("eventi.tsv"),options:.atomic)
+        let archive=temporary.appendingPathComponent("report.zip")
+        let process=Process()
+        process.executableURL=URL(fileURLWithPath:"/usr/bin/ditto")
+        process.arguments=["-c","-k","--norsrc",contents.path,archive.path]
+        process.standardInput=FileHandle.nullDevice
+        process.standardOutput=FileHandle.nullDevice
+        process.standardError=FileHandle.nullDevice
+        try process.run();process.waitUntilExit()
+        guard process.terminationReason == .exit,process.terminationStatus==0 else {
+            throw JournalError.database("Creazione archivio diagnostico non riuscita")
+        }
+        try Data(contentsOf:archive,options:.mappedIfSafe).write(to:destination,options:.atomic)
     }
 }

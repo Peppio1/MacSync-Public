@@ -83,6 +83,36 @@ final class DiagnosticReportTests: XCTestCase {
         XCTAssertEqual(aggregate.totalSeconds,observed.totalSeconds*2)
     }
 
+    func testZIPExportUsesOneAnonymizedCollectionAndExpectedSections() throws {
+        let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:dir) }
+        let db=dir.appendingPathComponent("test.sqlite").path
+        let log=try SyncActivityLog(path:db)
+        log.cycleID="private-cycle"
+        try log.record(level:.success,rootID:"private-root",action:"copy",relativePath:"private-name.jpg",
+                       bytes:10,durationSeconds:1,message:"private-host")
+        let zip=dir.appendingPathComponent("diagnostic.zip")
+        try DiagnosticReport.exportZIP(databasePath:db,since:.distantPast,appVersion:"0.19.4",to:zip)
+        let unpack=dir.appendingPathComponent("unpack")
+        let proc=Process()
+        proc.executableURL=URL(fileURLWithPath:"/usr/bin/ditto")
+        proc.arguments=["-x","-k",zip.path,unpack.path]
+        try proc.run();proc.waitUntilExit()
+        XCTAssertEqual(proc.terminationStatus,0)
+        let names=try FileManager.default.contentsOfDirectory(atPath:unpack.path)
+        XCTAssertEqual(Set(names),Set(["riepilogo.json","ambiente.json","risorse.json","sincronizzazioni.json",
+            "verifiche_archivio.json","filesystem.json","interfaccia.json","coda.json","eventi.tsv"]))
+        for name in names {
+            let data=try Data(contentsOf:unpack.appendingPathComponent(name))
+            XCTAssertFalse(String(decoding:data,as:UTF8.self).contains("private-"))
+        }
+        let summary=try XCTUnwrap(JSONSerialization.jsonObject(with:Data(contentsOf:unpack.appendingPathComponent("riepilogo.json"))) as? [String:Any])
+        XCTAssertEqual(summary["eventCount"] as? Int,1)
+        let tsv=try String(contentsOf:unpack.appendingPathComponent("eventi.tsv"),encoding:.utf8)
+        XCTAssertTrue(tsv.contains("\tcopy\t1\t1\t1\t"))
+    }
+
     func testExportPaginatesAndRemovesFreeTextAndIdentifiers() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

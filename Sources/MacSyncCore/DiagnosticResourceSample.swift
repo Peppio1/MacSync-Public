@@ -5,6 +5,7 @@ import Darwin
 /// Child usage is for reaped children, not live Rclone CPU/RAM. Block
 /// operation counts are not disk byte counts. Peak RSS is not current RSS.
 public struct DiagnosticResourceCounters: Equatable, Sendable {
+    public let capturedAt:Date
     public let uptime:Double
     public let processCPUSeconds:Double
     public let completedChildrenCPUSeconds:Double
@@ -16,8 +17,8 @@ public struct DiagnosticResourceCounters: Equatable, Sendable {
 
     public init(uptime:Double,processCPUSeconds:Double,completedChildrenCPUSeconds:Double,
                 processPeakResidentBytes:Int64,processInputBlocks:Int64,processOutputBlocks:Int64,
-                thermal:DiagnosticResourceSample.Thermal,lowPower:Bool) {
-        self.uptime=uptime;self.processCPUSeconds=processCPUSeconds
+                thermal:DiagnosticResourceSample.Thermal,lowPower:Bool,capturedAt:Date=Date()) {
+        self.capturedAt=capturedAt;self.uptime=uptime;self.processCPUSeconds=processCPUSeconds
         self.completedChildrenCPUSeconds=completedChildrenCPUSeconds
         self.processPeakResidentBytes=processPeakResidentBytes
         self.processInputBlocks=processInputBlocks;self.processOutputBlocks=processOutputBlocks
@@ -49,6 +50,7 @@ public struct DiagnosticResourceCounters: Equatable, Sendable {
 public struct DiagnosticResourceSample: Codable, Equatable, Sendable {
     public enum Thermal:String,Codable,Sendable { case nominal,fair,serious,critical,unknown }
     public static let action="metric_resource_interval"
+    public let capturedAt:Date
     public let intervalSeconds:Double
     /// 100% means one fully utilized logical core, not the whole machine.
     public let processCPUPercentOfOneCore:Double
@@ -68,7 +70,7 @@ public struct DiagnosticResourceSample: Codable, Equatable, Sendable {
         guard elapsed>=1,elapsed.isFinite,cpu>=0,cpu.isFinite,children>=0,children.isFinite,
               start.processInputBlocks>=0,start.processOutputBlocks>=0,
               end.processInputBlocks>=start.processInputBlocks,end.processOutputBlocks>=start.processOutputBlocks else { return nil }
-        let sample=Self(intervalSeconds:elapsed,processCPUPercentOfOneCore:100*cpu/elapsed,
+        let sample=Self(capturedAt:end.capturedAt,intervalSeconds:elapsed,processCPUPercentOfOneCore:100*cpu/elapsed,
                         completedChildrenCPUSeconds:children,processPeakResidentBytes:end.processPeakResidentBytes,
                         processInputBlocks:end.processInputBlocks-start.processInputBlocks,
                         processOutputBlocks:end.processOutputBlocks-start.processOutputBlocks,
