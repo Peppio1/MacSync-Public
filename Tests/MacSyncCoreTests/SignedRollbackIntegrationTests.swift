@@ -58,11 +58,14 @@ final class SignedRollbackIntegrationTests:XCTestCase {
             }
             let savedDB=snapshot.appendingPathComponent("inventory.sqlite")
             let savedDigest=try ApplicationRollback.databaseDigest(savedDB,scratch:state)
+            XCTAssertEqual(try ApplicationRollback.databaseDigest(db,scratch:state),savedDigest)
             let signatureURL=staging.appendingPathComponent("previous.edsignature")
             let correct=try Data(contentsOf:signatureURL)
             try Data("invalid".utf8).write(to:signatureURL)
             XCTAssertThrowsError(try SignedRollbackTransaction.install(root:state,snapshot:snapshot,target:app,
-                defaults:defaults,allowsLocation:{$0.path==app.path}))
+                defaults:defaults,allowsLocation:{$0.path==app.path})) { error in
+                XCTAssertTrue(error.localizedDescription.localizedCaseInsensitiveContains("firma") || error.localizedDescription.localizedCaseInsensitiveContains("pacchetto"), error.localizedDescription)
+            }
             try ApplicationRollback.validateBundle(app,version:"0.19.4")
             XCTAssertEqual(try journal.pending(),before)
             try correct.write(to:signatureURL)

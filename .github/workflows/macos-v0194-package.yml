@@ -136,7 +136,7 @@ jobs:
       - name: Verify signed v0.19.3 predecessor against the final candidate
         env:
           MACSYNC_V0194_ROLLBACK_LAB: '1'
-        run: swift test --skip-build --filter 'SignedRollbackIntegrationTests|SignedUpdatePolicyTests'
+        run: swift test --skip-build --filter 'SignedRollbackIntegrationTests|SignedUpdatePolicyTests|ApplicationRollbackTests'
       - name: Validate Sparkle 2.10.0 with disposable signing keys
         run: |
           set -euo pipefail

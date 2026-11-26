@@ -51,36 +51,14 @@ public enum ApplicationRollback {
             url.standardizedFileURL.path == parent.appendingPathComponent("MacSync.app").path
     }
 
-    /// Canonical SQL export rather than raw SQLite bytes (VACUUM changes pages).
-    /// Conservative refusal on any mismatch, including a changed row order.
-    /// No DB dump is printed or persisted outside a private temporary directory.
+    /// Hash the complete logical archive, not physical pages or CLI dump order.
+    /// VACUUM INTO may reorder implicit rowids and sqlite_sequence entries.
+    /// All schema objects, explicit IDs, values, duplicates and sequence
+    /// counters are covered. No dump is written or exposed. Fail closed on
+    /// unreadable/unsupported layouts. Caller holds the exclusive archive lock.
     public static func databaseDigest(_ url: URL, scratch: URL) throws -> Data {
         try ArchiveDatabaseSafety.verify(url, readOnly: true)
-        let output = scratch.appendingPathComponent("digest-" + UUID().uuidString)
-        guard FileManager.default.createFile(atPath: output.path, contents: nil,
-                                             attributes: [.posixPermissions: 0o600]) else {
-            throw Failure("Impossibile preparare il controllo dell’archivio.")
-        }
-        defer { try? FileManager.default.removeItem(at: output) }
-        let handle = try FileHandle(forWritingTo: output)
-        defer { try? handle.close() }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-        p.arguments = ["-batch", "-bail", "-readonly", url.path,
-                       "PRAGMA user_version;", "PRAGMA application_id;", ".dump"]
-        p.standardOutput = handle
-        p.standardError = FileHandle.nullDevice
-        try p.run()
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else { throw Failure("Confronto SQLite non riuscito.") }
-        try handle.synchronize()
-        let reader = try FileHandle(forReadingFrom: output)
-        defer { try? reader.close() }
-        var hash = SHA256()
-        while let bytes = try reader.read(upToCount: 1024 * 1024), !bytes.isEmpty {
-            hash.update(data: bytes)
-        }
-        return Data(hash.finalize())
+        return try LogicalArchiveDigest.compute(url)
     }
 
     /// Prepare and verify a copy on the target's own filesystem, then atomically
