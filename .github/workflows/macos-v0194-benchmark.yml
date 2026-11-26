@@ -1,0 +1,98 @@
+name: MacSync v0.19.4 performance comparison
+on:
+  push:
+    branches: [benchmark-v0.19.4]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macsync-v0194-benchmark-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  compare:
+    strategy:
+      fail-fast: false
+      matrix:
+        location: [local, smb]
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+      MACSYNC_RUN_PERFORMANCE_BENCHMARK: '1'
+      MACSYNC_BENCH_LOCATION: ${{ matrix.location }}
+      MACSYNC_V0192_REQUIRE_SMB: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: c5ab9e9da6a154a7a216e4c6d55f5388a8bd457d
+          path: stable
+          persist-credentials: false
+      - name: Prepare identical benchmark fixture and verified Rclone
+        run: |
+          set -euo pipefail
+          test "$(git -C stable rev-parse HEAD)" = c5ab9e9da6a154a7a216e4c6d55f5388a8bd457d
+          cp candidate/Tests/MacSyncCoreTests/V0194PerformanceBenchmarkTests.swift stable/Tests/MacSyncCoreTests/
+          bash candidate/Packaging/prepare-rclone.sh "$RUNNER_TEMP/macsync-rclone"
+          python3 candidate/scripts/ci/generate-performance-fixture.py "$RUNNER_TEMP/macsync-bench-source"
+          echo "MACSYNC_TEST_RCLONE=$RUNNER_TEMP/macsync-rclone/rclone" >> "$GITHUB_ENV"
+          echo "MACSYNC_BENCH_SOURCE=$RUNNER_TEMP/macsync-bench-source" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/macsync-benchmark-results"
+      - name: Install disposable loopback Samba
+        if: matrix.location == 'smb'
+        run: brew install samba
+      - name: Mount genuine SMB filesystem
+        if: matrix.location == 'smb'
+        run: bash candidate/scripts/ci/prepare-local-samba.sh
+      - name: Build identical release-mode test harnesses
+        run: |
+          set -euo pipefail
+          for checkout in stable candidate; do
+            (cd "$checkout" && swift build -c release --build-tests -Xswiftc -warnings-as-errors)
+          done
+      - name: Run alternating comparative benchmarks
+        run: |
+          set -euo pipefail
+          for round in 1 2 3; do
+            if [ "$round" = 2 ]; then order="candidate stable"; else order="stable candidate"; fi
+            for checkout in $order; do
+              export MACSYNC_BENCH_LABEL="$checkout-$round"
+              export MACSYNC_BENCH_OUTPUT="$RUNNER_TEMP/macsync-benchmark-results/$checkout-$round.json"
+              (cd "$checkout" && swift test -c release --skip-build --filter V0194PerformanceBenchmarkTests/testRepresentativeCopyAndQuickAudit)
+              test -s "$MACSYNC_BENCH_OUTPUT"
+            done
+          done
+          python3 - <<'PY'
+          import json, os, statistics
+          from pathlib import Path
+          folder=Path(os.environ["RUNNER_TEMP"])/"macsync-benchmark-results"
+          records=[json.loads(p.read_text()) for p in sorted(folder.glob("*.json"))]
+          assert len(records)==6 and all(r["integrityChecked"] for r in records)
+          fields=["copySeconds","effectiveMBps","auditSeconds","auditDestinationSeconds"]
+          summary={"location":os.environ["MACSYNC_BENCH_LOCATION"],"samples":records,"medians":{}}
+          for label in ["stable","candidate"]:
+              group=[r for r in records if r["label"].startswith(label+"-")]
+              assert len(group)==3
+              summary["medians"][label]={k:statistics.median(r[k] for r in group) for k in fields}
+          text=json.dumps(summary,indent=2,sort_keys=True)
+          print(text)
+          (folder/"summary.json").write_text(text)
+          PY
+      - name: Check existing incompatible-name safety on mounted SMB
+        if: matrix.location == 'smb'
+        working-directory: candidate
+        run: swift test -c release --skip-build --filter SMBV0192DeletionValidationTests
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: macsync-benchmark-${{ matrix.location }}
+          path: ${{ runner.temp }}/macsync-benchmark-results/*.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Cleanup disposable share
+        if: always() && matrix.location == 'smb'
+        run: bash candidate/scripts/ci/cleanup-local-samba.sh
