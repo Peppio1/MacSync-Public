@@ -95,6 +95,15 @@ public final class ChangeJournal {
             // New coordinated operations have independent durable records.
             // Never rewrite an older batch or lose its recorded protection.
             try execute("CREATE TABLE IF NOT EXISTS name_rectification_groups(root_id TEXT NOT NULL, relative_path TEXT NOT NULL, plan TEXT NOT NULL, PRIMARY KEY(root_id,relative_path));")
+            // Additive history: old releases ignore it, pending plans keep
+            // their schema. No receipt is an authorization for remote mutation.
+            try execute("""
+                CREATE TABLE IF NOT EXISTS name_rectification_receipts(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,root_id TEXT NOT NULL,
+                    old_path TEXT NOT NULL,new_path TEXT NOT NULL,receipt TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_rectification_receipts_root ON name_rectification_receipts(root_id,id DESC);
+                """)
             // Existing profiles retain their approved plan, next_move and
             // exact fingerprints. Adding a column never rewrites the plan.
             try SQLiteConnectionSetup.addColumnIfMissing(connection,table:"name_rectification_batch",column:"progress",
@@ -588,7 +597,8 @@ public final class ChangeJournal {
     func finishCoordinatedNameGroup(rootID:String,path:String,
                                     completed:[(item:IncompatibleName,newName:String)],
                                     restoredSource:(item:IncompatibleName,newName:String,volume:VolumeFingerprint)? = nil,
-                                    recordReconciliationScope:Bool = true) throws {
+                                    recordReconciliationScope:Bool = true,
+                                    receipt:NameRectificationReceipt? = nil) throws {
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
             for entry in completed {
@@ -648,12 +658,62 @@ public final class ChangeJournal {
                         rootPath:cached.rootPath,volume:cached.volume,date:cached.date,rows:rows))
                 }
             }
+            if let receipt {
+                guard completed.count==1,completed[0].item.side == .source,
+                      receipt.rootID==rootID,receipt.oldPath.utf8.elementsEqual(path.utf8),
+                      receipt.sourceRoot==completed[0].item.rootPath,
+                      receipt.isDirectory==completed[0].item.isDirectory,
+                      receipt.newPath.split(separator:"/").last.map(String.init)==completed[0].newName,
+                      restoredSource==nil else { throw JournalError.database("Ricevuta rettifica incoerente") }
+                let insert=try prepare("INSERT INTO name_rectification_receipts(root_id,old_path,new_path,receipt) VALUES(?,?,?,?);")
+                defer { sqlite3_finalize(insert) }
+                try bind(rootID,at:1,in:insert);try bind(receipt.oldPath,at:2,in:insert)
+                try bind(receipt.newPath,at:3,in:insert)
+                try bind(String(decoding:try JSONEncoder().encode(receipt),as:UTF8.self),at:4,in:insert)
+                guard sqlite3_step(insert)==SQLITE_DONE else { throw databaseFailure() }
+            }
             let stmt = try prepare("DELETE FROM name_rectification_groups WHERE root_id=? AND relative_path=?;")
             defer { sqlite3_finalize(stmt) }
             try bind(rootID,at:1,in:stmt); try bind(path,at:2,in:stmt)
             guard sqlite3_step(stmt)==SQLITE_DONE else { throw databaseFailure() }
             try execute("COMMIT;")
         } catch { try? execute("ROLLBACK;"); throw error }
+    }
+
+    /// Capture a *stored* binding and queue watermark without touching SMB.
+    func nameRectificationContext(rootID:String)throws->NameRectificationContext {
+        let stmt=try prepare("SELECT stamp FROM directory_bindings WHERE root_id=? AND role='target';")
+        defer { sqlite3_finalize(stmt) }
+        try bind(rootID,at:1,in:stmt)
+        let rc=sqlite3_step(stmt)
+        let target:DirectoryBinding?
+        if rc==SQLITE_ROW {
+            target=try JSONDecoder().decode(DirectoryBinding.self,from:Data(columnText(stmt,at:0).utf8))
+        } else if rc==SQLITE_DONE { target=nil }
+        else { throw databaseFailure() }
+        return NameRectificationContext(plannedAt:Date(),queueSequence:try queueSequence(),targetBinding:target)
+    }
+
+    /// Bounded history reader; callers must independently revalidate identity,
+    /// mapping, current job and destination before relying on a receipt.
+    func nameRectificationReceipts(rootID:String,limit:Int=1000,beforeID:Int64=Int64.max)throws->[(id:Int64,receipt:NameRectificationReceipt)] {
+        let stmt=try prepare("SELECT id,old_path,new_path,receipt FROM name_rectification_receipts WHERE root_id=? AND id<? ORDER BY id DESC LIMIT ?;")
+        defer { sqlite3_finalize(stmt) }
+        try bind(rootID,at:1,in:stmt)
+        guard sqlite3_bind_int64(stmt,2,beforeID)==SQLITE_OK,
+              sqlite3_bind_int(stmt,3,Int32(max(1,min(1000,limit))))==SQLITE_OK else { throw databaseFailure() }
+        var rows:[(Int64,NameRectificationReceipt)]=[]
+        while true {
+            let rc=sqlite3_step(stmt)
+            if rc==SQLITE_DONE { return rows }
+            guard rc==SQLITE_ROW else { throw databaseFailure() }
+            let receipt=try JSONDecoder().decode(NameRectificationReceipt.self,from:Data(columnText(stmt,at:3).utf8))
+            guard receipt.rootID==rootID,receipt.oldPath.utf8.elementsEqual(columnText(stmt,at:1).utf8),
+                  receipt.newPath.utf8.elementsEqual(columnText(stmt,at:2).utf8) else {
+                throw JournalError.database("Ricevuta rettifica non valida")
+            }
+            rows.append((sqlite3_column_int64(stmt,0),receipt))
+        }
     }
 
     func nameRectificationCompleted() throws -> Set<String> {

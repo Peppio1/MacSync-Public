@@ -100,6 +100,8 @@ public enum NameRectification {
         var moves: [Move]
         var stage: CoordinatedStage = .prepared
         var failure: String? = nil
+        // Old persisted plans decode without provenance; never fabricate it.
+        var context:NameRectificationContext? = nil
         var source: Move? { moves.first { $0.item.side == .source } }
         var destination: Move? { moves.first { $0.item.side == .destination } }
     }
@@ -384,7 +386,8 @@ public enum NameRectification {
             let anchored=try AnchoredDirectory(url.deletingLastPathComponent(),expectedVolume:binding.volume)
             let snapshot=try anchored.leaf(first.name)
             try anchored.checkRectification(old:first.name,new:newName,matching:snapshot)
-            return CoordinatedGroup(moves:[Move(item:first,binding:binding,snapshot:snapshot,newName:newName,unilateral:true)])
+            let context=try journal.nameRectificationContext(rootID:first.rootID)
+            return CoordinatedGroup(moves:[Move(item:first,binding:binding,snapshot:snapshot,newName:newName,unilateral:true)],context:context)
         }
 
         func persist(_ group:CoordinatedGroup) throws {
@@ -450,10 +453,18 @@ public enum NameRectification {
         }
         func finish(_ group:CoordinatedGroup,successful:Bool,restoredSource:Move? = nil) throws {
             let row=group.moves[0].item
+            let receipt:NameRectificationReceipt?
+            if successful,let source=group.source,let context=group.context {
+                let newPath=source.parentPath.isEmpty ? source.newName : source.parentPath+"/"+source.newName
+                receipt=NameRectificationReceipt(rootID:row.rootID,oldPath:row.relativePath,newPath:newPath,
+                    isDirectory:row.isDirectory,sourceRoot:row.rootPath,sourceBinding:source.binding,
+                    inode:source.inode,birthSeconds:source.birthSeconds,birthNanos:source.birthNanos,
+                    context:context,completedAt:Date())
+            } else { receipt=nil }
             try journal.finishCoordinatedNameGroup(rootID:row.rootID,path:row.relativePath,
                 completed:successful ? group.moves.map { ($0.item,$0.newName) } : [],
                 restoredSource:restoredSource.map { ($0.item,$0.newName,$0.binding.volume) },
-                recordReconciliationScope:false)
+                recordReconciliationScope:false,receipt:receipt)
             if successful {
                 for move in group.moves {
                     result.renamed+=1
