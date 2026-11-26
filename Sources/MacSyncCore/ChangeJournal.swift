@@ -97,13 +97,7 @@ public final class ChangeJournal {
             try execute("CREATE TABLE IF NOT EXISTS name_rectification_groups(root_id TEXT NOT NULL, relative_path TEXT NOT NULL, plan TEXT NOT NULL, PRIMARY KEY(root_id,relative_path));")
             // Additive history: old releases ignore it, pending plans keep
             // their schema. No receipt is an authorization for remote mutation.
-            try execute("""
-                CREATE TABLE IF NOT EXISTS name_rectification_receipts(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,root_id TEXT NOT NULL,
-                    old_path TEXT NOT NULL,new_path TEXT NOT NULL,receipt TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_rectification_receipts_root ON name_rectification_receipts(root_id,id DESC);
-                """)
+            try execute(NameRectificationReceipt.schemaSQL)
             // Existing profiles retain their approved plan, next_move and
             // exact fingerprints. Adding a column never rewrites the plan.
             try SQLiteConnectionSetup.addColumnIfMissing(connection,table:"name_rectification_batch",column:"progress",
@@ -714,6 +708,17 @@ public final class ChangeJournal {
             }
             rows.append((sqlite3_column_int64(stmt,0),receipt))
         }
+    }
+
+    /// Diagnostic association only, never authority for remote absence.
+    func rectificationMonitorLink(jobID:Int64)throws->Int64? {
+        let stmt=try prepare("SELECT receipt_id FROM name_rectification_monitor_links WHERE job_id=?;")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_bind_int64(stmt,1,jobID)==SQLITE_OK else { throw databaseFailure() }
+        let rc=sqlite3_step(stmt)
+        if rc==SQLITE_DONE { return nil }
+        guard rc==SQLITE_ROW else { throw databaseFailure() }
+        return sqlite3_column_int64(stmt,0)
     }
 
     func nameRectificationCompleted() throws -> Set<String> {

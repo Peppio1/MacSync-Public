@@ -334,6 +334,7 @@ public final class LocalInventory {
             try SQLiteConnectionSetup.addColumnIfMissing(db,table:"change_queue",column:"origin",
                 sql:"ALTER TABLE change_queue ADD COLUMN origin TEXT NOT NULL DEFAULT 'legacy_unknown';")
             try execute("CREATE TABLE IF NOT EXISTS directory_bindings(root_id TEXT NOT NULL, role TEXT NOT NULL, stamp TEXT NOT NULL, PRIMARY KEY(root_id,role));")
+            try execute(NameRectificationReceipt.schemaSQL)
             // Compatible migration: old rows learn the new stamp on their next scan.
             try SQLiteConnectionSetup.addColumnIfMissing(db,table:"file_inventory",column:"change_stamp",
                 sql:"ALTER TABLE file_inventory ADD COLUMN change_stamp TEXT;")
@@ -535,6 +536,7 @@ public final class LocalInventory {
         let target = (subtree ?? root).standardizedFileURL.resolvingSymlinksInPath()
         let binding = try DirectoryBinding.encoded(root)
         let ignoreDSStore = FileExclusionPolicy.ignoreDSStore
+        let scanStarted=Date()
         let rows = try LocalScanner.scan(root: root, subtree: subtree, ignoreDSStore:ignoreDSStore, shouldContinue: shouldContinue, onItem: onItem)
         guard shouldContinue() else { throw SeedVerificationError.cancelled }
         let fullScan = target.path == root.path
@@ -596,12 +598,89 @@ public final class LocalInventory {
                 }
             }
 
-            for (path, _) in affected where seen[path] == nil {
+            // Cache only within this scan. The candidate is a historical
+            // association, never proof that a destination object is absent.
+            var receiptCandidates:[Data:(id:Int64,receipt:NameRectificationReceipt)]=[:]
+            var checkedReceiptPaths=Set<Data>()
+            let receiptLookup=try prepare("""
+                SELECT id,receipt FROM name_rectification_receipts
+                WHERE root_id=? AND old_path=? ORDER BY id DESC LIMIT 1;
+                """)
+            defer { sqlite3_finalize(receiptLookup) }
+            let linkInsert=try prepare("INSERT OR REPLACE INTO name_rectification_monitor_links(job_id,receipt_id) VALUES(?,?);")
+            defer { sqlite3_finalize(linkInsert) }
+            let scanQuery=try prepare("SELECT last_scan_at FROM watched_roots WHERE root_id=?;")
+            try bind(rootID,at:1,statement:scanQuery)
+            let scanRC=sqlite3_step(scanQuery)
+            let previousScan=scanRC==SQLITE_ROW ? Date(timeIntervalSince1970:sqlite3_column_double(scanQuery,0)) : nil
+            sqlite3_finalize(scanQuery)
+            guard scanRC==SQLITE_ROW || scanRC==SQLITE_DONE else { throw failure() }
+            let sourceBinding=try JSONDecoder().decode(DirectoryBinding.self,from:Data(binding.utf8))
+            func candidate(_ oldPrefix:String)throws->(id:Int64,receipt:NameRectificationReceipt)? {
+                let key=Data(oldPrefix.utf8)
+                if checkedReceiptPaths.contains(key) { return receiptCandidates[key] }
+                checkedReceiptPaths.insert(key)
+                sqlite3_reset(receiptLookup);sqlite3_clear_bindings(receiptLookup)
+                try bind(rootID,at:1,statement:receiptLookup)
+                try bind(oldPrefix,at:2,statement:receiptLookup)
+                let rc=sqlite3_step(receiptLookup)
+                if rc==SQLITE_DONE { return nil }
+                guard rc==SQLITE_ROW else { throw failure() }
+                guard let receipt=try? JSONDecoder().decode(NameRectificationReceipt.self,from:Data(column(receiptLookup,1).utf8)),
+                      receipt.rootID==rootID,receipt.sourceRoot==root.path,receipt.sourceBinding==sourceBinding,
+                      receipt.oldPath.utf8.elementsEqual(oldPrefix.utf8),
+                      let previousScan,previousScan<=receipt.completedAt,receipt.completedAt<=scanStarted,
+                      receipt.inode != 0,
+                      let newItem=seen[receipt.newPath],newItem.relativePath.utf8.elementsEqual(receipt.newPath.utf8),
+                      newItem.kind==(receipt.isDirectory ? "directory" : "file"),
+                      newItem.verificationFingerprint?.inode==receipt.inode else { return nil }
+                // Validate the corrected local object's birth/identity, not
+                // merely matching names or sizes. No SMB access.
+                let url=root.appendingPathComponent(receipt.newPath)
+                var st=stat()
+                guard url.resolvingSymlinksInPath().path==url.path,
+                      url.path.withCString({lstat($0,&st)})==0,
+                      (st.st_mode & mode_t(S_IFMT)) == (receipt.isDirectory ? mode_t(S_IFDIR) : mode_t(S_IFREG)),
+                      UInt64(st.st_ino)==receipt.inode,
+                      Int64(st.st_birthtimespec.tv_sec)==receipt.birthSeconds,
+                      Int64(st.st_birthtimespec.tv_nsec)==receipt.birthNanos else { return nil }
+                let result=(id:sqlite3_column_int64(receiptLookup,0),receipt:receipt)
+                receiptCandidates[key]=result
+                return result
+            }
+            for (path, oldItem) in affected where seen[path] == nil {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 try remove(rootID: rootID, relativePath: path)
                 if FileExclusionPolicy.excludes(path,enabled:ignoreDSStore) { continue }
-                try enqueue(rootID: rootID, relativePath: path, kind: .delete, origin: .sourceMonitor)
+                let jobID=try enqueue(rootID: rootID, relativePath: path, kind: .delete, origin: .sourceMonitor)
                 deletes += 1
+                // Only automatic rectifications of incompatible components
+                // can have receipts. Retain the FSEvents delete unchanged.
+                if !WindowsPathSafety.validRelativePath(path) {
+                    var prefix=""
+                    for component in path.split(separator:"/") {
+                        prefix=prefix.isEmpty ? String(component) : prefix+"/"+component
+                        guard !WindowsPathSafety.validComponent(String(component)),
+                              let match=try candidate(prefix),
+                              jobID>match.receipt.context.queueSequence else { continue }
+                        let exact=path.utf8.elementsEqual(prefix.utf8)
+                        guard exact || match.receipt.isDirectory else { continue }
+                        let corrected=match.receipt.newPath+String(path.dropFirst(prefix.count))
+                        guard let current=seen[corrected],current.relativePath.utf8.elementsEqual(corrected.utf8),
+                              current.kind==oldItem.kind else { continue }
+                        // Local file inventory already stores inode in its
+                        // change stamp. A reused name must not link a new file.
+                        if oldItem.kind=="file" {
+                            guard let oldInode=oldItem.changeStamp?.split(separator:":").first.flatMap({UInt64($0)}),
+                                  current.verificationFingerprint?.inode==oldInode else { continue }
+                        }
+                        sqlite3_reset(linkInsert);sqlite3_clear_bindings(linkInsert)
+                        guard sqlite3_bind_int64(linkInsert,1,jobID)==SQLITE_OK,
+                              sqlite3_bind_int64(linkInsert,2,match.id)==SQLITE_OK,
+                              sqlite3_step(linkInsert)==SQLITE_DONE else { throw failure() }
+                        break
+                    }
+                }
             }
 
             if ignoreDSStore {
@@ -838,8 +917,9 @@ public final class LocalInventory {
         guard sqlite3_step(statement) == SQLITE_DONE else { throw failure() }
     }
 
+    @discardableResult
     private func enqueue(rootID: String, relativePath: String, kind: ChangeKind,
-                         origin: QueuedChangeOrigin) throws {
+                         origin: QueuedChangeOrigin) throws -> Int64 {
         // Coalesce multiple pending changes for the same path. Do not lose
         // successful operations (completed=1) from the audit table.
         let delete = try prepare("""
@@ -860,6 +940,7 @@ public final class LocalInventory {
         try bind(origin.rawValue, at: 5, statement: insert)
         guard sqlite3_bind_double(insert, 4, Date().timeIntervalSince1970) == SQLITE_OK,
               sqlite3_step(insert) == SQLITE_DONE else { throw failure() }
+        return sqlite3_last_insert_rowid(db)
     }
 
     private func saveRoot(rootID: String, rootPath: String, eventID: UInt64?) throws {
