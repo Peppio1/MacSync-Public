@@ -1,0 +1,98 @@
+name: MacSync v0.19.4 operational audit scalability
+on:
+  push:
+    branches: [benchmark-v0.19.4-scale, benchmark-v0.19.4-scale-local-alt, benchmark-v0.19.4-scale-smb-alt]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macsync-v0194-scale-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  compare:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - location: local
+            runner: macos-15-intel
+          - location: smb
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+      MACSYNC_RUN_AUDIT_SCALE: '1'
+      MACSYNC_SCALE_LOCATION: ${{ matrix.location }}
+      MACSYNC_V0192_REQUIRE_SMB: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: c5ab9e9da6a154a7a216e4c6d55f5388a8bd457d
+          path: stable
+          persist-credentials: false
+      - name: Pin stable and share test harness
+        run: |
+          set -euo pipefail
+          test "$(git -C stable rev-parse HEAD)" = c5ab9e9da6a154a7a216e4c6d55f5388a8bd457d
+          cp candidate/Tests/MacSyncCoreTests/V0194AuditScaleBenchmarkTests.swift stable/Tests/MacSyncCoreTests/
+          mkdir -p "$RUNNER_TEMP/macsync-scale-results"
+      - name: Install disposable loopback Samba
+        if: matrix.location == 'smb'
+        run: brew install samba
+      - name: Mount genuine SMB filesystem
+        if: matrix.location == 'smb'
+        run: bash candidate/scripts/ci/prepare-local-samba.sh
+      - name: Build identical release-mode test harnesses
+        run: |
+          set -euo pipefail
+          for checkout in stable candidate; do
+            (cd "$checkout" && swift build -c release --build-tests -Xswiftc -enable-testing -Xswiftc -warnings-as-errors)
+          done
+      - name: Compare operational QUICK and queue at increasing scale
+        run: |
+          set -euo pipefail
+          for count in 1000 10000 50000 200000; do
+            if [ "$count" = 10000 ] || [ "$count" = 200000 ]; then order="candidate stable"; else order="stable candidate"; fi
+            for checkout in $order; do
+              export MACSYNC_SCALE_FILES="$count"
+              export MACSYNC_SCALE_LABEL="$checkout-$count"
+              export MACSYNC_SCALE_OUTPUT="$RUNNER_TEMP/macsync-scale-results/$checkout-$count.json"
+              (cd "$checkout" && swift test -c release --skip-build -Xswiftc -enable-testing -Xswiftc -warnings-as-errors --filter V0194AuditScaleBenchmarkTests/testOperationalQuickScale)
+              test -s "$MACSYNC_SCALE_OUTPUT"
+            done
+          done
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          folder=Path(os.environ["RUNNER_TEMP"])/"macsync-scale-results"
+          records=[json.loads(p.read_text()) for p in sorted(folder.glob("*.json"))]
+          assert len(records)==8
+          assert all(r["auditBytesRead"]==0 for r in records)
+          summary={"location":os.environ["MACSYNC_SCALE_LOCATION"],"samples":records,"comparisons":[]}
+          for n in (1000,10000,50000,200000):
+              a=next(r for r in records if r["label"]==f"stable-{n}")
+              b=next(r for r in records if r["label"]==f"candidate-{n}")
+              for field in ("matching","missing","different","recognizedFiles","remainingUploads"):
+                  assert a[field]==b[field], (n,field)
+              fields=("auditSeconds","inventorySeconds","queuePageSeconds","destinationScanSeconds","comparisonSeconds")
+              summary["comparisons"].append({"files":n,"stable":{k:a[k] for k in fields},"candidate":{k:b[k] for k in fields}})
+          result=json.dumps(summary,indent=2,sort_keys=True)
+          print(result)
+          (folder/"summary.json").write_text(result)
+          PY
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: macsync-audit-scale-${{ matrix.location }}
+          path: ${{ runner.temp }}/macsync-scale-results/*.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Cleanup disposable share
+        if: always() && matrix.location == 'smb'
+        run: bash candidate/scripts/ci/cleanup-local-samba.sh
