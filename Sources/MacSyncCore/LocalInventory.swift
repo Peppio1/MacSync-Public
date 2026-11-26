@@ -88,9 +88,10 @@ public enum LocalScanner {
                             shouldContinue: () -> Bool = { true },
                             onVisit: (String) -> Void = { _ in },
                             onItem: (TrackedItem) -> Void = { _ in },
-                            onPOSIXMetadataTiming: ((DiagnosticTiming)->Void)? = nil) throws -> [TrackedItem] {
+                            onPOSIXMetadataTiming: (DiagnosticTiming)->Void = { _ in },
+                            measurePOSIXMetadata: Bool = false) throws -> [TrackedItem] {
         var metadataTiming=DiagnosticTiming()
-        defer { onPOSIXMetadataTiming?(metadataTiming) }
+        defer { if measurePOSIXMetadata { onPOSIXMetadataTiming(metadataTiming) } }
         let root = root.standardizedFileURL.resolvingSymlinksInPath()
         let target = (subtree ?? root).standardizedFileURL.resolvingSymlinksInPath()
         guard root.isFileURL, target.isFileURL,
@@ -142,10 +143,10 @@ public enum LocalScanner {
                 // and identity in ONE no-follow syscall instead of retrieving
                 // URL resource metadata and then stat'ing the same file again.
                 var actual = stat()
-                let tick=onPOSIXMetadataTiming != nil ? ProcessInfo.processInfo.systemUptime : 0
+                let tick=measurePOSIXMetadata ? ProcessInfo.processInfo.systemUptime : 0
                 let status=file.path.withCString { lstat($0,&actual) }
                 let code=errno
-                if onPOSIXMetadataTiming != nil { metadataTiming.observe(ProcessInfo.processInfo.systemUptime-tick) }
+                if measurePOSIXMetadata { metadataTiming.observe(ProcessInfo.processInfo.systemUptime-tick) }
                 guard status == 0 else {
                     throw JournalError.database("Source scan path inaccessible (filesystem code \(code))")
                 }

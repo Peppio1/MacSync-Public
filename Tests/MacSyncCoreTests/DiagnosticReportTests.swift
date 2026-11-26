@@ -40,7 +40,7 @@ final class DiagnosticReportTests: XCTestCase {
         }
         var observed=DiagnosticTiming()
         let baseline=try LocalScanner.scan(root:dir,preferPOSIXMetadata:true)
-        let instrumented=try LocalScanner.scan(root:dir,preferPOSIXMetadata:true,onPOSIXMetadataTiming:{observed=$0})
+        let instrumented=try LocalScanner.scan(root:dir,preferPOSIXMetadata:true,onPOSIXMetadataTiming:{observed=$0},measurePOSIXMetadata:true)
         XCTAssertEqual(Set(baseline.map(\.relativePath)),Set(instrumented.map(\.relativePath)))
         XCTAssertEqual(observed.count,2)
         XCTAssertTrue(observed.isValid)
