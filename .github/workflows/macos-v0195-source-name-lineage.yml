@@ -1,0 +1,20 @@
+name: MacSync v0.19.5 local name lineage
+on:
+  push:
+    branches: [probe-v0195-source-name-lineage]
+    paths:
+      - 'Sources/MacSyncCore/SourceNameLineage.swift'
+      - 'Tests/MacSyncCoreTests/SourceNameLineageTests.swift'
+      - '.github/workflows/macos-v0195-source-name-lineage.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - run: swift test -Xswiftc -warnings-as-errors --filter SourceNameLineageTests
