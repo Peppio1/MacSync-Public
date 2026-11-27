@@ -1,0 +1,42 @@
+name: MacSync v0.19.5 compaction compatibility
+on:
+  push:
+    branches: [develop-v0.19.5]
+    paths:
+      - 'Sources/MacSyncCore/*Compaction*.swift'
+      - 'Sources/MacSyncCore/LogicalArchiveDigest.swift'
+      - 'Sources/MacSyncCore/ApplicationRollback.swift'
+      - 'Sources/MacSync/RuntimeStorageGuard.swift'
+      - 'Tests/MacSyncCoreTests/*Compaction*.swift'
+      - 'scripts/ci/compaction/**'
+      - '.github/workflows/macos-v0195-compaction-integration.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: 175c9f150fa6330a847796c551b0ab3babd304da
+          path: predecessor
+          persist-credentials: false
+      - name: Validate operational schema and existing rollback digest
+        working-directory: candidate
+        env:
+          MACSYNC_COMPACTION_COMPAT_DIR: ${{ runner.temp }}/compaction-compat
+        run: swift test -Xswiftc -warnings-as-errors --filter 'CompactionCompatibilityTests|ApplicationRollbackTests'
+      - name: Verify exact v0.19.4 source reads and writes compacted snapshot
+        working-directory: predecessor
+        env:
+          MACSYNC_COMPACTION_COMPAT_DIR: ${{ runner.temp }}/compaction-compat
+        run: |
+          test "$(git rev-parse HEAD)" = "175c9f150fa6330a847796c551b0ab3babd304da"
+          cp ../candidate/scripts/ci/compaction/CompactionPredecessorTests.swift.txt Tests/MacSyncCoreTests/CompactionPredecessorTests.swift
+          swift test -Xswiftc -warnings-as-errors --filter CompactionPredecessorTests

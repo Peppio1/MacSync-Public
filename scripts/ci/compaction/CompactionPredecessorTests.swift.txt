@@ -1,0 +1,22 @@
+import Foundation
+import XCTest
+@testable import MacSyncCore
+
+final class CompactionPredecessorTests: XCTestCase {
+    func testReleasedPredecessorContinuesFromCompactedSnapshot() throws {
+        let path = try XCTUnwrap(ProcessInfo.processInfo.environment["MACSYNC_COMPACTION_COMPAT_DIR"]) + "/compacted.sqlite"
+        let url = URL(fileURLWithPath: path)
+        try SignedRollbackTransaction.validateCompatibility(database: url)
+        let journal = try ChangeJournal(path: path)
+        XCTAssertEqual(try journal.queueSequence(), 2)
+        XCTAssertEqual(try journal.pending().map(\.id), [2])
+        try journal.markCompleted(id: 2)
+        let id = try journal.enqueue(rootID: "demo", relativePath: "after-rollback.jpg", kind: .upsert)
+        XCTAssertEqual(id, 3)
+        XCTAssertEqual(try journal.pending().map(\.id), [3])
+        try journal.markCompleted(id: id)
+        XCTAssertTrue(try journal.pending().isEmpty)
+        try ArchiveDatabaseSafety.verify(url, readOnly: true)
+        print("COMPACTION_PREDECESSOR_READ_WRITE_OK")
+    }
+}
