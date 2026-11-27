@@ -28,10 +28,11 @@ static double tick(void) {
     return t.tv_sec + t.tv_nsec / 1e9;
 }
 static int take(const unsigned char **p, const unsigned char *end, void *out, size_t n) {
-    if (*p > end || (size_t)(end - *p) < n) return 0;
+    size_t aligned = (n + 3u) & ~(size_t)3u;
+    if (*p > end || (size_t)(end - *p) < aligned) return 0;
     memcpy(out, *p, n);
-    *p += (n + 3u) & ~3u;
-    return *p <= end;
+    *p += aligned;
+    return 1;
 }
 static int append(struct rows *a, struct row value, const char *name) {
     if (a->n >= LIMIT || !name[0] || strchr(name, '/') ||
@@ -146,8 +147,134 @@ static int bulk(int root, struct rows *out) {
 static int same_time(struct timespec a, struct timespec b) {
     return a.tv_sec == b.tv_sec && a.tv_nsec == b.tv_nsec;
 }
+// Recursive experiment, still CI-only. Anchor each opened directory, never
+// follow symbolic links, reject partial results. A directory size is acquired
+// from its open handle because ATTR_FILE_DATALENGTH is for regular files.
+static int stable_directory(const struct stat *a, const struct stat *b) {
+    return S_ISDIR(b->st_mode) && a->st_dev == b->st_dev &&
+        a->st_ino == b->st_ino && a->st_size == b->st_size &&
+        same_time(a->st_mtimespec, b->st_mtimespec) &&
+        same_time(a->st_ctimespec, b->st_ctimespec);
+}
+static int same_directory_row(const struct row *r, const struct stat *s) {
+    return S_ISDIR(s->st_mode) && r->device == s->st_dev &&
+        r->inode == s->st_ino && same_time(r->modified, s->st_mtimespec) &&
+        same_time(r->changed, s->st_ctimespec);
+}
+static int append_path(struct rows *a, struct row value, const char *path) {
+    if (a->n >= LIMIT) return 0;
+    for (size_t i = 0; i < a->n; i++)
+        if (!strcmp(a->v[i].name, path)) return 0;
+    value.name = strdup(path);
+    if (!value.name) return 0;
+    a->v[a->n++] = value;
+    return 1;
+}
+static int recursive(int fd, const char *prefix, int depth, int use_bulk,
+                     struct rows *out, int barrier, int *cancelled) {
+    if (depth > 32) return 0;
+    struct stat before, after;
+    if (fstat(fd, &before) || !S_ISDIR(before.st_mode)) return 0;
+    struct rows list = {calloc(LIMIT, sizeof(struct row)), 0};
+    if (!list.v) return 0;
+    int ok = use_bulk ? bulk(fd, &list) : baseline(fd, &list);
+    if (ok && barrier && depth == 0) {
+        printf("RECURSIVE_BARRIER\n");
+        fflush(stdout);
+        int cmd = getchar();
+        if (cmd != 'G') { *cancelled = 1; ok = 0; }
+    }
+    for (size_t i = 0; ok && i < list.n; i++) {
+        struct row r = list.v[i];
+        if (!strcmp(r.name, ".DS_Store") || !strncasecmp(r.name, ".macsync-", 9)) continue;
+        char *path = NULL;
+        if (asprintf(&path, "%s%s%s", prefix, *prefix ? "/" : "", r.name) < 0) {
+            ok = 0; break;
+        }
+        if (r.device != before.st_dev || !r.inode ||
+            (r.type != DIRECTORY && r.type != REGULAR && r.type != SYMLINK)) {
+            free(path); ok = 0; break;
+        }
+        if (r.type == DIRECTORY) {
+            int child = openat(fd, r.name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            struct stat opened, live;
+            if (child < 0 || fstat(child, &opened) || !same_directory_row(&r, &opened)) {
+                if (child >= 0) close(child);
+                free(path); ok = 0; break;
+            }
+            r.size = opened.st_size;
+            ok = append_path(out, r, path) &&
+                recursive(child, path, depth + 1, use_bulk, out, 0, cancelled) &&
+                !fstatat(fd, r.name, &live, AT_SYMLINK_NOFOLLOW) &&
+                stable_directory(&opened, &live);
+            close(child);
+        } else {
+            ok = append_path(out, r, path);
+        }
+        free(path);
+    }
+    if (ok && (fstat(fd, &after) || !stable_directory(&before, &after))) ok = 0;
+    dispose(&list);
+    return ok;
+}
+static int tree_scan(const char *path, int use_bulk, struct rows *out,
+                     int barrier, int *cancelled) {
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return 0;
+    struct stat original, current;
+    int ok = !fstat(fd, &original) &&
+        recursive(fd, "", 0, use_bulk, out, barrier, cancelled) &&
+        !lstat(path, &current) && stable_directory(&original, &current);
+    close(fd);
+    if (!ok) {
+        // No partial inventory may escape a failed/cancelled scan.
+        for (size_t i = 0; i < out->n; i++) free(out->v[i].name);
+        out->n = 0;
+    }
+    return ok;
+}
+static int tree_main(char **argv) {
+    struct rows a = {calloc(LIMIT, sizeof(struct row)), 0};
+    struct rows b = {calloc(LIMIT, sizeof(struct row)), 0};
+    if (!a.v || !b.v) return 1;
+    int cancelled = 0, a_ok = 0, b_ok = 0;
+    double start, a_seconds = 0, b_seconds;
+    int barrier = !strcmp(argv[3], "barrier");
+    if (barrier) {
+        b_ok = tree_scan(argv[1], 1, &b, 1, &cancelled);
+        printf("TREE_BARRIER_RESULT label=%s accepted=%d rows=%zu cancelled=%d\n",
+            argv[2], b_ok, b.n, cancelled);
+        dispose(&a); dispose(&b);
+        return b_ok ? 0 : 2;
+    }
+    if (!strcmp(argv[3], "tree-reverse")) {
+        start = tick(); b_ok = tree_scan(argv[1], 1, &b, 0, &cancelled); b_seconds = tick() - start;
+        start = tick(); a_ok = tree_scan(argv[1], 0, &a, 0, &cancelled); a_seconds = tick() - start;
+    } else {
+        start = tick(); a_ok = tree_scan(argv[1], 0, &a, 0, &cancelled); a_seconds = tick() - start;
+        start = tick(); b_ok = tree_scan(argv[1], 1, &b, 0, &cancelled); b_seconds = tick() - start;
+    }
+    size_t mismatches = 0, directories = 0;
+    for (size_t i = 0; i < a.n; i++) {
+        struct row *x = &a.v[i], *y = NULL;
+        for (size_t j = 0; j < b.n; j++)
+            if (!strcmp(x->name, b.v[j].name)) { y = &b.v[j]; break; }
+        if (x->type == DIRECTORY) directories++;
+        if (!y || x->type != y->type || x->device != y->device || x->inode != y->inode ||
+            (x->type != SYMLINK && x->size != y->size) ||
+            !same_time(x->modified, y->modified) || !same_time(x->changed, y->changed))
+            mismatches++;
+    }
+    int equal = a_ok && b_ok && a.n == b.n && !mismatches;
+    printf("TREE_RESULT label=%s order=%s baseline_ok=%d bulk_ok=%d baseline=%zu bulk=%zu directories=%zu mismatches=%zu baseline_seconds=%.9f bulk_seconds=%.9f equivalent=%d\n",
+           argv[2], argv[3], a_ok, b_ok, a.n, b.n, directories, mismatches, a_seconds, b_seconds, equal);
+    dispose(&a); dispose(&b);
+    return equal ? 0 : 2;
+}
+
 int main(int argc, char **argv) {
     if (argc != 4) return 1;
+    if (!strncmp(argv[3], "tree-", 5) || !strcmp(argv[3], "barrier")) return tree_main(argv);
     int fd = open(argv[1], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return 1;
     struct rows a = {calloc(LIMIT, sizeof(struct row)), 0};
