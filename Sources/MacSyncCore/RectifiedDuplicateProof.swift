@@ -22,7 +22,8 @@ struct RectifiedDuplicateProof {
             guard changed==nil, !part.isEmpty,
                   !part.unicodeScalars.contains(where:{$0.value<32 || "<>\"/\\|?*".unicodeScalars.contains($0)}),
                   let new=NameRectification.proposedName(part),
-                  part.contains(":") || (part.hasSuffix(" ") && WindowsPathSafety.comparisonFold(part)==WindowsPathSafety.comparisonFold(new))
+                  part.contains(":") || part.trimmingCharacters(in:CharacterSet(charactersIn:" ")).hasSuffix(".") ||
+                  (part.hasSuffix(" ") && WindowsPathSafety.comparisonFold(part)==WindowsPathSafety.comparisonFold(new))
             else { return nil }
             corrected[i]=new;changed=i
         }

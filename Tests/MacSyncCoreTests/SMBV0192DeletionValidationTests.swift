@@ -3,6 +3,61 @@ import XCTest
 @testable import MacSyncCore
 
 final class SMBV0192DeletionValidationTests:XCTestCase {
+    func testV0195TrailingDotDuplicatesRequireExactIdentityAndEqualContent() throws {
+        let env=ProcessInfo.processInfo.environment
+        guard env["MACSYNC_V0192_REQUIRE_SMB"]=="1" else { throw XCTSkip("Disposable SMB fixture opt-in") }
+        guard env["MACSYNC_TEST_SMB_HOST"]=="127.0.0.1",env["MACSYNC_TEST_SMB_SHARE"]=="MacSyncCI" else {
+            XCTFail("Unexpected SMB fixture");return
+        }
+        let mount=URL(fileURLWithPath:try XCTUnwrap(env["MACSYNC_TEST_SMB_MOUNT"]))
+        let binding=try DirectoryBinding.read(mount)
+        guard binding.volume.fileSystem.lowercased()=="smbfs",binding.volume.isStrongIdentity else {
+            XCTFail("Genuine SMB mount required");return
+        }
+        let fixture=URL(fileURLWithPath:try XCTUnwrap(env["MACSYNC_TEST_SMB_ROOT"]))
+        let rawPath=try String(contentsOf:fixture.appendingPathComponent("share-path"),encoding:.utf8).trimmingCharacters(in:.whitespacesAndNewlines)
+        guard rawPath.hasPrefix("/private/tmp/macsync-ci-share.") else { XCTFail("Unexpected disposable root");return }
+        let raw=URL(fileURLWithPath:rawPath).appendingPathComponent("macsync-ci-dot-duplicates")
+        let target=mount.appendingPathComponent("macsync-ci-dot-duplicates")
+        let fm=FileManager.default
+        let base=fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let source=base.appendingPathComponent("source")
+        try fm.createDirectory(at:source,withIntermediateDirectories:true)
+        defer { try? fm.removeItem(at:base) }
+        for (name,content) in [("Equal-","same bytes"),("Different-","new bytes!"),("Hidden-","new hidden")] {
+            let folder=source.appendingPathComponent(name)
+            try fm.createDirectory(at:folder,withIntermediateDirectories:true)
+            try Data(content.utf8).write(to:folder.appendingPathComponent("child.jpg"))
+        }
+        let names=try fm.contentsOfDirectory(atPath:target.path)
+        XCTAssertTrue(names.contains("Equal."),"SFM fixture must be exactly visible")
+        XCTAssertTrue(names.contains("Different."),"SFM fixture must be exactly visible")
+        let db=base.appendingPathComponent("queue.sqlite").path
+        _=try LocalInventory(path:db).reconcile(rootID:"photos",root:source,origin:.initialInventory)
+        let journal=try ChangeJournal(path:db)
+        let map=try MountedFolderMapping(rootID:"photos",source:source,target:target)
+        try journal.verifyDirectoryBindings([map],allowNewTarget:true)
+        for name in ["Equal.","Different.","Hidden."] {
+            for path in [name,name+"/child.jpg"] {
+                _=try journal.enqueue(rootID:"photos",relativePath:path,kind:.delete,origin:.sourceMonitor)
+            }
+        }
+        let consent=try MirrorAuthorization.capture(journal:journal,mappings:[map],includePendingDeletes:true)
+        let worker=try MirrorDeletionWorker(journal:journal,manifest:RecoveryManifest(path:db),
+            log:SyncActivityLog(path:db),mappings:[map],
+            policy:MirrorDeletionPolicy(enabled:true,recoveryEnabled:false,retentionDays:nil),authorization:consent)
+        let result=try worker.runCycle(pageSize:1)
+        XCTAssertEqual(result.removed,1)
+        XCTAssertEqual(result.directories,1)
+        XCTAssertFalse(fm.fileExists(atPath:raw.appendingPathComponent("Equal\u{F029}").path))
+        XCTAssertEqual(try Data(contentsOf:raw.appendingPathComponent("Equal-/child.jpg")),Data("same bytes".utf8))
+        XCTAssertEqual(try Data(contentsOf:raw.appendingPathComponent("Different\u{F029}/child.jpg")),Data("old bytes!".utf8))
+        XCTAssertEqual(try Data(contentsOf:raw.appendingPathComponent("Different-/child.jpg")),Data("new bytes!".utf8))
+        XCTAssertEqual(try Data(contentsOf:raw.appendingPathComponent("Hidden./child.jpg")),Data("old hidden".utf8))
+        XCTAssertEqual(try Data(contentsOf:raw.appendingPathComponent("Hidden-/child.jpg")),Data("new hidden".utf8))
+        XCTAssertEqual(Set(try journal.pending().map(\.relativePath)),Set(["Different.","Different./child.jpg","Hidden.","Hidden./child.jpg"]))
+    }
+
     func testV0193VerifiedColonDuplicateRemovalOnMountedSMB() throws {
         let env=ProcessInfo.processInfo.environment
         guard env["MACSYNC_V0192_REQUIRE_SMB"]=="1" else { throw XCTSkip("Disposable SMB fixture opt-in") }

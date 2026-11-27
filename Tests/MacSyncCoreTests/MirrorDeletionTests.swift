@@ -661,7 +661,7 @@ final class MirrorDeletionTests: XCTestCase {
         let f=try fixture()
         defer { try? FileManager.default.removeItem(at:f.base) }
         let fm=FileManager.default
-        for (old,new,oldContent) in [("same:old","same-old","same"),("space ","space","same"),("different:old","different-old","other")] {
+        for (old,new,oldContent) in [("same:old","same-old","same"),("space ","space","same"),("dot.","dot-","same"),("different:old","different-old","other"),("different.","different-","other")] {
             try Data("same".utf8).write(to:f.source.appendingPathComponent(new))
             try Data("same".utf8).write(to:f.destination.appendingPathComponent(new))
             try Data(oldContent.utf8).write(to:f.destination.appendingPathComponent(old))
@@ -669,19 +669,21 @@ final class MirrorDeletionTests: XCTestCase {
         _ = try LocalInventory(path:f.database).reconcile(rootID:"photos",root:f.source)
         for job in try f.journal.pendingUploads() { try f.journal.markCompleted(id:job.id) }
         try f.journal.verifyDirectoryBindings([f.mapping],allowNewTarget:true)
-        for old in ["same:old","space ","different:old"] {
+        for old in ["same:old","space ","dot.","different:old","different."] {
             _ = try f.journal.enqueue(rootID:"photos",relativePath:old,kind:.delete,origin:.sourceMonitor)
         }
         let consent=try MirrorAuthorization.capture(journal:f.journal,mappings:[f.mapping],includePendingDeletes:true)
         let result=try persistentWorker(f,authorization:consent).runCycle()
-        XCTAssertEqual(result.removed,2)
+        XCTAssertEqual(result.removed,3)
+        XCTAssertFalse(fm.fileExists(atPath:f.destination.appendingPathComponent("dot.").path))
+        XCTAssertEqual(try Data(contentsOf:f.destination.appendingPathComponent("different.")),Data("other".utf8))
         XCTAssertFalse(fm.fileExists(atPath:f.destination.appendingPathComponent("same:old").path))
         XCTAssertFalse(fm.fileExists(atPath:f.destination.appendingPathComponent("space ").path))
         XCTAssertEqual(try Data(contentsOf:f.destination.appendingPathComponent("different:old")),Data("other".utf8))
-        for name in ["same-old","space","different-old"] {
+        for name in ["same-old","space","dot-","different-old","different-"] {
             XCTAssertEqual(try Data(contentsOf:f.destination.appendingPathComponent(name)),Data("same".utf8))
         }
-        XCTAssertEqual(try f.journal.pending().filter{$0.kind == .delete}.map(\.relativePath),["different:old"])
+        XCTAssertEqual(Set(try f.journal.pending().filter{$0.kind == .delete}.map(\.relativePath)),Set(["different:old","different."]))
     }
 
     func testV0192LiteralExtrasDeleteOnlyExactVisiblePaths() throws {

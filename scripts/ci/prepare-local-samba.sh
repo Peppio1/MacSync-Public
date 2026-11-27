@@ -47,6 +47,20 @@ duplicate_colon="$(printf 'Same\357\200\242old')"
 mkdir -m 770 "$share/macsync-ci-duplicate/$duplicate_colon" "$share/macsync-ci-duplicate/Same-old"
 printf '%s' 'verified same bytes' > "$share/macsync-ci-duplicate/$duplicate_colon/child.jpg"
 printf '%s' 'verified same bytes' > "$share/macsync-ci-duplicate/Same-old/child.jpg"
+# Trailing-dot duplicate proof: exact SFM names, distinct objects, equal
+# and unequal bytes. Also retain a raw trailing-dot name for ambiguity tests.
+mkdir -m 770 "$share/macsync-ci-dot-duplicates"
+dot_equal="$(printf 'Equal\357\200\251')"
+dot_different="$(printf 'Different\357\200\251')"
+for name in "$dot_equal" Equal- "$dot_different" Different- Hidden. Hidden-; do
+  mkdir -m 770 "$share/macsync-ci-dot-duplicates/$name"
+done
+printf '%s' 'same bytes' > "$share/macsync-ci-dot-duplicates/$dot_equal/child.jpg"
+printf '%s' 'same bytes' > "$share/macsync-ci-dot-duplicates/Equal-/child.jpg"
+printf '%s' 'old bytes!' > "$share/macsync-ci-dot-duplicates/$dot_different/child.jpg"
+printf '%s' 'new bytes!' > "$share/macsync-ci-dot-duplicates/Different-/child.jpg"
+printf '%s' 'old hidden' > "$share/macsync-ci-dot-duplicates/Hidden./child.jpg"
+printf '%s' 'new hidden' > "$share/macsync-ci-dot-duplicates/Hidden-/child.jpg"
 prefix="$(brew --prefix)"
 smbd="$prefix/sbin/samba-dot-org-smbd"
 test -x "$smbd"
