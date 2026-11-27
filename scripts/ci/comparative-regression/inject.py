@@ -7,6 +7,7 @@ assets = pathlib.Path(__file__).resolve().parent
 mapping = {
     "local": ("MirrorDeletionTests.swift", "final class MirrorDeletionTests: XCTestCase {", "local.swift.txt"),
     "smb": ("SMBV0192DeletionValidationTests.swift", "final class SMBV0192DeletionValidationTests:XCTestCase {", "smb.swift.txt"),
+    "lifecycle": ("SMBV0192DeletionValidationTests.swift", "final class SMBV0192DeletionValidationTests:XCTestCase {", "lifecycle.swift.txt"),
 }
 file, anchor, fixture = mapping[suite]
 target = root / "Tests/MacSyncCoreTests" / file

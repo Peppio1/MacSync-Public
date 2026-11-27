@@ -1,0 +1,84 @@
+    func testComparativeSMBRectificationLifecycle() throws {
+        let env=ProcessInfo.processInfo.environment
+        guard env["MACSYNC_V0192_REQUIRE_SMB"]=="1" else { throw XCTSkip("Disposable SMB fixture opt-in") }
+        guard env["MACSYNC_TEST_SMB_HOST"]=="127.0.0.1",env["MACSYNC_TEST_SMB_SHARE"]=="MacSyncCI" else {
+            XCTFail("Unexpected SMB fixture");return
+        }
+        let mount=URL(fileURLWithPath:try XCTUnwrap(env["MACSYNC_TEST_SMB_MOUNT"]))
+        let binding=try DirectoryBinding.read(mount)
+        guard binding.volume.fileSystem.lowercased()=="smbfs",binding.volume.isStrongIdentity else {
+            XCTFail("Genuine SMB mount required");return
+        }
+        let fixture=URL(fileURLWithPath:try XCTUnwrap(env["MACSYNC_TEST_SMB_ROOT"]))
+        let rawPath=try String(contentsOf:fixture.appendingPathComponent("share-path"),encoding:.utf8).trimmingCharacters(in:.whitespacesAndNewlines)
+        guard rawPath.hasPrefix("/private/tmp/macsync-ci-share.") else { XCTFail("Unexpected disposable root");return }
+        let raw=URL(fileURLWithPath:rawPath).appendingPathComponent("macsync-ci-lifecycle")
+        let target=mount.appendingPathComponent("macsync-ci-lifecycle")
+        let fm=FileManager.default
+        let base=fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let source=base.appendingPathComponent("source")
+        try fm.createDirectory(at:source,withIntermediateDirectories:true)
+        defer { try? fm.removeItem(at:base) }
+        for (name,content) in [("Equal.","same bytes"),("Different.","new bytes!")] {
+            let folder=source.appendingPathComponent(name)
+            try fm.createDirectory(at:folder,withIntermediateDirectories:true)
+            try Data(content.utf8).write(to:folder.appendingPathComponent("child.jpg"))
+        }
+        let db=base.appendingPathComponent("queue.sqlite").path
+        let inventory=try LocalInventory(path:db)
+        _=try inventory.reconcile(rootID:"photos",root:source)
+        let journal=try ChangeJournal(path:db)
+        let log=try SyncActivityLog(path:db)
+        let map=try MountedFolderMapping(rootID:"photos",source:source,target:target)
+        try journal.verifyDirectoryBindings([map],allowNewTarget:true)
+        // Establish an intentionally preseeded, byte-identical initial
+        // baseline. Only the initial publication is modeled.
+        for (name,content) in [("Equal\u{F029}","same bytes"),("Different\u{F029}","new bytes!")] {
+            XCTAssertEqual(try Data(contentsOf:raw.appendingPathComponent(name+"/child.jpg")),Data(content.utf8))
+        }
+        while true {
+            let jobs=try journal.pendingUploads(limit:100)
+            if jobs.isEmpty { break }
+            for job in jobs { try journal.markCompleted(id:job.id) }
+        }
+        // Simulate an independent server edit after baseline, same size.
+        try Data("old bytes!".utf8).write(to:raw.appendingPathComponent("Different\u{F029}/child.jpg"))
+        let oldNames=try fm.contentsOfDirectory(atPath:target.path)
+        XCTAssertTrue(oldNames.contains("Equal."))
+        XCTAssertTrue(oldNames.contains("Different."))
+        let rows=try inventory.incompatibleNames(rootID:"photos",sourcePath:source.path)
+        XCTAssertEqual(Set(rows.filter{$0.objectKind=="directory"}.map(\.relativePath)),Set(["Equal.","Different."]))
+        let rectified=try NameRectification.executeLocal(items:rows,roots:["photos":source.path],journal:journal,log:log)
+        XCTAssertEqual(rectified.sourceRenamed,2)
+        XCTAssertEqual(rectified.failed,0)
+        XCTAssertFalse(fm.fileExists(atPath:source.appendingPathComponent("Equal.").path))
+        XCTAssertFalse(fm.fileExists(atPath:raw.appendingPathComponent("Equal-").path))
+        XCTAssertEqual(try Data(contentsOf:raw.appendingPathComponent("Different\u{F029}/child.jpg")),Data("old bytes!".utf8))
+        // Reconcile inventory using a monitor event ID, not an archive audit.
+        _=try inventory.reconcile(rootID:"photos",root:source,eventID:42)
+        let pendingBefore=try journal.pending()
+        XCTAssertTrue(pendingBefore.contains{$0.kind == .upsert && $0.relativePath=="Equal-/child.jpg"})
+        XCTAssertTrue(pendingBefore.contains{$0.kind == .delete && $0.relativePath=="Equal./child.jpg"})
+        let helper=URL(fileURLWithPath:try XCTUnwrap(env["MACSYNC_COMPARE_RCLONE"]))
+        let copier=try MountedFolderCopyWorker(journal:journal,log:log,mappings:[map],minimumStableAge:0,stageEngine:.rcloneDirect(helper))
+        let copies=try copier.runCycle(enabled:true,pageSize:1)
+        XCTAssertEqual(copies.failed,0)
+        XCTAssertTrue(try journal.pendingUploads(limit:1).isEmpty)
+        XCTAssertEqual(try Data(contentsOf:raw.appendingPathComponent("Equal-/child.jpg")),Data("same bytes".utf8))
+        XCTAssertEqual(try Data(contentsOf:raw.appendingPathComponent("Different-/child.jpg")),Data("new bytes!".utf8))
+        let consent=try MirrorAuthorization.capture(journal:journal,mappings:[map],includePendingDeletes:true)
+        let worker=try MirrorDeletionWorker(journal:journal,manifest:RecoveryManifest(path:db),log:log,mappings:[map],policy:MirrorDeletionPolicy(enabled:true,recoveryEnabled:false,retentionDays:nil),authorization:consent)
+        let first=try worker.runCycle(pageSize:1)
+        let second=try worker.runCycle(pageSize:1)
+        let pending=try journal.pending().map(\.relativePath).sorted()
+        let equalExists=fm.fileExists(atPath:raw.appendingPathComponent("Equal\u{F029}").path)
+        let differentIntact=(try? Data(contentsOf:raw.appendingPathComponent("Different\u{F029}/child.jpg")))==Data("old bytes!".utf8)
+        let correctedIntact=(try? Data(contentsOf:raw.appendingPathComponent("Equal-/child.jpg")))==Data("same bytes".utf8) &&
+            (try? Data(contentsOf:raw.appendingPathComponent("Different-/child.jpg")))==Data("new bytes!".utf8)
+        print("MACSYNC_COMPARE_OBSERVED lifecycle copies=\(copies.copied) removed=\(first.removed+second.removed) pending=\(pending) equalExists=\(equalExists) differentIntact=\(differentIntact) correctedIntact=\(correctedIntact)")
+        XCTAssertTrue(correctedIntact,"MACSYNC_COMPARE_EXPECTATION corrected copies intact")
+        XCTAssertFalse(equalExists,"MACSYNC_COMPARE_EXPECTATION equal duplicate removed")
+        XCTAssertTrue(differentIntact,"MACSYNC_COMPARE_EXPECTATION preserve differing old content")
+        XCTAssertEqual(Set(pending),Set(["Different.","Different./child.jpg"]),"MACSYNC_COMPARE_EXPECTATION final queue")
+    }
+

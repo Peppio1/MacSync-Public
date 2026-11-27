@@ -4,6 +4,7 @@ set -euo pipefail
 case "$COMPARE_SUITE" in
   local) filter=MirrorDeletionTests.testComparativeLocalResidualDeletes ;;
   smb) filter=SMBV0192DeletionValidationTests.testComparativeSMBDotDuplicates ;;
+  lifecycle) filter=SMBV0192DeletionValidationTests.testComparativeSMBRectificationLifecycle ;;
   *) exit 2 ;;
 esac
 log="$RUNNER_TEMP/comparison-$COMPARE_SUITE-$COMPARE_REVISION.log"
