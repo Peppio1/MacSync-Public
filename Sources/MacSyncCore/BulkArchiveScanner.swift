@@ -50,6 +50,8 @@ enum BulkArchiveScanner {
         func visit(_ fd: Int32, prefix: String, depth: Int, before: stat) throws {
             try check()
             guard depth <= maximumDepth, directory(before) else { throw Failure.limit }
+            onVisit(prefix.isEmpty ? "[radice]" : prefix)
+            try check()
             let listing = try BulkDirectoryMetadata.read(fd: fd, shouldContinue: shouldContinue)
             guard case .complete(let rows) = listing else { throw Capability.unsupported }
             var folded = Set<String>()

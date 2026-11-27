@@ -278,6 +278,9 @@ public struct ArchiveAuditReport: Codable, Equatable, Sendable {
 public final class ArchiveAudit {
     private let journal: ChangeJournal
     private let mappings: [MountedFolderMapping]
+    // Internal test-only opt-in. No application preference or UI enables it.
+    // Operations with reconciliation authority stay POSIX.
+    var experimentalBulkInventory = false
     public init(journal: ChangeJournal, mappings: [MountedFolderMapping]) throws {
         guard !mappings.isEmpty, Set(mappings.map(\.rootID)).count == mappings.count else {
             throw MountedCopyError.invalidMapping
@@ -383,11 +386,18 @@ public final class ArchiveAudit {
             let targetPrior = state.destination.scanSeconds
             scanStart = ProcessInfo.processInfo.systemUptime
             state.phase = "Analisi destinazione"; state.currentPath = mapping.rootID; report(force:true)
-            enum ScanUpdate: Sendable { case visit(String), item(TrackedItem), metadata(DiagnosticTiming) }
+            let useBulk = experimentalBulkInventory && !repair && !collectMetadataMatches &&
+                deletionCandidates.isEmpty && !queueMirrorExtras && mode != .deep
+            enum ScanUpdate: Sendable {
+                case visit(String), item(TrackedItem), metadata(DiagnosticTiming), method(String)
+            }
             let target = try InventoryReadLane.archive.read(
                 shouldContinue: { !cancellation.isCancelled }, onUpdate: { (updates: [ScanUpdate]) in
                     for update in updates {
                         switch update {
+                        case .method(let method):
+                            state.phase = "Analisi destinazione · " + method
+                            report(force:true)
                         case .visit(let path):
                             state.currentPath = mapping.rootID + " / " + path
                             diagnosticSnapshot()
@@ -401,9 +411,42 @@ public final class ArchiveAudit {
                         }
                     }
                 }, work: { active, report in
-                    try LocalScanner.scan(root: mapping.target, excludeManaged: true, preferPOSIXMetadata: true,
-                        shouldContinue: active, onVisit: { report(.visit($0)) }, onItem: { report(.item($0)) },
-                        onPOSIXMetadataTiming: { report(.metadata($0)) }, measurePOSIXMetadata: DiagnosticCollectionLevel.current != .standard)
+                    func posix() throws -> [TrackedItem] {
+                        try LocalScanner.scan(root: mapping.target, excludeManaged: true, preferPOSIXMetadata: true,
+                            shouldContinue: active, onVisit: { report(.visit($0)) }, onItem: { report(.item($0)) },
+                            onPOSIXMetadataTiming: { report(.metadata($0)) }, measurePOSIXMetadata: DiagnosticCollectionLevel.current != .standard)
+                    }
+                    guard useBulk else { return try posix() }
+                    return try withoutActuallyEscaping(active) { checkActive in
+                        let selection = try BulkInventoryFallback.scan(
+                            shouldContinue: checkActive,
+                            verifyBinding: {
+                                try mapping.verify()
+                                guard try Self.rootStamp(mapping.target) == targetStamp else {
+                                    throw MountedCopyError.volumeChanged
+                                }
+                            }, bulk: {
+                                report(.method("metadati raggruppati · prova"))
+                                do {
+                                    return try BulkArchiveScanner.scan(root: mapping.target, excludeManaged: true,
+                                        shouldContinue: checkActive, onVisit: { report(.visit($0)) })
+                                } catch BulkArchiveScanner.Failure.unsupportedName {
+                                    // Discard the candidate; restart inside the same lane.
+                                    return .unsupported
+                                }
+                            }, posix: {
+                                report(.method("POSIX · fallback"))
+                                return try posix()
+                            })
+                        if selection.method == .bulk {
+                            // Publish item counters only for the accepted complete inventory.
+                            for item in selection.value {
+                                guard checkActive() else { throw SeedVerificationError.cancelled }
+                                report(.item(item))
+                            }
+                        }
+                        return selection.value
+                    }
                 })
             state.destination.scanSeconds = targetPrior + ProcessInfo.processInfo.systemUptime-scanStart
             try mapping.verify()
