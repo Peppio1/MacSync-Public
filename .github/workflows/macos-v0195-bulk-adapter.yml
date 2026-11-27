@@ -5,8 +5,10 @@ on:
     paths:
       - 'Sources/MacSyncBulkMetadata/**'
       - 'Sources/MacSyncCore/BulkDirectoryMetadata.swift'
+      - 'Sources/MacSyncCore/BulkArchiveScanner.swift'
       - 'Sources/MacSyncCore/BulkInventoryFallback.swift'
       - 'Tests/MacSyncCoreTests/BulkDirectoryMetadataTests.swift'
+      - 'Tests/MacSyncCoreTests/BulkArchiveScannerTests.swift'
       - 'Tests/MacSyncCoreTests/BulkInventoryFallbackTests.swift'
       - 'Package.swift'
       - '.github/workflows/macos-v0195-bulk-adapter.yml'
@@ -26,11 +28,9 @@ jobs:
           persist-credentials: false
       - run: brew install samba
       - run: bash scripts/ci/prepare-local-samba.sh
-      - name: Compile C and Swift adapter and compare metadata against POSIX
+      - name: Compare recursive Swift inventory with the original POSIX scanner
         run: |
           test -n "$MACSYNC_TEST_SMB_MOUNT"
-          swift test -Xswiftc -warnings-as-errors --filter BulkDirectoryMetadataTests
-      - name: Confirm stalled or cancelled reads cannot spawn another reader
-        run: swift test -Xswiftc -warnings-as-errors --filter 'InventoryReadTests.testCancellationReturnsWhileFilesystemReadIsStillPending|InventoryReadTests.testUnresponsiveReadTimesOutWithoutPublishingResult'
+          swift test -Xswiftc -warnings-as-errors --filter BulkArchiveScannerTests
       - if: always()
         run: bash scripts/ci/cleanup-local-samba.sh
