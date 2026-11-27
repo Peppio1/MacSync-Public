@@ -139,4 +139,71 @@ final class QueueCompletionLedgerTests:XCTestCase {
         }
     }
 
+    func testRetentionCursorPassesProtectedPrefix()throws {
+        try fixture {path,db in
+            let journal=try ChangeJournal(path:path)
+            for i in 0..<12 {
+                let id=try journal.enqueue(rootID:"demo",relativePath:"unique-\(i).jpg",kind:.upsert)
+                try journal.markCompleted(id:id)
+            }
+            let old=try journal.enqueue(rootID:"demo",relativePath:"repeat.jpg",kind:.upsert)
+            let newer=try journal.enqueue(rootID:"demo",relativePath:"repeat.jpg",kind:.upsert)
+            try journal.markCompleted(id:old)
+            try journal.markCompleted(id:newer)
+            try exec(db,"UPDATE queue_completion_ledger SET completed_at=1;")
+            var cursor:Int64=0
+            var removed=0,examined=0
+            for _ in 0..<10 {
+                let page=try journal.pruneCompletedQueuePage(afterID:cursor,limit:3)
+                XCTAssertFalse(page.held)
+                XCTAssertLessThanOrEqual(page.examined,3)
+                removed+=page.removed;examined+=page.examined
+                cursor=page.nextAfterID
+                if page.finished {break}
+            }
+            XCTAssertEqual(examined,14)
+            XCTAssertEqual(removed,1)
+            XCTAssertNil(try time(db,old))
+            XCTAssertNotNil(try time(db,newer))
+        }
+    }
+
+    func testReceiptRetentionPreservesLatestLinkedAndUnscanned()throws {
+        try fixture {path,db in
+            let source=URL(fileURLWithPath:path).deletingLastPathComponent().appendingPathComponent("source")
+            try FileManager.default.createDirectory(at:source,withIntermediateDirectories:true)
+            let inventory=try LocalInventory(path:path)
+            _=try inventory.reconcile(rootID:"demo",root:source)
+            let journal=try ChangeJournal(path:path)
+            let binding=try DirectoryBinding.read(source)
+            let oldDate=Date().addingTimeInterval(-100*86400)
+            func receipt(_ name:String,_ date:Date)throws->Int64 {
+                let r=NameRectificationReceipt(rootID:"demo",oldPath:name,newPath:name+"-",isDirectory:false,
+                    sourceRoot:source.path,sourceBinding:binding,inode:1,birthSeconds:1,birthNanos:0,
+                    context:NameRectificationContext(plannedAt:date,queueSequence:0,targetBinding:nil),completedAt:date)
+                let encoded=String(decoding:try JSONEncoder().encode(r),as:UTF8.self).replacingOccurrences(of:"'",with:"''")
+                try exec(db,"INSERT INTO name_rectification_receipts(root_id,old_path,new_path,receipt) VALUES('demo','\(name)','\(name)-','\(encoded)');")
+                return sqlite3_last_insert_rowid(db)
+            }
+            let obsolete=try receipt("repeat.",oldDate)
+            let latest=try receipt("repeat.",oldDate)
+            let linked=try receipt("linked.",oldDate)
+            _=try receipt("linked.",oldDate)
+            let recent=try receipt("recent.",Date())
+            _=try receipt("recent.",Date())
+            let job=try journal.enqueue(rootID:"demo",relativePath:"linked.",kind:.delete)
+            try journal.markCompleted(id:job)
+            try exec(db,"INSERT INTO name_rectification_monitor_links(job_id,receipt_id) VALUES(\(job),\(linked));")
+            try exec(db,"UPDATE watched_roots SET last_scan_at=1 WHERE root_id='demo';")
+            XCTAssertEqual(try journal.pruneRectificationReceiptPage().removed,0)
+            try exec(db,"UPDATE watched_roots SET last_scan_at=strftime('%s','now') WHERE root_id='demo';")
+            let page=try journal.pruneRectificationReceiptPage()
+            XCTAssertEqual(page.removed,1)
+            let remaining=try journal.nameRectificationReceipts(rootID:"demo").map(\.id)
+            XCTAssertFalse(remaining.contains(obsolete))
+            for id in [latest,linked,recent] {XCTAssertTrue(remaining.contains(id))}
+            XCTAssertEqual(try journal.rectificationMonitorLink(jobID:job),linked)
+        }
+    }
+
 }

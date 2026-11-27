@@ -9,6 +9,8 @@ enum QueueCompletionLedger {
             job_id INTEGER PRIMARY KEY,
             completed_at REAL NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS idx_rectification_monitor_receipt
+            ON name_rectification_monitor_links(receipt_id);
         CREATE INDEX IF NOT EXISTS idx_queue_completion_time
             ON queue_completion_ledger(completed_at,job_id);
         CREATE TRIGGER IF NOT EXISTS queue_completion_insert
@@ -33,4 +35,15 @@ enum QueueCompletionLedger {
             DELETE FROM queue_completion_ledger WHERE job_id=OLD.id;
         END;
         """
+}
+
+
+/// Cursor belongs to a maintenance sweep. A held or failed page does not
+/// advance it; the next sweep starts at zero to revisit formerly held rows.
+public struct RetentionPage: Equatable, Sendable {
+    public let removed:Int
+    public let examined:Int
+    public let nextAfterID:Int64
+    public let finished:Bool
+    public let held:Bool
 }
