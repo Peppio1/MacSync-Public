@@ -774,6 +774,17 @@ public final class LocalInventory {
             return (row, identity)
         }
         let grouped = Dictionary(grouping: eligible, by: { $0.1 })
+        if experimentalLineageQueueProtection {
+            // An ineligible replacement (hard-link, missing birth identity,
+            // ambiguous observation) must not inherit a stale invalid-path
+            // observation left by a previous object at that spelling.
+            for row in rows where !WindowsPathSafety.validRelativePath(row.relativePath) {
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                if let identity = row.sourceLineageIdentity, grouped[identity]?.count == 1 { continue }
+                try SourceNameLineageStore.forgetInvalidObservation(db,root:rootID,
+                    source:sourceBinding,target:targetBinding,path:row.relativePath)
+            }
+        }
         var batch: SourceNameLineageStore.Batch?
         for (row, identity) in eligible {
             guard shouldContinue() else { throw SeedVerificationError.cancelled }

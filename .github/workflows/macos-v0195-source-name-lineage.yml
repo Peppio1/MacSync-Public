@@ -11,6 +11,7 @@ on:
       - 'Sources/MacSyncCore/MirrorDeletion.swift'
       - 'Sources/MacSyncCore/SignedRollbackTransaction.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageQueueTests.swift'
+      - 'Tests/MacSyncCoreTests/SourceNameLineageSMBTests.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageTransferTests.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageAuditTests.swift'
       - 'Tests/MacSyncCoreTests/OfflineNamePreparationTests.swift'
@@ -25,9 +26,27 @@ permissions:
 jobs:
   verify:
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 45
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
       - run: swift test -Xswiftc -warnings-as-errors --filter 'SourceNameLineageQueueTests|SourceNameLineageStoreTests|LocalInventoryTests|MirrorDeletionTests|ApplicationRollbackTests|SignedUpdatePolicyTests'
+      - name: Prepare pinned Rclone helper
+        run: |
+          bash Packaging/prepare-rclone.sh "$RUNNER_TEMP/macsync-rclone"
+          echo "MACSYNC_TEST_RCLONE=$RUNNER_TEMP/macsync-rclone/rclone" >> "$GITHUB_ENV"
+      - name: Install disposable loopback Samba
+        run: brew install samba
+      - name: Mount genuine SMB filesystem
+        run: bash scripts/ci/prepare-local-samba.sh
+      - name: Validate Rclone lineage and SMB deletion regressions
+        env:
+          MACSYNC_V0192_REQUIRE_SMB: '1'
+        run: swift test -Xswiftc -warnings-as-errors --filter 'SourceNameLineageSMBTests|SMBV0192DeletionValidationTests'
+      - name: Cleanup disposable share
+        if: always()
+        run: bash scripts/ci/cleanup-local-samba.sh
