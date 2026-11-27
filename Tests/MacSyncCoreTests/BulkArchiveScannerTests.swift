@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XCTest
 @testable import MacSyncCore
 
@@ -37,6 +38,35 @@ final class BulkArchiveScannerTests: XCTestCase {
             try fm.createSymbolicLink(at: folder.appendingPathComponent("dangling-link"),
                                       withDestinationURL: external.appendingPathComponent("missing"))
         }
+        // Independent server witness for the fresh-write experiment only.
+        var witnessRoot: URL?
+        if label == "smb-fresh-mount" {
+            let env = ProcessInfo.processInfo.environment
+            let base = try XCTUnwrap(env["MACSYNC_TEST_SMB_ROOT"])
+            let marker = URL(fileURLWithPath: base).appendingPathComponent("share-path")
+            let share = try String(contentsOf: marker, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard share.hasPrefix("/private/tmp/macsync-ci-share."), env["MACSYNC_TEST_SMB_HOST"] == "127.0.0.1" else {
+                return XCTFail("Not the disposable loopback fixture")
+            }
+            witnessRoot = URL(fileURLWithPath: share).appendingPathComponent(name)
+        }
+        func serverWitness() throws -> [String: SeedFileFingerprint] {
+            guard let witnessRoot else { return [:] }
+            var result: [String: SeedFileFingerprint] = [:]
+            for d in 0..<8 {
+                for i in 0..<12 {
+                    let relative = "folder-\(d)/foto-\(i)-é.jpg"
+                    var value = stat()
+                    guard witnessRoot.appendingPathComponent(relative).path.withCString({ lstat($0, &value) }) == 0,
+                          value.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+                        throw BulkArchiveScanner.Failure.filesystem(errno)
+                    }
+                    result[relative] = SeedFileFingerprint(fileStat: value)
+                }
+            }
+            return result
+        }
+        let serverBefore = try serverWitness()
         let legacy = try LocalScanner.scan(root: folder, excludeManaged: true,
                                            ignoreDSStore: true, preferPOSIXMetadata: true)
         let start = ProcessInfo.processInfo.systemUptime
@@ -76,17 +106,59 @@ final class BulkArchiveScannerTests: XCTestCase {
         XCTAssertEqual(Set(rows.map(\.relativePath)), planned)
         XCTAssertEqual(Set(legacy.map(\.relativePath)), planned, "Legacy topology differs")
         XCTAssertTrue(missing.isEmpty && extra.isEmpty, "Exact path mismatch; see BULK_PATH_ONLY logs")
-        // Read a fresh no-follow fingerprint only for differences. Compare
-        // all three observations, without changing production or tolerances.
+        let serverAfter = try serverWitness()
+        XCTAssertEqual(serverBefore, serverAfter, "Server changed during scanner comparison")
+        var observedDifferences = 0
         for (key, item) in expected {
             guard let other = actual[key] else { continue }
             if item != other || item.verificationFingerprint != other.verificationFingerprint {
+                observedDifferences += 1
                 let live = try? SeededArchiveVerifier.fingerprint(folder.appendingPathComponent(item.relativePath),
                                                                   directory: item.kind == "directory")
                 print("BULK_FINGERPRINT_DIAG label=\(label) path=\(item.relativePath) posix=\(String(describing: item.verificationFingerprint)) bulk=\(String(describing: other.verificationFingerprint)) fresh=\(String(describing: live))")
+                // Only classify a stale first observation in the explicitly
+                // fresh-write experiment, with an independent stable witness.
+                // All other cases still require strict first-pass equality.
+                guard witnessRoot != nil, item.kind == "file",
+                      let old = item.verificationFingerprint,
+                      let candidate = other.verificationFingerprint,
+                      let fresh = live,
+                      let server = serverAfter[item.relativePath] else {
+                    XCTAssertEqual(item, other)
+                    XCTAssertEqual(item.verificationFingerprint, other.verificationFingerprint)
+                    continue
+                }
+                XCTAssertEqual(old.device, candidate.device)
+                XCTAssertEqual(old.inode, candidate.inode)
+                XCTAssertEqual(old.size, candidate.size)
+                XCTAssertEqual(candidate, fresh, "Bulk must equal exact no-follow reread")
+                XCTAssertEqual(server.size, candidate.size)
+                // FILETIME has 100ns resolution. Only the server-local
+                // witness comparison allows representation precision.
+                func sameWireTime(_ s: Int64, _ n: Int64, _ t: Int64, _ m: Int64) -> Bool {
+                    guard s == t else { return false }
+                    return abs(n - m) < 100
+                }
+                XCTAssertTrue(sameWireTime(server.mtimeSeconds, server.mtimeNanos,
+                                           candidate.mtimeSeconds, candidate.mtimeNanos), "Server mtime differs")
+                XCTAssertTrue(sameWireTime(server.ctimeSeconds, server.ctimeNanos,
+                                           candidate.ctimeSeconds, candidate.ctimeNanos), "Server ctime differs")
+            }
+        }
+        if witnessRoot != nil {
+            // Require a second complete POSIX scan to agree EXACTLY with the
+            // candidate; no per-file tolerance or omission of mismatches.
+            let repeatLegacy = try LocalScanner.scan(root: folder, excludeManaged: true,
+                                                     ignoreDSStore: true, preferPOSIXMetadata: true)
+            let repeated = Dictionary(uniqueKeysWithValues: repeatLegacy.map { (Data($0.relativePath.utf8), $0) })
+            XCTAssertEqual(Set(repeated.keys), Set(actual.keys))
+            for (key, item) in actual {
+                let other = try XCTUnwrap(repeated[key])
                 XCTAssertEqual(item, other)
                 XCTAssertEqual(item.verificationFingerprint, other.verificationFingerprint)
             }
+            XCTAssertEqual(try serverWitness(), serverAfter, "Server changed before final comparison")
+            print("BULK_FRESH_WRITE_DIAG initial_differences=\(observedDifferences) strict_repeat_checked=\(repeatLegacy.count)")
         }
         XCTAssertEqual(rows.count, links ? 107 : 104)
         var cancelled = false

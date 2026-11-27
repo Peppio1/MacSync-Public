@@ -32,11 +32,13 @@ jobs:
       - run: brew install samba
       - run: bash scripts/ci/prepare-local-samba.sh
       - name: Compare recursive Swift inventory with the original POSIX scanner
+        id: recursive
         run: |
           test -n "$MACSYNC_TEST_SMB_MOUNT"
           test -n "$MACSYNC_TEST_BULK_PRESEEDED"
           swift test -Xswiftc -warnings-as-errors --filter BulkArchiveScannerTests
       - name: Check existing local inventory regressions
+        if: ${{ !cancelled() && steps.recursive.outcome != 'skipped' }}
         run: swift test -Xswiftc -warnings-as-errors --filter LocalInventoryTests
       - if: always()
         run: bash scripts/ci/cleanup-local-samba.sh
