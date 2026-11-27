@@ -2,7 +2,8 @@ import Foundation
 
 public enum DiagnosticReport {
     private struct Report: Encodable {
-        let schemaVersion = 3
+        let schemaVersion = 4
+        let database:DatabaseDiagnosticSnapshot
         let resourceSamples:[ResourceRecord]
         let environment: Environment
         let timingDistributions: [TimingRecord]
@@ -98,7 +99,7 @@ public enum DiagnosticReport {
             }
             before = page.count == 500 ? page.last?.id : nil
         } while before != nil
-        return Report(resourceSamples:resourceSamples,environment:Environment(),timingDistributions:timingDistributions,appVersion:appVersion,exportedAt:Date(),since:since,events:events)
+        return Report(database:DatabaseDiagnosticSnapshot.collect(databasePath:databasePath),resourceSamples:resourceSamples,environment:Environment(),timingDistributions:timingDistributions,appVersion:appVersion,exportedAt:Date(),since:since,events:events)
     }
 
     private static func encoder()->JSONEncoder {
@@ -155,10 +156,12 @@ public enum DiagnosticReport {
                    "I tempi delle fasi possono sovrapporsi e non devono essere sommati automaticamente.",
                    "Le chiamate filesystem non misurano i pacchetti SMB.",
                    "La CPU dei processi figli è contabilizzata al termine; RSS indica il picco.",
-                   "Le misure UI riguardano consegna e risposta dei risultati, non fotogrammi."])
+                   "Le misure UI riguardano consegna e risposta dei risultati, non fotogrammi.",
+                   "Database: campione in sola lettura al momento dell’esportazione; conteggi parziali se il limite di tempo è raggiunto."])
         try write(summary,"riepilogo.json")
         try write(report.environment,"ambiente.json")
         try write(report.resourceSamples,"risorse.json")
+        try write(report.database,"database.json")
         func section(_ filename:String,where includes:(String)->Bool)throws {
             try write(Section(timings:report.timingDistributions.filter{includes($0.action)},
                 events:report.events.filter{includes($0.action)}),filename)

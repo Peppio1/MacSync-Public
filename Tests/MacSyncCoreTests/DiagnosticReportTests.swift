@@ -3,6 +3,35 @@ import XCTest
 @testable import MacSyncCore
 
 final class DiagnosticReportTests: XCTestCase {
+    func testDatabaseSnapshotCountsAndDoesNotMutateQueue() throws {
+        let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:dir) }
+        let db=dir.appendingPathComponent("private-database.sqlite").path
+        let journal=try ChangeJournal(path:db)
+        let first=try journal.enqueue(rootID:"private-root",relativePath:"private-one.jpg",kind:.upsert)
+        _=try journal.enqueue(rootID:"private-root",relativePath:"private-two.jpg",kind:.delete)
+        try journal.markCompleted(id:first)
+        let before=try journal.pending()
+        let snapshot=DatabaseDiagnosticSnapshot.collect(databasePath:db)
+        XCTAssertTrue(snapshot.complete)
+        XCTAssertEqual(snapshot.counts["change_queue"],2)
+        XCTAssertEqual(snapshot.counts["queue_pending"],1)
+        XCTAssertEqual(snapshot.counts["queue_completed"],1)
+        XCTAssertGreaterThan(snapshot.pageSize ?? 0,0)
+        XCTAssertGreaterThan(snapshot.pageCount ?? 0,0)
+        XCTAssertNotNil(snapshot.freePages)
+        XCTAssertNotNil(snapshot.databaseBytes)
+        XCTAssertNotNil(snapshot.walBytes)
+        XCTAssertEqual(try journal.pending().map(\.id),before.map(\.id))
+        let encoded=String(decoding:try JSONEncoder().encode(snapshot),as:UTF8.self)
+        XCTAssertFalse(encoded.contains("private-"))
+        let missing=dir.appendingPathComponent("missing.sqlite")
+        let unavailable=DatabaseDiagnosticSnapshot.collect(databasePath:missing.path)
+        XCTAssertFalse(unavailable.complete)
+        XCTAssertFalse(FileManager.default.fileExists(atPath:missing.path))
+    }
+
     func testTimingDistributionsAreBoundedAndExportedWithoutMessages() throws {
         var timing=DiagnosticTiming()
         for x in [0.001,0.002,0.003,1.2] { timing.observe(x) }
@@ -25,7 +54,7 @@ final class DiagnosticReportTests: XCTestCase {
         let data=try DiagnosticReport.make(databasePath:db,since:.distantPast,appVersion:"0.19.4")
         XCTAssertFalse(String(decoding:data,as:UTF8.self).contains("private-"))
         let report=try XCTUnwrap(JSONSerialization.jsonObject(with:data) as? [String:Any])
-        XCTAssertEqual(report["schemaVersion"] as? Int,3)
+        XCTAssertEqual(report["schemaVersion"] as? Int,4)
         let records=try XCTUnwrap(report["timingDistributions"] as? [[String:Any]])
         XCTAssertEqual(records.count,2)
         XCTAssertEqual(records[0]["p95UpperBoundSeconds"] as? Double,1.2)
@@ -102,7 +131,7 @@ final class DiagnosticReportTests: XCTestCase {
         XCTAssertEqual(proc.terminationStatus,0)
         let names=try FileManager.default.contentsOfDirectory(atPath:unpack.path)
         XCTAssertEqual(Set(names),Set(["riepilogo.json","ambiente.json","risorse.json","sincronizzazioni.json",
-            "verifiche_archivio.json","filesystem.json","interfaccia.json","coda.json","eventi.tsv"]))
+            "verifiche_archivio.json","filesystem.json","interfaccia.json","coda.json","eventi.tsv","database.json"]))
         for name in names {
             let data=try Data(contentsOf:unpack.appendingPathComponent(name))
             XCTAssertFalse(String(decoding:data,as:UTF8.self).contains("private-"))

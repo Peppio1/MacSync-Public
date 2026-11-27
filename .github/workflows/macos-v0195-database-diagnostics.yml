@@ -1,0 +1,22 @@
+name: MacSync v0.19.5 database diagnostics
+on:
+  push:
+    branches: [develop-v0.19.5]
+    paths:
+      - 'Sources/MacSyncCore/DatabaseDiagnosticSnapshot.swift'
+      - 'Sources/MacSyncCore/DiagnosticReport.swift'
+      - 'Tests/MacSyncCoreTests/DiagnosticReportTests.swift'
+      - '.github/workflows/macos-v0195-database-diagnostics.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Verify database sampling and diagnostic archive
+        run: swift test -Xswiftc -warnings-as-errors --filter DiagnosticReportTests
