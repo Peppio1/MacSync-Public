@@ -22,6 +22,7 @@ struct TechnicalLogSheet: View {
     @State private var expanded=Set<String>()
     @State private var request=UUID()
     @State private var complete = false
+    var expandFixtureDetails=false
     private let ticker=Timer.publish(every:5,on:.main,in:.common).autoconnect()
     private let pageSize=100
     private let displayLimit=5000
@@ -145,7 +146,7 @@ struct TechnicalLogSheet: View {
     }
     private func eventRow(_ row:TechnicalLogRow) -> some View {
         let e=row.entry
-        return DisclosureGroup {
+        return DisclosureGroup(isExpanded:expandFixtureDetails ? .constant(true) : Binding(get:{expanded.contains("event-\(row.id)")},set:{ value in if value { expanded.insert("event-\(row.id)") } else { expanded.remove("event-\(row.id)") } })) {
             VStack(alignment:.leading,spacing:4) {
                 Text("Azione: "+e.action+" · radice: "+e.rootID)
                 if let cycle=row.cycleID { Text("Ciclo: "+cycle) }

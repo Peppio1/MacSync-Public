@@ -370,13 +370,14 @@ struct SyncHistorySheet: View {
     }
 }
 
-private struct HistoryDetailsSheet:View {
+struct HistoryDetailsSheet:View {
     @ObservedObject var copy:MountedCopyController
     @ObservedObject var model:MacSyncViewModel
     let metric:HistoryMetric
     let cycleID:String?
     let sessionID:String?
     let roots:[String]
+    var fixtureRows:[SyncHistoryRow]? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var rows:[SyncHistoryRow]=[]
     @State private var search=""
@@ -431,8 +432,11 @@ private struct HistoryDetailsSheet:View {
             if busy { ProgressView().controlSize(.small) }
             if !message.isEmpty { Text(message).font(.caption).foregroundStyle(.orange) }
         }.padding(18).frame(width:1000,height:620)
-        .onAppear{load(reset:true)}
-        .onChange(of:root){_ in load(reset:true)}
+        .onAppear{
+            if let fixtureRows { rows=fixtureRows;selectedRow=fixtureRows.first?.id;more=false }
+            else { load(reset:true) }
+        }
+        .onChange(of:root){_ in if fixtureRows == nil { load(reset:true) } }
     }
     private func archivePath(_ e:SyncCycleEvent)->ArchivePathPresentation {
         let kind:ArchivePathPresentation.Kind = [.directoryCreated,.directoryRemoved].contains(e.kind) ? .directory :
@@ -944,13 +948,14 @@ private struct AuditPageRequest: Equatable {
     let offset: Int
 }
 
-private struct AuditResultSheet:View {
+struct AuditResultSheet:View {
     @ObservedObject var model:MacSyncViewModel
     let findings:[AuditFinding]
     let kind:AuditFindingKind?
     var title: String? = nil
     var filesOnly = false
     var deletionCandidates: Set<String> = []
+    var fixtureSelection=false
     @State private var search=""
     @State private var root=""
     @State private var selected:String?
@@ -1013,6 +1018,7 @@ private struct AuditResultSheet:View {
         },onCancel:{ cancel.cancel() })
         guard !Task.isCancelled, let page, self.request == request else { return }
         rows = page.rows; roots = page.roots; total = page.total; loading = false
+        if fixtureSelection { selected=rows.first?.id }
     }
     private func open(_ show:Bool) {
         guard let f=rows.first(where:{$0.id==selected}) else{return}

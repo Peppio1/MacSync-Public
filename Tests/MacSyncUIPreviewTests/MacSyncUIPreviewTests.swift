@@ -69,6 +69,86 @@ final class MacSyncUIPreviewTests: XCTestCase {
         print("Synthetic UI heartbeat max: \(maxDelay) seconds")
     }
 
+    func testRenderFullPathScreens() async throws {
+        guard let out=ProcessInfo.processInfo.environment["MACSYNC_UI_PREVIEW_DIR"],!out.isEmpty else { throw XCTSkip("Preview opt-in") }
+        let directory=URL(fileURLWithPath:out,isDirectory:true)
+        try await MainActor.run {
+            let fm=FileManager.default
+            try fm.createDirectory(at:directory,withIntermediateDirectories:true)
+            let scratch=fm.temporaryDirectory.appendingPathComponent("MacSync-preview-"+UUID().uuidString).resolvingSymlinksInPath()
+            try fm.createDirectory(at:scratch,withIntermediateDirectories:true)
+            defer {try? fm.removeItem(at:scratch)}
+            let source=scratch.appendingPathComponent("Foto_da_editare")
+            let destination=scratch.appendingPathComponent("Destinazione")
+            for root in [source,destination] { try fm.createDirectory(at:root.appendingPathComponent("Vetro - 47253/nuovo originale"),withIntermediateDirectories:true) }
+            let relative="Vetro - 47253/nuovo originale/oca pro.jpg"
+            try Data("fixture".utf8).write(to:source.appendingPathComponent(relative))
+            try Data("old".utf8).write(to:destination.appendingPathComponent(relative))
+            let db=scratch.appendingPathComponent("preview.sqlite").path
+            let inventory=try LocalInventory(path:db)
+            _=try inventory.reconcile(rootID:"photo-uploads",root:source)
+            let journal=try ChangeJournal(path:db)
+            _=try journal.enqueue(rootID:"photo-uploads",relativePath:"Vetro - 47253./oca pro.jpg",kind:.delete)
+            let runtime=MacSyncRuntime(previewOnly:true)
+            let pair=try XCTUnwrap(runtime.model.configuredPairs().first)
+            let queue=try journal.queuePreview()
+            XCTAssertFalse(queue.rows.isEmpty)
+            try Self.render(QueuePreviewSheet(copy:runtime.copy,model:runtime.model,fixturePage:queue).allowsHitTesting(false),name:"screen-01-queue",scheme:.light,directory:directory,width:920,height:720)
+            var one=IncompatibleName(rootID:pair.id,rootPath:pair.path,relativePath:"Vetro - 47253/nuovo originale.",objectKind:"directory",side:.source,reason:"Punto finale",affectedDescendants:4)
+            one.proposedNameAvailable=true
+            var two=IncompatibleName(rootID:pair.id,rootPath:pair.path,relativePath:"Vetro - 47253/Archivio ",objectKind:"directory",side:.source,reason:"Spazio finale",affectedDescendants:9)
+            two.proposedNameAvailable=false
+            let names=[one,two]
+            let page=try XCTUnwrap(IncompatibleNameListing.page(items:names,side:"source",directories:true,search:"",offset:0))
+            XCTAssertEqual(page.rows.count,2)
+            let panel=IncompatibleNamesPanel(copy:runtime.copy,model:runtime.model,runtime:runtime,fixturePage:page)
+            try Self.render(panel.allowsHitTesting(false),name:"screen-02-incompatible",scheme:.light,directory:directory,width:920,height:620)
+            var promptError:Error?
+            NameRectificationPrompt.present(items:[one],decision:NamePromptDecision(),sourceRoots:[pair.id:pair.path],previewCapture:{ window in
+                do { try Self.captureAlert(window,directory:directory) } catch { promptError=error }
+            })
+            if let promptError { throw promptError }
+            try Self.render(panel.previewConfirmation([one]).allowsHitTesting(false),name:"screen-04-manual-confirm",scheme:.light,directory:directory,width:650,height:500)
+            let mapping=try MountedFolderMapping(rootID:pair.id,source:source,target:destination)
+            let history=try SyncCycleHistory(path:db)
+            try history.begin(id:"preview-cycle",sessionID:"preview-session",at:Date().addingTimeInterval(-60),automatic:true)
+            let job=try XCTUnwrap(try journal.pending().first(where:{$0.relativePath==relative && $0.kind == .upsert}))
+            try history.append(cycleID:"preview-cycle",event:SyncCycleEvent(kind:.newFile,job:job,mapping:mapping,bytes:25000000,seconds:1.5,detail:"Nuovo file copiato"))
+            try history.finish(id:"preview-cycle",at:Date(),seconds:60,state:"completed")
+            let historyRows=try history.events(cycleID:"preview-cycle")
+            XCTAssertEqual(historyRows.count,1)
+            try Self.render(HistoryDetailsSheet(copy:runtime.copy,model:runtime.model,metric:.new,cycleID:"preview-cycle",sessionID:nil,roots:[pair.id],fixtureRows:historyRows).allowsHitTesting(false),name:"screen-05-history-detail",scheme:.light,directory:directory,width:1000,height:620)
+            let audit=try ArchiveAudit(journal:journal,mappings:[mapping]).run(mode:.deep)
+            XCTAssertFalse(audit.findings.isEmpty)
+            try Self.render(AuditResultSheet(model:runtime.model,findings:audit.findings,kind:nil,filesOnly:true,fixtureSelection:true).allowsHitTesting(false),name:"screen-06-audit-results",scheme:.light,directory:directory,width:1000,height:660)
+            let log=try SyncActivityLog(path:db)
+            log.cycleID="preview-cycle"
+            log.currentJob=job
+            try log.record(level:.success,rootID:pair.id,action:"copy",relativePath:relative,bytes:25000000,durationSeconds:1.5,message:"Nuovo file copiato")
+            let entries=try log.recent()
+            runtime.copy.populateScreenshotFixture(page:.history,entries:entries,cycle:try history.cycles(limit:1).first)
+            try Self.render(MacSyncConfigurationView(model:runtime.model,copy:runtime.copy,runtime:runtime,settings:runtime.settings,destinations:runtime.destinations,initialPage:.history,previewScheme:.light).allowsHitTesting(false),name:"screen-07-register",scheme:.light,directory:directory,width:1180,height:820)
+            let technical=try SyncActivityLog(path:db,readOnly:true).technicalPage()
+            try Self.render(TechnicalLogSheet(copy:runtime.copy,fixtureRows:technical,model:runtime.model,previewOnly:true,expandFixtureDetails:true).allowsHitTesting(false),name:"screen-08-technical",scheme:.light,directory:directory,width:1040,height:720)
+        }
+    }
+
+    @MainActor
+    private static func captureAlert(_ window:NSWindow,directory:URL) throws {
+        window.appearance=NSAppearance(named:.aqua)
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+        let view=try XCTUnwrap(window.contentView)
+        view.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        RunLoop.main.run(until:Date().addingTimeInterval(0.25))
+        view.layoutSubtreeIfNeeded()
+        let bitmap=try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in:view.bounds))
+        view.cacheDisplay(in:view.bounds,to:bitmap)
+        let png=try XCTUnwrap(bitmap.representation(using:.png,properties:[:]))
+        try png.write(to:directory.appendingPathComponent("screen-03-automatic-prompt.png"),options:.atomic)
+    }
+
     func testRenderProductionComponents() async throws {
         guard let path = ProcessInfo.processInfo.environment["MACSYNC_UI_PREVIEW_DIR"], !path.isEmpty else {
             throw XCTSkip("UI artifact rendering is opt-in via MACSYNC_UI_PREVIEW_DIR")
@@ -226,7 +306,7 @@ final class MacSyncUIPreviewTests: XCTestCase {
         // Full-page captures measure exact usable content bounds.
         let auditBounds = AuditBoundsCapture()
         let canvas = Group {
-            if name.hasPrefix("page-") || name.hasPrefix("compact-") || name.hasPrefix("minimum-") || name.hasPrefix("idle-") {
+            if name.hasPrefix("screen-") || name.hasPrefix("page-") || name.hasPrefix("compact-") || name.hasPrefix("minimum-") || name.hasPrefix("idle-") {
                 view
             } else {
                 VStack(alignment: .leading, spacing: 12) {

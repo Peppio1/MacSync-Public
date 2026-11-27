@@ -3,7 +3,7 @@ import MacSyncCore
 
 @MainActor
 enum NameRectificationPrompt {
-    static func present(items:[IncompatibleName],decision:NamePromptDecision,sourceRoots:[String:String]) {
+    static func present(items:[IncompatibleName],decision:NamePromptDecision,sourceRoots:[String:String],previewCapture:((NSWindow)->Void)? = nil) {
         guard decision.answer == nil else { return }
         // Do not nest unrelated confirmation modals (e.g. an update).
         guard NSApp.modalWindow == nil else { decision.skip(); return }
@@ -55,6 +55,12 @@ enum NameRectificationPrompt {
         scroll.widthAnchor.constraint(equalToConstant:510).isActive=true
         scroll.heightAnchor.constraint(equalToConstant:270).isActive=true
         alert.accessoryView=stack
+        if let previewCapture {
+            alert.layout()
+            previewCapture(alert.window)
+            alert.window.orderOut(nil)
+            return
+        }
         let timer=Timer(timeInterval:0.1,repeats:true) { _ in
             // AppKit invokes this timer on the main modal run loop.
             MainActor.assumeIsolated {

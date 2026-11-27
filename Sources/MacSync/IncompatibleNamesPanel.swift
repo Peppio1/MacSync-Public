@@ -24,6 +24,7 @@ struct IncompatibleNamesPanel:View {
     @ObservedObject var copy:MountedCopyController
     @ObservedObject var model:MacSyncViewModel
     @ObservedObject var runtime:MacSyncRuntime
+    var fixturePage:IncompatibleNameListPage? = nil
     @State private var directories=true
     @State private var search=""
     @State private var message=""
@@ -55,7 +56,8 @@ struct IncompatibleNamesPanel:View {
     var body:some View {
         // Rendering uses only a bounded snapshot. Filtering and counting are
         // performed in a cancellable worker, never during a SwiftUI update.
-        let current = displayedRequest == listingRequest
+        let namePage=fixturePage ?? self.namePage
+        let current = fixturePage != nil || displayedRequest == listingRequest
         let selectionCurrent = resolvedSelection == selectionRequest
         let visibleRows = current ? (namePage?.rows ?? []) : []
         return MacSyncPanel("Nomi incompatibili",icon:"folder.badge.questionmark",fillHeight:true) {
@@ -179,9 +181,14 @@ struct IncompatibleNamesPanel:View {
         .onChange(of:selected) { _ in selectionRevision &+= 1 }
         .onChange(of:search) { _ in pageOffset = 0 }
         .onChange(of:directories) { _ in pageOffset = 0 }
-        .task(id:listingRequest) { await loadPage(listingRequest) }
-        .task(id:selectionRequest) { await resolveSelection(selectionRequest) }
-        .sheet(item:$confirmation) { snapshot in
+        .task(id:listingRequest) { if fixturePage == nil { await loadPage(listingRequest) } }
+        .task(id:selectionRequest) { if fixturePage == nil { await resolveSelection(selectionRequest) } }
+        .sheet(item:$confirmation) { snapshot in confirmationContent(snapshot) }
+    }
+    func previewConfirmation(_ items:[IncompatibleName])->some View {
+        confirmationContent(NameConfirmation(items:items))
+    }
+    private func confirmationContent(_ snapshot:NameConfirmation)->some View {
             VStack(alignment:.leading,spacing:12) {
                 Text("Conferma rettifica dei nomi").font(.title2.bold())
                 Text("\(snapshot.items.count) elementi selezionati. Verranno rinominati solo nelle sorgenti locali. Le modifiche saranno rilevate dal normale inventario: copia del nuovo percorso e cancellazione del precedente secondo le impostazioni mirror.")
@@ -207,7 +214,6 @@ struct IncompatibleNamesPanel:View {
                     }.buttonStyle(.borderedProminent).disabled(!canSelect || snapshot.items.isEmpty)
                 }
             }.padding(20).frame(width:650,height:500)
-        }
     }
     @MainActor private func loadPage(_ request:NameListingRequest) async {
         let items = copy.incompatibleNames

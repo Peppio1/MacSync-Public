@@ -6,6 +6,7 @@ import MacSyncCore
 struct QueuePreviewSheet: View {
     @ObservedObject var copy:MountedCopyController
     @ObservedObject var model:MacSyncViewModel
+    var fixturePage:QueuePreviewPage? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var search=""
     @State private var kind="all"
@@ -58,7 +59,7 @@ struct QueuePreviewSheet: View {
             if !warning.isEmpty { Text(warning).font(.caption).foregroundStyle(.orange) }
             if let updated { Text("Aggiornata: "+macSyncDateTime(updated)).font(.caption).foregroundStyle(.secondary) }
             Divider()
-            if let snapshot {
+            if let snapshot=fixturePage ?? snapshot {
                 if snapshot.rows.isEmpty {
                     Text("Nessuna operazione nella selezione.").foregroundStyle(.secondary).frame(maxWidth:.infinity,maxHeight:.infinity)
                 } else {
@@ -109,6 +110,7 @@ struct QueuePreviewSheet: View {
         .onChange(of:kind) { _ in offset=0 }
         .onChange(of:status) { _ in offset=0 }
         .task(id:request) {
+            guard fixturePage == nil else { return }
             let wanted=request
             let requestedAt=ProcessInfo.processInfo.systemUptime
             var firstResult=true
