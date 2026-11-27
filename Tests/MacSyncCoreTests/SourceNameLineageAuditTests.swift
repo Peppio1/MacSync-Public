@@ -4,6 +4,67 @@ import XCTest
 @testable import MacSyncCore
 
 final class SourceNameLineageAuditTests: XCTestCase {
+    func testPristineSeedWithoutPendingJobsPreservesAuditResults() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("MacSync-unqueued-" + UUID().uuidString)
+            .resolvingSymlinksInPath()
+        defer { try? fm.removeItem(at:base) }
+        let source = base.appendingPathComponent("source")
+        let target = base.appendingPathComponent("target")
+        for root in [source,target] {
+            try fm.createDirectory(at:root.appendingPathComponent("folder"),withIntermediateDirectories:true)
+            for name in ["same.jpg","different.jpg","changed.jpg"] {
+                let url = root.appendingPathComponent("folder/"+name)
+                try Data((root == target && name == "different.jpg" ? "longer" : "same").utf8).write(to:url)
+                try fm.setAttributes([.modificationDate:Date(timeIntervalSince1970:1_700_000_000)],ofItemAtPath:url.path)
+            }
+        }
+        let db = base.appendingPathComponent("state.sqlite")
+        let journal = try ChangeJournal(path:db.path)
+        let inventory = try LocalInventory(path:db.path)
+        _ = try inventory.reconcile(rootID:"photos",root:source,origin:.initialInventory)
+        let mapping = try MountedFolderMapping(rootID:"photos",source:source,target:target)
+        try journal.verifyDirectoryBindings([mapping],allowNewTarget:true)
+        XCTAssertTrue(try journal.pending().isEmpty)
+        let audit = try ArchiveAudit(journal:journal,mappings:[mapping])
+        let baseline = try audit.run(mode:.quick,repair:true)
+        XCTAssertEqual(baseline.queuedRepairs,1)
+        journal.experimentalSourceNameLineage = true
+        // A post-scan local edit with unchanged size and mtime must not be
+        // promoted to recognized by the historical observation.
+        var edited = false
+        let shadow = try audit.run(mode:.quick,repair:true,progress:{ p in
+            if !edited && p.phase == "Finalizzazione" {
+                edited = true
+                let url = source.appendingPathComponent("folder/changed.jpg")
+                try? Data("edit".utf8).write(to:url)
+                try? fm.setAttributes([.modificationDate:Date(timeIntervalSince1970:1_700_000_000)],ofItemAtPath:url.path)
+            }
+        })
+        XCTAssertTrue(edited)
+        XCTAssertEqual(shadow.bytesRead,baseline.bytesRead)
+        XCTAssertEqual(shadow.findings.map{$0.relativePath+":"+$0.kind.rawValue},
+                       baseline.findings.map{$0.relativePath+":"+$0.kind.rawValue})
+        XCTAssertEqual(try journal.pending().map(\.relativePath),["folder/different.jpg"])
+        let rows = try LocalScanner.scan(root:source,collectSourceLineageIdentity:true)
+        var connection:OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(db.path,&connection,SQLITE_OPEN_READONLY,nil),SQLITE_OK)
+        let handle = try XCTUnwrap(connection)
+        defer { sqlite3_close(handle) }
+        func observed(_ name:String) throws -> SourceNameLineageStore.Versioned? {
+            let item = try XCTUnwrap(rows.first{$0.relativePath==name})
+            let id = try XCTUnwrap(item.sourceLineageIdentity)
+            let initial = SourceNameLineage.Record(identity:id,rootID:"photos",
+                sourceBinding:try DirectoryBinding.encoded(source),targetBinding:try DirectoryBinding.encoded(target),path:name)
+            return try SourceNameLineageStore.read(handle,key:.init(initial))
+        }
+        XCTAssertEqual(try observed("folder/same.jpg")?.record.evidence,.recognized)
+        XCTAssertNil(try observed("folder/different.jpg"))
+        XCTAssertNil(try observed("folder/changed.jpg"))
+        XCTAssertEqual(try observed("folder")?.record.evidence,.recognized)
+        print("LINEAGE_UNQUEUED baseline=\(baseline.seconds) shadow=\(shadow.seconds) target_bytes_read=\(shadow.bytesRead)")
+    }
+
     func testRealAcceptedQuickMatchesOnlyAndAtomicCancellation() throws {
         let fm = FileManager.default
         let base = fm.temporaryDirectory.appendingPathComponent("MacSync-lineage-audit-" + UUID().uuidString)

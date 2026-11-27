@@ -1380,6 +1380,94 @@ public final class ChangeJournal {
         } catch { try? execute("ROLLBACK;"); throw error }
     }
 
+    /// Historical observations from the final matching findings of a single
+    /// QUICK/INTELLIGENT audit. Does not acknowledge, enqueue or delete.
+    /// No target filesystem access. Newer/pending events take precedence.
+    func observeUnqueuedAuditLineage(_ items: [TrackedItem], mapping: MountedFolderMapping,
+                                      sourceBinding: String, targetBinding: String,
+                                      cutoff: Int64, shouldContinue: () -> Bool) throws {
+        guard experimentalSourceNameLineage, !items.isEmpty, let connection else { return }
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            try SourceNameLineageStore.install(connection)
+            let stamps = try prepare("SELECT role,stamp FROM directory_bindings WHERE root_id=?;")
+            defer { sqlite3_finalize(stamps) }
+            try bind(mapping.rootID,at:1,in:stamps)
+            var found: [String:String] = [:]
+            var rc = sqlite3_step(stamps)
+            while rc == SQLITE_ROW {
+                found[columnText(stamps,at:0)] = columnText(stamps,at:1)
+                rc = sqlite3_step(stamps)
+            }
+            guard rc == SQLITE_DONE else { throw databaseFailure() }
+            guard found["source"] == sourceBinding, found["target"] == targetBinding,
+                  try watchedRootPath(rootID:mapping.rootID) == mapping.source.path,
+                  try queueRebuildToken() == nil else {
+                try execute("COMMIT;"); return
+            }
+            let protection = try NameRectification.pendingProtection(journal:self)
+            let eligibility = try prepare("""
+                SELECT 1 FROM file_inventory f
+                WHERE f.root_id=?1 AND f.relative_path=?2 AND f.kind=?3
+                  AND (f.kind='directory' OR
+                    (f.file_size=?4 AND ABS(f.modified_at-?5)<0.002 AND f.change_stamp=?6))
+                  AND NOT EXISTS(SELECT 1 FROM change_queue q
+                    WHERE q.root_id=?1 AND q.relative_path=?2 AND (q.completed=0 OR q.id>?7))
+                  AND NOT EXISTS(SELECT 1 FROM publication_intents p
+                    WHERE p.root_id=?1 AND p.relative_path=?2)
+                  AND NOT EXISTS(SELECT 1 FROM transfer_recovery r
+                    WHERE r.root_id=?1 AND r.relative_path=?2)
+                  AND NOT EXISTS(SELECT 1 FROM upload_retry u
+                    WHERE u.root_id=?1 AND (u.scope='root' OR EXISTS(SELECT 1 FROM change_queue q WHERE q.id=u.job_id AND q.relative_path=?2)));
+                """)
+            defer { sqlite3_finalize(eligibility) }
+            var batch: SourceNameLineageStore.Batch?
+            let counts = Dictionary(grouping:items.compactMap(\.sourceLineageIdentity),by:{$0})
+            for item in items {
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                guard let identity = item.sourceLineageIdentity, counts[identity]?.count == 1,
+                      let fingerprint = item.verificationFingerprint,
+                      WindowsPathSafety.validRelativePath(item.relativePath),
+                      !protection.protects(rootID:mapping.rootID,path:item.relativePath) else { continue }
+                let initial = SourceNameLineage.Record(identity:identity,rootID:mapping.rootID,
+                    sourceBinding:sourceBinding,targetBinding:targetBinding,path:item.relativePath)
+                let key = SourceNameLineageStore.Key(initial)
+                if batch == nil { batch = try SourceNameLineageStore.batch(connection,key:key,create:true) }
+                guard let batch else { throw databaseFailure() }
+                let prior = try batch.read(key:key)
+                if let prior {
+                    guard prior.record.currentPath.utf8.elementsEqual(item.relativePath.utf8),
+                          !prior.record.uncertainPublication else { continue }
+                    // Ordinary unchanged recognized entries need no writes or
+                    // fresh stat. This is historical evidence, not permission.
+                    if prior.record.recognizedPaths.contains(where:{$0.utf8.elementsEqual(item.relativePath.utf8)}) { continue }
+                }
+                sqlite3_reset(eligibility); sqlite3_clear_bindings(eligibility)
+                try bind(mapping.rootID,at:1,in:eligibility)
+                try bind(item.relativePath,at:2,in:eligibility)
+                try bind(item.kind,at:3,in:eligibility)
+                guard sqlite3_bind_int64(eligibility,4,fingerprint.size)==SQLITE_OK,
+                      sqlite3_bind_double(eligibility,5,fingerprint.modifiedAt)==SQLITE_OK,
+                      sqlite3_bind_int64(eligibility,7,cutoff)==SQLITE_OK else { throw databaseFailure() }
+                try bind("\(fingerprint.inode):\(fingerprint.ctimeSeconds):\(fingerprint.ctimeNanos)",at:6,in:eligibility)
+                let eligible = sqlite3_step(eligibility)
+                if eligible == SQLITE_DONE { continue }
+                guard eligible == SQLITE_ROW else { throw databaseFailure() }
+                let url = mapping.source.appendingPathComponent(item.relativePath)
+                var live = stat()
+                guard url.resolvingSymlinksInPath().path == url.path,
+                      url.path.withCString({ lstat($0,&live) }) == 0,
+                      SourceNameLineage.Identity(stat:live) == identity,
+                      SeedFileFingerprint(fileStat:live) == fingerprint else { continue }
+                var record = prior?.record ?? initial
+                record.recognize(path:item.relativePath)
+                try batch.write(record:record,expectedRevision:prior?.revision)
+            }
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            try execute("COMMIT;")
+        } catch { try? execute("ROLLBACK;"); throw error }
+    }
+
     /// Close already-absent deletions; no filesystem mutation, no mirror
     /// authorization change and no increase to actual deletion statistics.
     /// Caller provides pre-audit IDs absent from both complete inventories.

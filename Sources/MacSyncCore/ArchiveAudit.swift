@@ -306,6 +306,11 @@ public final class ArchiveAudit {
                     progress: (ArchiveAuditProgress) -> Void = { _ in }) throws -> ArchiveAuditReport {
         var state = ArchiveAuditProgress()
         let queueExtras = repair && queueMirrorExtras
+        // Diagnostic prototype only. Never change the comparison or callbacks
+        // used to acknowledge pending jobs; collect final matching findings.
+        let shadowLineage = repair && journal.experimentalSourceNameLineage &&
+            (mode == .quick || mode == .intelligent)
+        let shadowCutoff = shadowLineage ? try journal.queueSequence() : 0
         if queueExtras { try journal.verifyDirectoryBindings(mappings) }
         // One indexed read of the already-approved SQLite rename plan.
         // Its relationships are NOT inferred from equal size or timestamps.
@@ -352,8 +357,8 @@ public final class ArchiveAudit {
             }
             let sourceStamp = try Self.rootStamp(mapping.source)
             let targetStamp = try Self.rootStamp(mapping.target)
-            let sourceBinding = queueExtras ? try DirectoryBinding.encoded(mapping.source) : nil
-            let targetBinding = queueExtras ? try DirectoryBinding.encoded(mapping.target) : nil
+            let sourceBinding = (queueExtras || shadowLineage) ? try DirectoryBinding.encoded(mapping.source) : nil
+            let targetBinding = (queueExtras || shadowLineage) ? try DirectoryBinding.encoded(mapping.target) : nil
             var scanStart = ProcessInfo.processInfo.systemUptime
             func scanned(_ item: TrackedItem) {
                 if state.scanningDestination { state.destination.record(item) }
@@ -376,7 +381,7 @@ public final class ArchiveAudit {
                 },onItem:{ item in
                     state.source.scanSeconds = sourcePrior + ProcessInfo.processInfo.systemUptime-scanStart
                     scanned(item)
-                })
+                }, collectSourceLineageIdentity: shadowLineage)
             state.source.scanSeconds = sourcePrior + ProcessInfo.processInfo.systemUptime-scanStart
             try mapping.verify()
             state.scanningDestination = true
@@ -430,6 +435,7 @@ public final class ArchiveAudit {
             state.total += paths.count
         }
         var findings: [AuditFinding] = []
+        var shadowMatches: [String: [TrackedItem]] = [:]
         var metadataMatches = 0, hashMatches = 0, cachedHashMatches = 0
         var hashCalculations = 0
         var candidates: [(MountedFolderMapping, TrackedItem, String, SeedFileFingerprint?)] = []
@@ -631,6 +637,12 @@ public final class ArchiveAudit {
                      targetObjectKind:dst?.kind,
                      directNameConflict:pair.ambiguous.contains(Self.fold(path)) && !ancestorsHaveAlias(path,pair.ambiguous))
                 findings.append(finding)
+                if shadowLineage, kind == .matching, let src, let dst,
+                   src.relativePath.utf8.elementsEqual(dst.relativePath.utf8),
+                   src.sourceLineageIdentity != nil, src.verificationFingerprint != nil,
+                   WindowsPathSafety.validRelativePath(path) {
+                    shadowMatches[mapping.rootID, default: []].append(src)
+                }
                 state.counts.record(finding,deletionCandidates:deletionCandidates)
                 if item.kind == "file" && kind != .matching { state.differences.append(finding) }
                 state.compared += 1; report()
@@ -762,6 +774,23 @@ public final class ArchiveAudit {
             }
             state.deletionCandidates = finalDeletionCandidates
             state.counts = .calculate(findings,deletionCandidates:finalDeletionCandidates)
+        }
+        if shadowLineage {
+            // The archive was read exactly once on each side. Only the
+            // mapping-level stamp is rechecked; no remote file is reread.
+            for pair in pairs {
+                guard let items = shadowMatches[pair.mapping.rootID], !items.isEmpty else { continue }
+                try check()
+                guard cancellation.awaitCommitWindow() else { throw SeedVerificationError.cancelled }
+                guard let sourceBinding = pair.sourceBinding, let targetBinding = pair.targetBinding,
+                      try DirectoryBinding.encoded(pair.mapping.source) == sourceBinding,
+                      try DirectoryBinding.encoded(pair.mapping.target) == targetBinding else {
+                    throw MountedCopyError.volumeChanged
+                }
+                try journal.observeUnqueuedAuditLineage(items, mapping: pair.mapping,
+                    sourceBinding: sourceBinding, targetBinding: targetBinding,
+                    cutoff: shadowCutoff, shouldContinue: { cancellation.mayCommit })
+            }
         }
         state.phase="Salvataggio operazioni nel database · completato"; report(force:true)
         return ArchiveAuditReport(mode:mode,started:state.started,ended:Date(),

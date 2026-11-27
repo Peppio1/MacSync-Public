@@ -6,6 +6,7 @@ on:
       - 'Sources/MacSyncCore/SourceNameLineage.swift'
       - 'Sources/MacSyncCore/LocalInventory.swift'
       - 'Sources/MacSyncCore/ChangeJournal.swift'
+      - 'Sources/MacSyncCore/ArchiveAudit.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageAuditTests.swift'
       - 'Tests/MacSyncCoreTests/OfflineNamePreparationTests.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageInventoryTests.swift'
