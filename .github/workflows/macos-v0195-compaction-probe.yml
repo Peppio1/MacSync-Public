@@ -14,4 +14,4 @@ jobs:
         with:
           persist-credentials: false
       - name: Verify offline exclusive lock, compact snapshot and database identity
-        run: swift test -Xswiftc -warnings-as-errors --filter 'DatabaseCompactionPolicyTests|OfflineDatabaseCompactionTests|StartupCompactionPolicyTests'
+        run: swift test -Xswiftc -warnings-as-errors --filter 'DatabaseCompactionPolicyTests|OfflineDatabaseCompactionTests|StartupCompactionPolicyTests|CompactionRecoveryTests'

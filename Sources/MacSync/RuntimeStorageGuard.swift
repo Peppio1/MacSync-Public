@@ -65,6 +65,9 @@ final class RuntimeStorageGuard {
             let lock = try ExclusiveArchiveLock(url:folder.appendingPathComponent("archive.lock"))
             let db = folder.appendingPathComponent("inventory.sqlite")
             let defaults = UserDefaults.standard
+            // Resolve interrupted compaction even if the weekly check is
+            // not due. Do this before reset or any database migration.
+            let recoveredCompaction = try CompactionRecovery.verifyPending(in: folder, lock: lock)
             let completedReset=try FactoryReset.completeIfScheduled(in: folder) {
                 if let identifier = Bundle.main.bundleIdentifier {
                     defaults.removePersistentDomain(forName: identifier)
@@ -118,7 +121,7 @@ final class RuntimeStorageGuard {
             // Never combine compaction with a restore, reset or update.
             let compactionKey = "MacSync.databaseCompactionLastCheck.v0195"
             let now = Date()
-            if StartupCompactionPolicy.shouldCheck(existing: exists,
+            if !recoveredCompaction, StartupCompactionPolicy.shouldCheck(existing: exists,
                 stableIdentity: previousIdentity != nil && previousIdentity == currentIdentity,
                 migrationNeeded: migrationNeeded, resetCompleted: completedReset,
                 updatePending: pendingUpdate != nil,

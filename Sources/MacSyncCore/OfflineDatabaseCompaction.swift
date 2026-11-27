@@ -30,6 +30,7 @@ public enum OfflineDatabaseCompaction {
     public static func runBeforeRuntime(in folder: URL, lock: ExclusiveArchiveLock) throws -> Result {
         defer { withExtendedLifetime(lock) {} }
         try lock.verifyHeld(at: folder.appendingPathComponent("archive.lock"))
+        _ = try CompactionRecovery.verifyPending(in: folder, lock: lock)
         let db = folder.appendingPathComponent("inventory.sqlite")
         let identity = try ArchiveDatabaseSafety.fileIdentity(db)
         let sample = DatabaseDiagnosticSnapshot.collect(databasePath: db.path)
@@ -41,7 +42,8 @@ public enum OfflineDatabaseCompaction {
             freePages: sample.freePages, walBytes: sample.walBytes, availableBytes: capacity.map { Int64($0) })
         guard decision == .eligible else { return .skipped(decision) }
         let digest = try ApplicationRollback.databaseDigest(db, scratch: folder)
-        let backupFolder = folder.appendingPathComponent("compaction-backup-" + UUID().uuidString, isDirectory: true)
+        let backupID = UUID()
+        let backupFolder = folder.appendingPathComponent("compaction-backup-" + backupID.uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: backupFolder, withIntermediateDirectories: false,
                                                 attributes: [.posixPermissions: 0o700])
         let backup = backupFolder.appendingPathComponent("inventory.sqlite")
@@ -54,10 +56,13 @@ public enum OfflineDatabaseCompaction {
             throw JournalError.database("Backup di compattazione non equivalente")
         }
         try lock.verifyHeld(at: folder.appendingPathComponent("archive.lock"))
+        try CompactionRecovery.begin(in: folder, lock: lock, identity: identity,
+                                     digest: digest, backupID: backupID)
         try compactSQLite(db)
-        guard try ArchiveDatabaseSafety.fileIdentity(db) == identity,
-              try ApplicationRollback.databaseDigest(db, scratch: folder) == digest else {
-            throw JournalError.database("Verifica successiva alla compattazione non riuscita; backup preservato")
+        // Keep the marker until both the original and recovery copy have
+        // been verified. A crash or error here is handled at next startup.
+        guard try CompactionRecovery.verifyPending(in: folder, lock: lock) else {
+            throw JournalError.database("Registro compattazione mancante")
         }
         let size = try db.resourceValues(forKeys: [.fileSizeKey]).fileSize
         guard let size else { throw JournalError.database("Dimensione finale database non disponibile") }
