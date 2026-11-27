@@ -263,12 +263,12 @@ public enum LocalScanner {
                 continue
             }
             do {
-                let kind = try record(file)
-                // DirectoryEnumerator already treats ordinary files as
-                // leaves. Calling skipDescendants() after a REGULAR FILE can
-                // inadvertently suppress the next nested directory on macOS.
-                // Only skip symlink descendants, which must never be followed.
-                if kind == "symlink" { enumerator.skipDescendants() }
+                // Foundation's URL directory enumerator does not traverse
+                // symbolic links. Calling skipDescendants() on a symlink
+                // leaf can suppress the NEXT real directory's children.
+                // Retain no-follow metadata and skip only actual excluded
+                // directories in the branch above.
+                _ = try record(file)
             } catch {
                 enumerationError = error
                 break

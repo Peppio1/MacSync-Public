@@ -6,6 +6,8 @@ on:
       - 'Sources/MacSyncBulkMetadata/**'
       - 'Sources/MacSyncCore/BulkDirectoryMetadata.swift'
       - 'Sources/MacSyncCore/BulkArchiveScanner.swift'
+      - 'Sources/MacSyncCore/LocalInventory.swift'
+      - 'scripts/ci/prepare-local-samba.sh'
       - 'Sources/MacSyncCore/BulkInventoryFallback.swift'
       - 'Tests/MacSyncCoreTests/BulkDirectoryMetadataTests.swift'
       - 'Tests/MacSyncCoreTests/BulkArchiveScannerTests.swift'
@@ -22,6 +24,7 @@ jobs:
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
       HOMEBREW_NO_INSTALL_CLEANUP: '1'
+      MACSYNC_CI_BULK_PRESEED: '1'
     steps:
       - uses: actions/checkout@v5
         with:
@@ -31,6 +34,9 @@ jobs:
       - name: Compare recursive Swift inventory with the original POSIX scanner
         run: |
           test -n "$MACSYNC_TEST_SMB_MOUNT"
+          test -n "$MACSYNC_TEST_BULK_PRESEEDED"
           swift test -Xswiftc -warnings-as-errors --filter BulkArchiveScannerTests
+      - name: Check existing local inventory regressions
+        run: swift test -Xswiftc -warnings-as-errors --filter LocalInventoryTests
       - if: always()
         run: bash scripts/ci/cleanup-local-samba.sh

@@ -61,6 +61,26 @@ printf '%s' 'old bytes!' > "$share/macsync-ci-dot-duplicates/$dot_different/chil
 printf '%s' 'new bytes!' > "$share/macsync-ci-dot-duplicates/Different-/child.jpg"
 printf '%s' 'old hidden' > "$share/macsync-ci-dot-duplicates/Hidden./child.jpg"
 printf '%s' 'new hidden' > "$share/macsync-ci-dot-duplicates/Hidden-/child.jpg"
+# Optional stable tree is created before the first SMB connection, avoiding
+# client-side negative directory caches and delayed write timestamps.
+if [ "${MACSYNC_CI_BULK_PRESEED:-0}" = "1" ]; then
+  python3 - "$share/macsync-ci-bulk-preseeded" <<'PY'
+import pathlib
+import sys
+root = pathlib.Path(sys.argv[1])
+root.mkdir(mode=0o770)
+for d in range(8):
+    sub = root / f"folder-{d}"
+    sub.mkdir(mode=0o770)
+    for i in range(12):
+        (sub / f"foto-{i}-é.jpg").write_bytes(bytes([i]))
+    (sub / ".DS_Store").write_bytes(b"x")
+managed = root / ".macsync-temp"
+managed.mkdir(mode=0o770)
+(managed / "ignored").write_bytes(b"x")
+PY
+  echo "MACSYNC_TEST_BULK_PRESEEDED=macsync-ci-bulk-preseeded" >> "$GITHUB_ENV"
+fi
 prefix="$(brew --prefix)"
 smbd="$prefix/sbin/samba-dot-org-smbd"
 test -x "$smbd"
