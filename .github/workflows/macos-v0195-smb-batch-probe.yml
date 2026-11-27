@@ -18,6 +18,9 @@ jobs:
           persist-credentials: false
       - run: brew install samba
       - run: bash scripts/ci/prepare-local-samba.sh
-      - run: swift test -Xswiftc -warnings-as-errors --filter SMBBatchMetadataProbeTests
+      - name: Compile and run native bulk identity capability probe
+        run: |
+          clang -std=c11 -D_DARWIN_C_SOURCE -Wall -Wextra -Werror -O2 scripts/ci/smb-batch/bulk_metadata_probe.c -o "$RUNNER_TEMP/macsync-bulk-probe"
+          MACSYNC_BULK_PROBE="$RUNNER_TEMP/macsync-bulk-probe" python3 scripts/ci/smb-batch/run_bulk_probe.py
       - if: always()
         run: bash scripts/ci/cleanup-local-samba.sh
