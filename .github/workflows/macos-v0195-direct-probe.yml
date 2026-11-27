@@ -1,0 +1,40 @@
+name: MacSync v0.19.5 direct SMB read-only probe
+on:
+  push:
+    branches: [probe-v0.19.5-smb-direct]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macsync-v0195-direct-probe-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  compare:
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install disposable Samba
+        run: brew install samba
+      - name: Mount genuine SMB filesystem
+        run: bash scripts/ci/prepare-local-samba.sh
+      - name: Prepare exact bundled Rclone version
+        run: bash Packaging/prepare-rclone.sh "$RUNNER_TEMP/macsync-rclone"
+      - name: Compare exact synthetic server names through Finder mount and direct SMB
+        run: python3 scripts/ci/compare-smb-direct-names.py "$RUNNER_TEMP/macsync-rclone/rclone"
+      - name: Upload synthetic comparison only
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macsync-v0195-direct-listing-comparison
+          path: ${{ runner.temp }}/macsync-smb-fixture/direct-listing-comparison.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Cleanup disposable share
+        if: always()
+        run: bash scripts/ci/cleanup-local-samba.sh
