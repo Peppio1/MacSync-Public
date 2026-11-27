@@ -2195,7 +2195,6 @@ public final class ChangeJournal {
             // not a newly serialized JSON string with different key order.
             let binding=try prepare("SELECT stamp FROM directory_bindings WHERE root_id=? AND role='source';")
             defer {sqlite3_finalize(binding)}
-            let deadline=ProcessInfo.processInfo.systemUptime+0.15
             for (id,r) in candidates {
                 guard shouldContinue(),ProcessInfo.processInfo.systemUptime<budget.deadline else {throw SeedVerificationError.cancelled}
                 sqlite3_reset(binding);sqlite3_clear_bindings(binding)
