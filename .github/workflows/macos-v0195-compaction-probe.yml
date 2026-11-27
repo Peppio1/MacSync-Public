@@ -1,0 +1,17 @@
+name: MacSync v0.19.5 compact snapshot probe
+on:
+  push:
+    branches: [probe-v0195-compaction]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Verify eligibility and compact snapshot without replacing database
+        run: swift test -Xswiftc -warnings-as-errors --filter DatabaseCompactionPolicyTests
