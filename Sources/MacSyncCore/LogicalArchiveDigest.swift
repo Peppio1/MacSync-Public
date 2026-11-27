@@ -78,10 +78,10 @@ enum LogicalArchiveDigest {
         }
     }
 
-    static func compute(_ url: URL) throws -> Data {
+    static func compute(_ url: URL, readOnly: Bool = true) throws -> Data {
         _ = try ArchiveDatabaseSafety.fileIdentity(url)
         var connection: OpaquePointer?
-        guard sqlite3_open_v2(url.path, &connection, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+        guard sqlite3_open_v2(url.path, &connection, readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
               let db = connection else {
             if let connection { sqlite3_close(connection) }
             throw failure()
@@ -90,7 +90,10 @@ enum LogicalArchiveDigest {
         sqlite3_busy_timeout(db, 5000)
         // One consistent read transaction. No writes, schema migrations or
         // changes to connection journal mode. The operational lock is external.
-        guard sqlite3_exec(db, "BEGIN;", nil, nil, nil) == SQLITE_OK else { throw failure() }
+        // A live WAL archive may need to recreate its shared-memory index.
+        // READWRITE without CREATE permits SQLite recovery; query_only
+        // prevents application-level writes during the logical comparison.
+        guard sqlite3_exec(db, "PRAGMA query_only=ON; BEGIN;", nil, nil, nil) == SQLITE_OK else { throw failure() }
         defer { _ = sqlite3_exec(db, "ROLLBACK;", nil, nil, nil) }
         var encoder = Encoder()
         encoder.bytes(Data("MacSync logical archive digest v1".utf8))

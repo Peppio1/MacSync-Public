@@ -61,6 +61,14 @@ public enum ApplicationRollback {
         return try LogicalArchiveDigest.compute(url)
     }
 
+    /// The caller holds the exclusive archive lock. Unlike a standalone
+    /// backup, the operational WAL database may need SQLite recovery even
+    /// after a clean close removed WAL/SHM. No CREATE or SQL data mutations.
+    static func operationalDatabaseDigest(_ url: URL) throws -> Data {
+        try ArchiveDatabaseSafety.verify(url, readOnly: false)
+        return try LogicalArchiveDigest.compute(url, readOnly: false)
+    }
+
     /// Prepare and verify a copy on the target's own filesystem, then atomically
     /// exchange directories. The failed application stays intact in the staging
     /// directory; the original snapshot is also retained. No destructive fallback.

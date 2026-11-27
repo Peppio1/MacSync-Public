@@ -41,7 +41,7 @@ public enum OfflineDatabaseCompaction {
         let decision = DatabaseCompactionPolicy.evaluate(pageSize: sample.pageSize, pageCount: sample.pageCount,
             freePages: sample.freePages, walBytes: sample.walBytes, availableBytes: capacity.map { Int64($0) })
         guard decision == .eligible else { return .skipped(decision) }
-        let digest = try ApplicationRollback.databaseDigest(db, scratch: folder)
+        let digest = try ApplicationRollback.operationalDatabaseDigest(db)
         let backupID = UUID()
         let backupFolder = folder.appendingPathComponent("compaction-backup-" + backupID.uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: backupFolder, withIntermediateDirectories: false,
@@ -51,7 +51,7 @@ public enum OfflineDatabaseCompaction {
         // back a database by replacing it with an older snapshot.
         try ArchiveDatabaseSafety.backup(db, to: backup)
         guard try ApplicationRollback.databaseDigest(backup, scratch: folder) == digest,
-              try ApplicationRollback.databaseDigest(db, scratch: folder) == digest,
+              try ApplicationRollback.operationalDatabaseDigest(db) == digest,
               try ArchiveDatabaseSafety.fileIdentity(db) == identity else {
             throw JournalError.database("Backup di compattazione non equivalente")
         }

@@ -112,12 +112,12 @@ public enum CompactionRecovery {
               try ArchiveDatabaseSafety.fileIdentity(db) == marker.identity else { throw failure() }
         // SQLite may need to recover a committed WAL on restart.
         try ArchiveDatabaseSafety.verify(db)
-        guard try ApplicationRollback.databaseDigest(db, scratch: folder) == marker.digest,
+        guard try ApplicationRollback.operationalDatabaseDigest(db) == marker.digest,
               try ApplicationRollback.databaseDigest(backup, scratch: folder) == marker.digest else { throw failure() }
         try lock.verifyHeld(at: folder.appendingPathComponent("archive.lock"))
         try checkpointForRecovery(db)
         guard try ArchiveDatabaseSafety.fileIdentity(db) == marker.identity,
-              try ApplicationRollback.databaseDigest(db, scratch: folder) == marker.digest else { throw failure() }
+              try ApplicationRollback.operationalDatabaseDigest(db) == marker.digest else { throw failure() }
         try flush(db, directory: false)
         // Never remove SQLite sidecars manually.
         try FileManager.default.removeItem(at: url)

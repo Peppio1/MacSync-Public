@@ -31,18 +31,18 @@ final class CompactionRecoveryTests: XCTestCase {
         try ArchiveDatabaseSafety.backup(db, to: backup)
         try CompactionRecovery.begin(in: folder, lock: lock,
             identity: ArchiveDatabaseSafety.fileIdentity(db),
-            digest: ApplicationRollback.databaseDigest(db, scratch: folder), backupID: id)
+            digest: ApplicationRollback.operationalDatabaseDigest(db), backupID: id)
         try body(folder, db, backup, lock)
     }
 
     func testIntentBeforeMutationOrAfterVacuumRecoversWithoutRestore() throws {
         for vacuum in [false, true] {
             try fixture { folder, db, backup, lock in
-                let digest = try ApplicationRollback.databaseDigest(db, scratch: folder)
+                let digest = try ApplicationRollback.operationalDatabaseDigest(db)
                 if vacuum { try execute(db, "VACUUM;") }
                 XCTAssertTrue(try CompactionRecovery.verifyPending(in: folder, lock: lock))
                 XCTAssertFalse(try CompactionRecovery.verifyPending(in: folder, lock: lock))
-                XCTAssertEqual(try ApplicationRollback.databaseDigest(db, scratch: folder), digest)
+                XCTAssertEqual(try ApplicationRollback.operationalDatabaseDigest(db), digest)
                 XCTAssertEqual(try ApplicationRollback.databaseDigest(backup, scratch: folder), digest)
             }
         }
@@ -51,18 +51,20 @@ final class CompactionRecoveryTests: XCTestCase {
     func testUnexpectedDataChangePreservesIntentAndBothDatabases() throws {
         try fixture { folder, db, backup, lock in
             try execute(db, "INSERT INTO data(value) VALUES('unexpected');")
-            let changed = try ApplicationRollback.databaseDigest(db, scratch: folder)
+            let changed = try ApplicationRollback.operationalDatabaseDigest(db)
             XCTAssertThrowsError(try CompactionRecovery.verifyPending(in: folder, lock: lock))
             XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("compaction-pending.json").path))
-            XCTAssertEqual(try ApplicationRollback.databaseDigest(db, scratch: folder), changed)
+            XCTAssertEqual(try ApplicationRollback.operationalDatabaseDigest(db), changed)
             XCTAssertNotEqual(try ApplicationRollback.databaseDigest(backup, scratch: folder), changed)
         }
     }
 
     func testKilledSQLiteWriterWithUncommittedWALRecoversOriginal() throws {
         try fixture { folder, db, backup, lock in
+            let digest = try ApplicationRollback.databaseDigest(backup, scratch: folder)
             try execute(db, "PRAGMA journal_mode=WAL;")
-            let digest = try ApplicationRollback.databaseDigest(db, scratch: folder)
+            print("WAL_RECOVERY phase=closed_wal_baseline")
+            XCTAssertEqual(try ApplicationRollback.operationalDatabaseDigest(db), digest)
             let output = folder.appendingPathComponent("child-output.txt")
             XCTAssertTrue(FileManager.default.createFile(atPath: output.path, contents: nil))
             let writer = try FileHandle(forWritingTo: output)
@@ -105,8 +107,11 @@ final class CompactionRecoveryTests: XCTestCase {
             XCTAssertEqual(Darwin.kill(process.processIdentifier, SIGKILL), 0)
             process.waitUntilExit()
             XCTAssertEqual(process.terminationReason, .uncaughtSignal)
+            XCTAssertEqual(process.terminationStatus, SIGKILL)
+            print("WAL_RECOVERY phase=after_sigkill")
             XCTAssertTrue(try CompactionRecovery.verifyPending(in: folder, lock: lock))
-            XCTAssertEqual(try ApplicationRollback.databaseDigest(db, scratch: folder), digest)
+            print("WAL_RECOVERY phase=verified")
+            XCTAssertEqual(try ApplicationRollback.operationalDatabaseDigest(db), digest)
             XCTAssertEqual(try ApplicationRollback.databaseDigest(backup, scratch: folder), digest)
         }
     }

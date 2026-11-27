@@ -27,14 +27,14 @@ final class OfflineDatabaseCompactionTests: XCTestCase {
     func testActiveArchiveLockPreventsMaintenanceAndSmallDatabaseSkips() throws {
         try fixture { folder, db in
             try execute(db, "CREATE TABLE data(id INTEGER PRIMARY KEY, payload BLOB); INSERT INTO data VALUES(1,x'01');")
-            let digest = try ApplicationRollback.databaseDigest(db, scratch: folder)
+            let digest = try ApplicationRollback.operationalDatabaseDigest(db)
             do {
                 let lock = try ExclusiveArchiveLock(url: folder.appendingPathComponent("archive.lock"))
                 defer { withExtendedLifetime(lock) {} }
                 XCTAssertThrowsError(try OfflineDatabaseCompaction.run(in: folder))
             }
             XCTAssertEqual(try OfflineDatabaseCompaction.run(in: folder), .skipped(.insufficientReclaim))
-            XCTAssertEqual(try ApplicationRollback.databaseDigest(db, scratch: folder), digest)
+            XCTAssertEqual(try ApplicationRollback.operationalDatabaseDigest(db), digest)
             XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: folder.path)
                 .contains(where: { $0.hasPrefix("compaction-backup-") }))
         }
@@ -52,21 +52,21 @@ final class OfflineDatabaseCompactionTests: XCTestCase {
                 DELETE FROM data WHERE id=1;
                 """)
             let identity = try ArchiveDatabaseSafety.fileIdentity(db)
-            let digest = try ApplicationRollback.databaseDigest(db, scratch: folder)
+            let digest = try ApplicationRollback.operationalDatabaseDigest(db)
             let result = try OfflineDatabaseCompaction.run(in: folder)
             guard case let .compacted(before, after, backup) = result else {
                 return XCTFail("Expected eligible synthetic database to compact: " + String(describing: result))
             }
             XCTAssertGreaterThan(before - after, 64 * 1024 * 1024)
             XCTAssertEqual(try ArchiveDatabaseSafety.fileIdentity(db), identity)
-            XCTAssertEqual(try ApplicationRollback.databaseDigest(db, scratch: folder), digest)
+            XCTAssertEqual(try ApplicationRollback.operationalDatabaseDigest(db), digest)
             XCTAssertEqual(try ApplicationRollback.databaseDigest(backup, scratch: folder), digest)
             XCTAssertEqual(try OfflineDatabaseCompaction.run(in: folder), .skipped(.insufficientReclaim))
             print("OFFLINE_COMPACTION before=\(before) after=\(after)")
             try execute(db, "INSERT INTO data(payload) VALUES(x'03');")
             // Compare against a copy with the same post-maintenance write.
             try execute(backup, "INSERT INTO data(payload) VALUES(x'03');")
-            XCTAssertEqual(try ApplicationRollback.databaseDigest(db, scratch: folder),
+            XCTAssertEqual(try ApplicationRollback.operationalDatabaseDigest(db),
                            try ApplicationRollback.databaseDigest(backup, scratch: folder))
         }
     }
