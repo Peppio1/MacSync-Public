@@ -298,6 +298,9 @@ public final class LocalInventory {
     private var db: OpaquePointer?
     // Shadow observations only. No queue or mirror decision may depend on them.
     var experimentalSourceNameLineage = false
+    // Test-only explicit offline preparation: not automatic inference of
+    // destination absence, not usable for normal FSEvents reconciliation.
+    var experimentalOfflineNamePreparation = false
 
     public init(path: String) throws {
         var handle: OpaquePointer?
@@ -585,6 +588,29 @@ public final class LocalInventory {
                 guard check == SQLITE_ROW || check == SQLITE_DONE else { throw failure() }
                 pristine = check == SQLITE_DONE
             }
+            if experimentalOfflineNamePreparation {
+                guard origin == .initialInventory, fullScan, eventID == nil,
+                      try lastEventID(rootID: rootID) == nil else {
+                    throw JournalError.database("Offline preparation requires a full local bootstrap scan")
+                }
+                // No existing destination association or queue history for
+                // this root. This is intentionally a test-only capability.
+                // Even this guard does not establish remote absence after a
+                // reset. An explicit offline workflow and subsequent audit
+                // would be required before any operational activation.
+                let history = try prepare("""
+                    SELECT 1 FROM directory_bindings WHERE root_id=?1 AND role='target'
+                    UNION ALL SELECT 1 FROM change_queue WHERE root_id=?1 LIMIT 1;
+                    """)
+                defer { sqlite3_finalize(history) }
+                try bind(rootID, at: 1, statement: history)
+                let rc = sqlite3_step(history)
+                guard rc == SQLITE_DONE else {
+                    if rc != SQLITE_ROW { throw failure() }
+                    throw JournalError.database("Offline preparation refused for an existing destination or queue history")
+                }
+                pristine = true
+            }
             // A truly new archive has no known destination baseline. Store
             // its source inventory, but do NOT interpret every existing file
             // as a pending upload. A subsequent explicit QUICK/INTELLIGENT audit
@@ -663,6 +689,10 @@ public final class LocalInventory {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 try remove(rootID: rootID, relativePath: path)
                 if FileExclusionPolicy.excludes(path,enabled:ignoreDSStore) { continue }
+                // Explicit offline preparation changes only the local baseline.
+                // No remote copy or delete is scheduled; after transfer the
+                // ordinary audit compares the complete seeded archive.
+                if experimentalOfflineNamePreparation { continue }
                 let jobID=try enqueue(rootID: rootID, relativePath: path, kind: .delete, origin: .sourceMonitor)
                 deletes += 1
                 // Only automatic rectifications of incompatible components
