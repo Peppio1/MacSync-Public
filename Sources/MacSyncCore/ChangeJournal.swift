@@ -98,6 +98,7 @@ public final class ChangeJournal {
             // Additive history: old releases ignore it, pending plans keep
             // their schema. No receipt is an authorization for remote mutation.
             try execute(NameRectificationReceipt.schemaSQL)
+            try execute(QueueCompletionLedger.schemaSQL)
             // Existing profiles retain their approved plan, next_move and
             // exact fingerprints. Adding a column never rewrites the plan.
             try SQLiteConnectionSetup.addColumnIfMissing(connection,table:"name_rectification_batch",column:"progress",

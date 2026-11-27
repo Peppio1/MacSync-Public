@@ -1,0 +1,17 @@
+name: MacSync v0.19.5 queue retention completion ledger
+on:
+  push:
+    branches: [probe-v0195-queue-retention]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Verify completion timestamps, legacy rows and atomic rollback
+        run: swift test -Xswiftc -warnings-as-errors --filter QueueCompletionLedgerTests
