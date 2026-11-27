@@ -16,7 +16,7 @@ struct ArchivePathBlock: View {
     }
     private func line(_ label:String,_ value:String,emphasis:Bool)->some View {
         HStack(alignment:.top,spacing:8) {
-            Text(label+":").font(.caption).foregroundStyle(.secondary).frame(width:116,alignment:.leading)
+            Text(label+":").font(.caption).foregroundStyle(.secondary).frame(width:92,alignment:.leading)
             Text(value).font(emphasis ? .subheadline.weight(.semibold) : .caption)
                 .textSelection(.enabled).fixedSize(horizontal:false,vertical:true)
                 .frame(maxWidth:.infinity,alignment:.leading)
