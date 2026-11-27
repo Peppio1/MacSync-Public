@@ -64,7 +64,7 @@ public struct DatabaseDiagnosticSnapshot: Codable, Equatable, Sendable {
                 pageCount=scalar("PRAGMA page_count;")
                 freePages=scalar("PRAGMA freelist_count;")
                 // Fixed known schema names; no arbitrary table or user data.
-                let tables=["change_queue","file_inventory","name_rectification_receipts",
+                let tables=["change_queue","queue_completion_ledger","file_inventory","name_rectification_receipts",
                     "name_rectification_monitor_links","publication_intents","transfer_recovery",
                     "retired_delete_evidence","retired_publication_evidence","blocked_name_jobs",
                     "sync_activity","sync_cycles_v1","sync_cycle_events_v1","mirror_recovery"]

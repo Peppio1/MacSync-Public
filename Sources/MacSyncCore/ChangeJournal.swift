@@ -98,6 +98,7 @@ public final class ChangeJournal {
             // Additive history: old releases ignore it, pending plans keep
             // their schema. No receipt is an authorization for remote mutation.
             try execute(NameRectificationReceipt.schemaSQL)
+            try execute(QueueCompletionLedger.schemaSQL)
             // Existing profiles retain their approved plan, next_move and
             // exact fingerprints. Adding a column never rewrites the plan.
             try SQLiteConnectionSetup.addColumnIfMissing(connection,table:"name_rectification_batch",column:"progress",
@@ -2030,6 +2031,195 @@ public final class ChangeJournal {
               sqlite3_step(statement) == SQLITE_DONE else {
             throw databaseFailure()
         }
+    }
+
+    /// One conservative retention batch, called only by a drained operational
+    /// owner. Never infer completion from enqueue date. Retain the newest
+    /// event per exact path (including when newer work is pending), all
+    /// recovery/rectification evidence, and unknown legacy completion dates.
+    /// No filesystem work, VACUUM, checkpoint or authorization changes.
+    public func pruneCompletedQueueBatch(now:Date=Date(),limit:Int=250,
+                                         shouldContinue:()->Bool={true}) throws -> Int {
+        try pruneCompletedQueuePage(now:now,limit:limit,shouldContinue:shouldContinue).removed
+    }
+
+    public func pruneCompletedQueuePage(afterID:Int64=0,now:Date=Date(),limit:Int=250,
+                                        shouldContinue:()->Bool={true}) throws -> RetentionPage {
+        guard shouldContinue() else { return .init(removed:0,examined:0,nextAfterID:afterID,finished:false,held:true) }
+        let cutoff=now.addingTimeInterval(-30*86400).timeIntervalSince1970
+        guard cutoff.isFinite else { throw JournalError.database("Invalid retention date") }
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            if try queueRebuildToken() != nil || hasPendingNameRectification() || mirrorBlockReason() != nil {
+                try execute("COMMIT;")
+                return .init(removed:0,examined:0,nextAfterID:afterID,finished:false,held:true)
+            }
+            let count=max(1,min(250,limit))
+            let scan=try prepare("SELECT job_id FROM queue_completion_ledger WHERE job_id>? ORDER BY job_id LIMIT ?;")
+            defer {sqlite3_finalize(scan)}
+            guard sqlite3_bind_int64(scan,1,afterID)==SQLITE_OK,
+                  sqlite3_bind_int(scan,2,Int32(count))==SQLITE_OK else {throw databaseFailure()}
+            var last=afterID,examined=0
+            while true {
+                let rc=sqlite3_step(scan)
+                if rc==SQLITE_DONE {break}
+                guard rc==SQLITE_ROW,shouldContinue() else {
+                    if !shouldContinue() {throw SeedVerificationError.cancelled}
+                    throw databaseFailure()
+                }
+                last=sqlite3_column_int64(scan,0);examined+=1
+            }
+            guard examined>0 else {
+                try execute("COMMIT;")
+                return .init(removed:0,examined:0,nextAfterID:afterID,finished:true,held:false)
+            }
+            // Bound VM work even if many expired rows are protected. Never
+            // retry inside a maintenance batch after an interrupted statement.
+            let stmt=try prepare("""
+                DELETE FROM change_queue WHERE id IN (
+                    SELECT q.id FROM queue_completion_ledger t
+                    CROSS JOIN change_queue q ON q.id=t.job_id
+                    WHERE t.job_id>?3 AND t.job_id<=?4 AND t.completed_at<=?1 AND q.completed=1
+                      AND EXISTS(SELECT 1 FROM change_queue n WHERE n.root_id=q.root_id
+                        AND n.relative_path=q.relative_path AND n.id>q.id AND n.completed=1)
+                      AND NOT EXISTS(SELECT 1 FROM change_queue p WHERE p.root_id=q.root_id
+                        AND p.relative_path=q.relative_path AND p.completed=0)
+                      AND NOT EXISTS(SELECT 1 FROM retired_delete_evidence e WHERE e.job_id=q.id)
+                      AND NOT EXISTS(SELECT 1 FROM retired_publication_evidence e WHERE e.job_id=q.id)
+                      AND NOT EXISTS(SELECT 1 FROM publication_intents e WHERE e.job_id=q.id OR (e.root_id=q.root_id AND e.relative_path=q.relative_path))
+                      AND NOT EXISTS(SELECT 1 FROM transfer_recovery e WHERE e.job_id=q.id OR (e.root_id=q.root_id AND e.relative_path=q.relative_path))
+                      AND NOT EXISTS(SELECT 1 FROM blocked_name_jobs e WHERE e.job_id=q.id)
+                      AND NOT EXISTS(SELECT 1 FROM upload_retry e WHERE e.job_id=q.id OR (e.scope='root' AND e.root_id=q.root_id))
+                      AND NOT EXISTS(SELECT 1 FROM mirror_attempts e WHERE e.job_id=q.id)
+                      AND NOT EXISTS(SELECT 1 FROM name_rectification_monitor_links e WHERE e.job_id=q.id)
+                    ORDER BY t.job_id LIMIT ?2
+                ) AND completed=1;
+                """)
+            defer {sqlite3_finalize(stmt)}
+            guard let connection else {throw databaseFailure()}
+            final class Budget {
+                let deadline=ProcessInfo.processInfo.systemUptime+0.15
+            }
+            let budget=Budget()
+            let context=Unmanaged.passUnretained(budget).toOpaque()
+            sqlite3_progress_handler(connection,1000,{ raw in
+                guard let raw else {return 1}
+                let budget=Unmanaged<Budget>.fromOpaque(raw).takeUnretainedValue()
+                return ProcessInfo.processInfo.systemUptime>=budget.deadline ? 1:0
+            },context)
+            defer {sqlite3_progress_handler(connection,0,nil,nil);withExtendedLifetime(budget){}}
+            guard sqlite3_bind_double(stmt,1,cutoff)==SQLITE_OK,
+                  sqlite3_bind_int(stmt,2,Int32(count))==SQLITE_OK,
+                  sqlite3_bind_int64(stmt,3,afterID)==SQLITE_OK,
+                  sqlite3_bind_int64(stmt,4,last)==SQLITE_OK,
+                  sqlite3_step(stmt)==SQLITE_DONE else {throw databaseFailure()}
+            let removed=Int(sqlite3_changes(connection))
+            guard shouldContinue() else {throw SeedVerificationError.cancelled}
+            try execute("COMMIT;")
+            return .init(removed:removed,examined:examined,nextAfterID:last,finished:examined<count,held:false)
+        } catch {try? execute("ROLLBACK;");throw error}
+    }
+
+    /// Historical receipts are diagnostic associations, not remote deletion
+    /// evidence. Retain the newest receipt for each old name so pruning never
+    /// resurrects an older candidate. Only prune older unlinked records after
+    /// the matching source has been scanned again and has no pending work.
+    public func pruneRectificationReceiptPage(afterID:Int64=0,now:Date=Date(),limit:Int=100,
+                                               shouldContinue:()->Bool={true}) throws -> RetentionPage {
+        guard shouldContinue() else {return .init(removed:0,examined:0,nextAfterID:afterID,finished:false,held:true)}
+        let cutoff=now.addingTimeInterval(-90*86400)
+        guard cutoff.timeIntervalSince1970.isFinite else {throw JournalError.database("Invalid retention date")}
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            guard shouldContinue() else {throw SeedVerificationError.cancelled}
+            if try queueRebuildToken() != nil || hasPendingNameRectification() || mirrorBlockReason() != nil {
+                try execute("COMMIT;")
+                return .init(removed:0,examined:0,nextAfterID:afterID,finished:false,held:true)
+            }
+            guard let connection else {throw databaseFailure()}
+            final class ReceiptBudget {
+                let deadline=ProcessInfo.processInfo.systemUptime+0.15
+            }
+            let budget=ReceiptBudget()
+            let context=Unmanaged.passUnretained(budget).toOpaque()
+            sqlite3_progress_handler(connection,1000,{ raw in
+                guard let raw else {return 1}
+                let budget=Unmanaged<ReceiptBudget>.fromOpaque(raw).takeUnretainedValue()
+                return ProcessInfo.processInfo.systemUptime>=budget.deadline ? 1:0
+            },context)
+            defer {sqlite3_progress_handler(connection,0,nil,nil);withExtendedLifetime(budget){}}
+            let count=max(1,min(100,limit))
+            let scan=try prepare("""
+                SELECT id,root_id,old_path,new_path,receipt
+                FROM name_rectification_receipts WHERE id>? ORDER BY id LIMIT ?;
+                """)
+            defer {sqlite3_finalize(scan)}
+            guard sqlite3_bind_int64(scan,1,afterID)==SQLITE_OK,
+                  sqlite3_bind_int(scan,2,Int32(count))==SQLITE_OK else {throw databaseFailure()}
+            var candidates:[(Int64,NameRectificationReceipt)]=[]
+            var last=afterID,examined=0
+            while true {
+                let rc=sqlite3_step(scan)
+                if rc==SQLITE_DONE {break}
+                guard rc==SQLITE_ROW else {throw databaseFailure()}
+                guard shouldContinue(),ProcessInfo.processInfo.systemUptime<budget.deadline else {throw SeedVerificationError.cancelled}
+                last=sqlite3_column_int64(scan,0);examined+=1
+                // Unknown or malformed evidence is preserved, not repaired.
+                guard let r=try? JSONDecoder().decode(NameRectificationReceipt.self,from:Data(columnText(scan,at:4).utf8)),
+                      r.rootID==columnText(scan,at:1),
+                      r.oldPath.utf8.elementsEqual(columnText(scan,at:2).utf8),
+                      r.newPath.utf8.elementsEqual(columnText(scan,at:3).utf8),
+                      r.completedAt<=cutoff else {continue}
+                candidates.append((last,r))
+            }
+            let remove=try prepare("""
+                DELETE FROM name_rectification_receipts
+                WHERE id=?1 AND root_id=?2 AND old_path=?3
+                  AND EXISTS(SELECT 1 FROM name_rectification_receipts n
+                    WHERE n.root_id=?2 AND n.old_path=?3 AND n.id>?1)
+                  AND EXISTS(SELECT 1 FROM watched_roots w
+                    WHERE w.root_id=?2 AND w.absolute_path=?4 AND w.last_scan_at>?5)
+                  AND EXISTS(SELECT 1 FROM directory_bindings b
+                    WHERE b.root_id=?2 AND b.role='source' AND b.stamp=?6)
+                  AND NOT EXISTS(SELECT 1 FROM name_rectification_monitor_links l WHERE l.receipt_id=?1)
+                  AND NOT EXISTS(SELECT 1 FROM change_queue q WHERE q.root_id=?2 AND q.completed=0)
+                  AND NOT EXISTS(SELECT 1 FROM publication_intents p WHERE p.root_id=?2)
+                  AND NOT EXISTS(SELECT 1 FROM transfer_recovery t WHERE t.root_id=?2)
+                  AND NOT EXISTS(SELECT 1 FROM retired_delete_evidence e JOIN change_queue q ON q.id=e.job_id WHERE q.root_id=?2)
+                  AND NOT EXISTS(SELECT 1 FROM retired_publication_evidence e JOIN change_queue q ON q.id=e.job_id WHERE q.root_id=?2);
+                """)
+            defer {sqlite3_finalize(remove)}
+            var removed=0
+            // Match the exact persisted binding encoding through decoding,
+            // not a newly serialized JSON string with different key order.
+            let binding=try prepare("SELECT stamp FROM directory_bindings WHERE root_id=? AND role='source';")
+            defer {sqlite3_finalize(binding)}
+            for (id,r) in candidates {
+                guard shouldContinue(),ProcessInfo.processInfo.systemUptime<budget.deadline else {throw SeedVerificationError.cancelled}
+                sqlite3_reset(binding);sqlite3_clear_bindings(binding)
+                try bind(r.rootID,at:1,in:binding)
+                let rc=sqlite3_step(binding)
+                if rc==SQLITE_DONE {continue}
+                guard rc==SQLITE_ROW else {throw databaseFailure()}
+                let stamp=columnText(binding,at:0)
+                guard let saved=try? JSONDecoder().decode(DirectoryBinding.self,from:Data(stamp.utf8)),
+                      saved==r.sourceBinding else {continue}
+                sqlite3_reset(binding)
+                sqlite3_reset(remove);sqlite3_clear_bindings(remove)
+                guard sqlite3_bind_int64(remove,1,id)==SQLITE_OK else {throw databaseFailure()}
+                try bind(r.rootID,at:2,in:remove)
+                try bind(r.oldPath,at:3,in:remove)
+                try bind(r.sourceRoot,at:4,in:remove)
+                guard sqlite3_bind_double(remove,5,r.completedAt.timeIntervalSince1970)==SQLITE_OK else {throw databaseFailure()}
+                try bind(stamp,at:6,in:remove)
+                guard sqlite3_step(remove)==SQLITE_DONE else {throw databaseFailure()}
+                removed+=Int(sqlite3_changes(connection))
+            }
+            guard shouldContinue() else {throw SeedVerificationError.cancelled}
+            try execute("COMMIT;")
+            return .init(removed:removed,examined:examined,nextAfterID:last,finished:examined<count,held:false)
+        } catch {try? execute("ROLLBACK;");throw error}
     }
 
     private func execute(_ sql: String) throws {

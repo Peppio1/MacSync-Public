@@ -1,0 +1,21 @@
+name: MacSync v0.19.5 retention core
+on:
+  push:
+    branches: [develop-v0.19.5]
+    paths:
+      - 'Sources/MacSyncCore/QueueCompletionLedger.swift'
+      - 'Tests/MacSyncCoreTests/QueueCompletionLedgerTests.swift'
+      - '.github/workflows/macos-v0195-retention.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Retention safety tests, representative benchmark already verified
+        run: swift test -Xswiftc -warnings-as-errors --filter QueueCompletionLedgerTests

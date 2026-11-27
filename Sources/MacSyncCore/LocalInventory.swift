@@ -335,6 +335,7 @@ public final class LocalInventory {
                 sql:"ALTER TABLE change_queue ADD COLUMN origin TEXT NOT NULL DEFAULT 'legacy_unknown';")
             try execute("CREATE TABLE IF NOT EXISTS directory_bindings(root_id TEXT NOT NULL, role TEXT NOT NULL, stamp TEXT NOT NULL, PRIMARY KEY(root_id,role));")
             try execute(NameRectificationReceipt.schemaSQL)
+            try execute(QueueCompletionLedger.schemaSQL)
             // Compatible migration: old rows learn the new stamp on their next scan.
             try SQLiteConnectionSetup.addColumnIfMissing(db,table:"file_inventory",column:"change_stamp",
                 sql:"ALTER TABLE file_inventory ADD COLUMN change_stamp TEXT;")
