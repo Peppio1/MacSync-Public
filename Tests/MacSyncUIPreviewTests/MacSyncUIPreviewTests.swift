@@ -182,13 +182,13 @@ final class MacSyncUIPreviewTests: XCTestCase {
         try capture.run()
         capture.waitUntilExit()
         XCTAssertEqual(capture.terminationStatus,0,"Native window capture failed")
-        let bitmap=try XCTUnwrap(NSBitmapImageRep(contentsOf:path))
+        let bitmap=try XCTUnwrap(NSBitmapImageRep(data:Data(contentsOf:path)))
         XCTAssertGreaterThan(bitmap.pixelsWide,100)
         XCTAssertGreaterThan(bitmap.pixelsHigh,100)
         var bright=0, samples=0
         for y in stride(from:0,to:bitmap.pixelsHigh,by:8) {
             for x in stride(from:0,to:bitmap.pixelsWide,by:8) {
-                guard let c=bitmap.colorAt(x:x,y:y)?.usingColorSpace(.deviceRGB) else { continue }
+                guard let c=bitmap.colorAt(x:x,y:y)?.usingColorSpace(NSColorSpace.deviceRGB) else { continue }
                 samples+=1
                 if c.alphaComponent > 0.9 && (c.redComponent+c.greenComponent+c.blueComponent)/3 > 0.8 { bright+=1 }
             }
