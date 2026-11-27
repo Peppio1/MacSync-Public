@@ -1,0 +1,55 @@
+    func testComparativeLocalResidualDeletes() throws {
+        let f=try fixture(fileCount:0)
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        guard ["apfs","hfs"].contains(f.mapping.targetVolume.fileSystem.lowercased()) else {
+            throw XCTSkip("Native macOS fixture required")
+        }
+        let fm=FileManager.default
+        let source2=f.base.appendingPathComponent("source2")
+        let target2=f.base.appendingPathComponent("destination2")
+        for root in [source2,target2] { try fm.createDirectory(at:root,withIntermediateDirectories:true) }
+        let map2=try MountedFolderMapping(rootID:"second",source:source2,target:target2)
+        let maps=[f.mapping,map2]
+        let inventory=try LocalInventory(path:f.database)
+        for map in maps {
+            for root in [map.source,map.target] {
+                let corrected=root.appendingPathComponent("Album-")
+                try fm.createDirectory(at:corrected,withIntermediateDirectories:true)
+                try Data("keep".utf8).write(to:corrected.appendingPathComponent("photo.jpg"))
+            }
+            let alias=map.target.appendingPathComponent("Album")
+            try fm.createDirectory(at:alias,withIntermediateDirectories:true)
+            try Data("old".utf8).write(to:alias.appendingPathComponent("photo.jpg"))
+            _=try inventory.reconcile(rootID:map.rootID,root:map.source)
+        }
+        while true {
+            let page=try f.journal.pendingUploads(limit:100)
+            guard !page.isEmpty else { break }
+            for job in page { try f.journal.markCompleted(id:job.id) }
+        }
+        try f.journal.verifyDirectoryBindings(maps,allowNewTarget:true)
+        for map in maps {
+            for path in ["Album./photo.jpg","Album.","Album/photo.jpg","Album"] {
+                _=try f.journal.enqueue(rootID:map.rootID,relativePath:path,kind:.delete,origin:.sourceMonitor)
+            }
+        }
+        // Unrelated incompatible literal must not be completed by the final pass.
+        _=try f.journal.enqueue(rootID:"second",relativePath:"Unrelated.",kind:.delete,origin:.sourceMonitor)
+        let consent=try MirrorAuthorization.capture(journal:f.journal,mappings:maps,includePendingDeletes:true)
+        let jobs=try f.journal.pending().filter { $0.relativePath.hasPrefix("Album.") }
+        XCTAssertEqual(try f.journal.acknowledgeAbsentAuditDeletes(jobs,mappings:maps,shouldContinue:{true}),0)
+        let result=try persistentWorker(f,authorization:consent,mappings:maps).runCycle(pageSize:1)
+        let pending=try f.journal.pending().map { $0.rootID + ":" + $0.relativePath }.sorted()
+        let aliases=maps.map { fm.fileExists(atPath:$0.target.appendingPathComponent("Album").path) }
+        let preserved=maps.map { (try? Data(contentsOf:$0.target.appendingPathComponent("Album-/photo.jpg"))) == Data("keep".utf8) }
+        print("MACSYNC_COMPARE_OBSERVED local removed=\(result.removed) dirs=\(result.directories) deferred=\(result.deferred) pending=\(pending) aliases=\(aliases) preserved=\(preserved)")
+        // Identical assertions on both revisions. Only expected final-state
+        // discrepancies count as reproduction, never setup or compile errors.
+        XCTAssertEqual(result.removed,2)
+        XCTAssertEqual(result.directories,2)
+        XCTAssertEqual(aliases,[false,false])
+        XCTAssertEqual(preserved,[true,true])
+        XCTAssertEqual(result.deferred,1,"MACSYNC_COMPARE_EXPECTATION residual deferred count")
+        XCTAssertEqual(pending,["second:Unrelated."],"MACSYNC_COMPARE_EXPECTATION residual queue")
+    }
+

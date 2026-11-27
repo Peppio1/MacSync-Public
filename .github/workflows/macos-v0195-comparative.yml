@@ -1,0 +1,72 @@
+name: MacSync v0.19.4 vs v0.19.5 targeted regression comparison
+on:
+  push:
+    branches: [compare-v0.19.4-v0.19.5]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compare:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: local
+            revision: baseline
+            sha: 175c9f150fa6330a847796c551b0ab3babd304da
+            runner: macos-15-intel
+          - suite: local
+            revision: candidate
+            sha: 07646c6a6f514a26b58268369351266ae63667ab
+            runner: macos-15-intel
+          - suite: smb
+            revision: baseline
+            sha: 175c9f150fa6330a847796c551b0ab3babd304da
+            runner: macos-15
+          - suite: smb
+            revision: candidate
+            sha: 07646c6a6f514a26b58268369351266ae63667ab
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      COMPARE_SUITE: ${{ matrix.suite }}
+      COMPARE_REVISION: ${{ matrix.revision }}
+      MACSYNC_V0192_REQUIRE_SMB: '1'
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ matrix.sha }}
+          path: code
+          persist-credentials: false
+      - name: Confirm exact revision and install identical test
+        run: |
+          test "$(git -C code rev-parse HEAD)" = "${{ matrix.sha }}"
+          python3 harness/scripts/ci/comparative-regression/inject.py code "$COMPARE_SUITE"
+          git -C code diff --stat
+      - name: Install disposable Samba
+        if: matrix.suite == 'smb'
+        run: brew install samba
+      - name: Prepare identical SMB fixture
+        if: matrix.suite == 'smb'
+        run: bash harness/scripts/ci/prepare-local-samba.sh
+      - name: Execute identical final-state assertions
+        working-directory: code
+        run: bash ../harness/scripts/ci/comparative-regression/run.sh
+      - name: Upload comparison log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: comparison-${{ matrix.suite }}-${{ matrix.revision }}
+          path: ${{ runner.temp }}/comparison-${{ matrix.suite }}-${{ matrix.revision }}.log
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Cleanup disposable share
+        if: always() && matrix.suite == 'smb'
+        run: bash harness/scripts/ci/cleanup-local-samba.sh
