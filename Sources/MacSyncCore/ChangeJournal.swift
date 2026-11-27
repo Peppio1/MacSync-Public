@@ -2033,6 +2033,67 @@ public final class ChangeJournal {
         }
     }
 
+    /// One conservative retention batch, called only by a drained operational
+    /// owner. Never infer completion from enqueue date. Retain the newest
+    /// event per exact path (including when newer work is pending), all
+    /// recovery/rectification evidence, and unknown legacy completion dates.
+    /// No filesystem work, VACUUM, checkpoint or authorization changes.
+    public func pruneCompletedQueueBatch(now:Date=Date(),limit:Int=250,
+                                         shouldContinue:()->Bool={true}) throws -> Int {
+        guard shouldContinue() else { return 0 }
+        let cutoff=now.addingTimeInterval(-30*86400).timeIntervalSince1970
+        guard cutoff.isFinite else { throw JournalError.database("Invalid retention date") }
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            if try queueRebuildToken() != nil || hasPendingNameRectification() {
+                try execute("COMMIT;");return 0
+            }
+            // Bound VM work even if many expired rows are protected. Never
+            // retry inside a maintenance batch after an interrupted statement.
+            let stmt=try prepare("""
+                DELETE FROM change_queue WHERE id IN (
+                    SELECT q.id FROM queue_completion_ledger t
+                    JOIN change_queue q ON q.id=t.job_id
+                    WHERE t.completed_at<=?1 AND q.completed=1
+                      AND EXISTS(SELECT 1 FROM change_queue n WHERE n.root_id=q.root_id
+                        AND n.relative_path=q.relative_path AND n.id>q.id AND n.completed=1)
+                      AND NOT EXISTS(SELECT 1 FROM change_queue p WHERE p.root_id=q.root_id
+                        AND p.relative_path=q.relative_path AND p.completed=0)
+                      AND NOT EXISTS(SELECT 1 FROM retired_delete_evidence e WHERE e.job_id=q.id)
+                      AND NOT EXISTS(SELECT 1 FROM retired_publication_evidence e WHERE e.job_id=q.id)
+                      AND NOT EXISTS(SELECT 1 FROM publication_intents e WHERE e.job_id=q.id OR (e.root_id=q.root_id AND e.relative_path=q.relative_path))
+                      AND NOT EXISTS(SELECT 1 FROM transfer_recovery e WHERE e.job_id=q.id OR (e.root_id=q.root_id AND e.relative_path=q.relative_path))
+                      AND NOT EXISTS(SELECT 1 FROM blocked_name_jobs e WHERE e.job_id=q.id)
+                      AND NOT EXISTS(SELECT 1 FROM upload_retry e WHERE e.job_id=q.id OR (e.scope='root' AND e.root_id=q.root_id))
+                      AND NOT EXISTS(SELECT 1 FROM mirror_attempts e WHERE e.job_id=q.id)
+                      AND NOT EXISTS(SELECT 1 FROM name_rectification_monitor_links e WHERE e.job_id=q.id)
+                    ORDER BY t.completed_at,t.job_id LIMIT ?2
+                ) AND completed=1;
+                """)
+            defer {sqlite3_finalize(stmt)}
+            guard let connection else {throw databaseFailure()}
+            final class Budget {
+                let deadline=ProcessInfo.processInfo.systemUptime+0.15
+            }
+            let budget=Budget()
+            let context=Unmanaged.passUnretained(budget).toOpaque()
+            sqlite3_progress_handler(connection,1000,{ raw in
+                guard let raw else {return 1}
+                let budget=Unmanaged<Budget>.fromOpaque(raw).takeUnretainedValue()
+                return ProcessInfo.processInfo.systemUptime>=budget.deadline ? 1:0
+            },context)
+            defer {sqlite3_progress_handler(connection,0,nil,nil);withExtendedLifetime(budget){}}
+            guard sqlite3_bind_double(stmt,1,cutoff)==SQLITE_OK,
+                  sqlite3_bind_int(stmt,2,Int32(max(1,min(250,limit))))==SQLITE_OK,
+                  sqlite3_step(stmt)==SQLITE_DONE else {throw databaseFailure()}
+            let removed=Int(sqlite3_changes(connection))
+            guard shouldContinue() else {throw SeedVerificationError.cancelled}
+            try execute("COMMIT;")
+            return removed
+        } catch {try? execute("ROLLBACK;");throw error}
+    }
+
     private func execute(_ sql: String) throws {
         guard sqlite3_exec(connection, sql, nil, nil, nil) == SQLITE_OK else {
             throw databaseFailure()
