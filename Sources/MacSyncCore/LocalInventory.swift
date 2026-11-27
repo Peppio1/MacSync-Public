@@ -32,6 +32,8 @@ public struct TrackedItem: Equatable, Sendable {
     /// Used only to avoid duplicating SMB calls in a quick archive audit;
     /// queue acknowledgements still require a live revalidation.
     public let verificationFingerprint: SeedFileFingerprint?
+    // Optional diagnostic-only identity from the same existing no-follow stat.
+    var sourceLineageIdentity: SourceNameLineage.Identity? = nil
 
     public init(relativePath: String, kind: String, size: Int64, modifiedAt: Double, changeStamp: String? = nil,
                 verificationFingerprint: SeedFileFingerprint? = nil) {
@@ -89,7 +91,8 @@ public enum LocalScanner {
                             onVisit: (String) -> Void = { _ in },
                             onItem: (TrackedItem) -> Void = { _ in },
                             onPOSIXMetadataTiming: (DiagnosticTiming)->Void = { _ in },
-                            measurePOSIXMetadata: Bool = false) throws -> [TrackedItem] {
+                            measurePOSIXMetadata: Bool = false,
+                            collectSourceLineageIdentity: Bool = false) throws -> [TrackedItem] {
         var metadataTiming=DiagnosticTiming()
         defer { if measurePOSIXMetadata { onPOSIXMetadataTiming(metadataTiming) } }
         let root = root.standardizedFileURL.resolvingSymlinksInPath()
@@ -138,6 +141,7 @@ public enum LocalScanner {
             let modified: Double
             var changeStamp: String?
             var verificationFingerprint: SeedFileFingerprint?
+            var sourceIdentity: SourceNameLineage.Identity?
             if preferPOSIXMetadata {
                 // Remote read-only inventory: gather type, size, timestamps
                 // and identity in ONE no-follow syscall instead of retrieving
@@ -185,6 +189,7 @@ public enum LocalScanner {
                     }
                     changeStamp = "\(actual.st_ino):\(actual.st_ctimespec.tv_sec):\(actual.st_ctimespec.tv_nsec)"
                     verificationFingerprint = SeedFileFingerprint(fileStat: actual)
+                    if collectSourceLineageIdentity { sourceIdentity = SourceNameLineage.Identity(stat: actual) }
                 } else if kind == "directory" {
                     // This additional stat is local, not SMB. It avoids remote
                     // directory re-reads when the audit later recognizes it.
@@ -194,6 +199,7 @@ public enum LocalScanner {
                         throw JournalError.database("Directory changed during inventory scan")
                     }
                     verificationFingerprint = SeedFileFingerprint(fileStat: actual)
+                    if collectSourceLineageIdentity { sourceIdentity = SourceNameLineage.Identity(stat: actual) }
                 }
             }
             let prefix = root.path + "/"
@@ -211,11 +217,12 @@ public enum LocalScanner {
                 throw JournalError.database("Unexpected path outside root")
             }
             let relative = String(effectivePath.dropFirst(prefix.count))
-            let item = TrackedItem(
+            var item = TrackedItem(
                 relativePath: relative, kind: kind, size: size,
                 modifiedAt: modified, changeStamp: changeStamp,
                 verificationFingerprint: verificationFingerprint
             )
+            item.sourceLineageIdentity = sourceIdentity
             found.append(item)
             onItem(item)
             return kind
@@ -289,6 +296,8 @@ public enum LocalScanner {
 /// mutations are in a single atomic transaction.
 public final class LocalInventory {
     private var db: OpaquePointer?
+    // Shadow observations only. No queue or mirror decision may depend on them.
+    var experimentalSourceNameLineage = false
 
     public init(path: String) throws {
         var handle: OpaquePointer?
@@ -538,7 +547,8 @@ public final class LocalInventory {
         let binding = try DirectoryBinding.encoded(root)
         let ignoreDSStore = FileExclusionPolicy.ignoreDSStore
         let scanStarted=Date()
-        let rows = try LocalScanner.scan(root: root, subtree: subtree, ignoreDSStore:ignoreDSStore, shouldContinue: shouldContinue, onItem: onItem)
+        let rows = try LocalScanner.scan(root: root, subtree: subtree, ignoreDSStore:ignoreDSStore, shouldContinue: shouldContinue, onItem: onItem,
+            collectSourceLineageIdentity: experimentalSourceNameLineage)
         guard shouldContinue() else { throw SeedVerificationError.cancelled }
         let fullScan = target.path == root.path
         let scope = fullScan ? "" : String(target.path.dropFirst(root.path.count + 1))
@@ -702,6 +712,10 @@ public final class LocalInventory {
             if let eventID { checkpoint = max(prior ?? 0, eventID) }
             else { checkpoint = prior }
             guard try DirectoryBinding.encoded(root) == binding else { throw MountedCopyError.sourceRootChanged }
+            if experimentalSourceNameLineage {
+                try observeSourceNameLineage(rootID: rootID, sourceBinding: binding,
+                    rows: rows, shouldContinue: shouldContinue)
+            }
             try saveRoot(rootID: rootID, rootPath: root.path, eventID: checkpoint)
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             try execute("COMMIT;")
@@ -709,6 +723,51 @@ public final class LocalInventory {
         } catch {
             try? execute("ROLLBACK;")
             throw error
+        }
+    }
+
+    /// Persist last OBSERVED local paths, not current existence or
+    /// publication proof. Keep records when an old-path event arrives first;
+    /// the subsequent new-path observation can recover the same identity.
+    /// No filesystem calls or queue decisions occur here.
+    private func observeSourceNameLineage(rootID: String, sourceBinding: String,
+                                          rows: [TrackedItem],
+                                          shouldContinue: () -> Bool) throws {
+        guard let db else { throw failure() }
+        let query = try prepare("SELECT stamp FROM directory_bindings WHERE root_id=? AND role='target';")
+        defer { sqlite3_finalize(query) }
+        try bind(rootID, at: 1, statement: query)
+        let rc = sqlite3_step(query)
+        if rc == SQLITE_DONE { return } // No pinned destination: no history namespace.
+        guard rc == SQLITE_ROW else { throw failure() }
+        let targetBinding = column(query, 0)
+        guard !targetBinding.isEmpty else { return }
+        // This is a stored binding, not a live SMB probe or permission.
+        try SourceNameLineageStore.install(db)
+        let eligible = rows.compactMap { row -> (TrackedItem, SourceNameLineage.Identity)? in
+            guard let identity = row.sourceLineageIdentity else { return nil }
+            return (row, identity)
+        }
+        let grouped = Dictionary(grouping: eligible, by: { $0.1 })
+        for (row, identity) in eligible {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            guard grouped[identity]?.count == 1 else { continue }
+            let initial = SourceNameLineage.Record(identity: identity, rootID: rootID,
+                sourceBinding: sourceBinding, targetBinding: targetBinding,
+                path: row.relativePath)
+            let key = SourceNameLineageStore.Key(initial)
+            let saved = try SourceNameLineageStore.read(db, key: key)
+            var record = saved?.record ?? initial
+            if let saved {
+                if saved.record.currentPath.utf8.elementsEqual(row.relativePath.utf8) { continue }
+                _ = record.observe(identity: identity, path: row.relativePath,
+                    rootID: rootID, sourceBinding: sourceBinding, targetBinding: targetBinding,
+                    uniqueObservation: true)
+            }
+            // Never infer neverPublished from first observation. Never
+            // promote a completed queue row to verified publication here.
+            try SourceNameLineageStore.write(db, record: record,
+                expectedRevision: saved?.revision)
         }
     }
 
