@@ -2079,7 +2079,7 @@ public final class ChangeJournal {
             let stmt=try prepare("""
                 DELETE FROM change_queue WHERE id IN (
                     SELECT q.id FROM queue_completion_ledger t
-                    JOIN change_queue q ON q.id=t.job_id
+                    CROSS JOIN change_queue q ON q.id=t.job_id
                     WHERE t.job_id>?3 AND t.job_id<=?4 AND t.completed_at<=?1 AND q.completed=1
                       AND EXISTS(SELECT 1 FROM change_queue n WHERE n.root_id=q.root_id
                         AND n.relative_path=q.relative_path AND n.id>q.id AND n.completed=1)
@@ -2093,7 +2093,7 @@ public final class ChangeJournal {
                       AND NOT EXISTS(SELECT 1 FROM upload_retry e WHERE e.job_id=q.id OR (e.scope='root' AND e.root_id=q.root_id))
                       AND NOT EXISTS(SELECT 1 FROM mirror_attempts e WHERE e.job_id=q.id)
                       AND NOT EXISTS(SELECT 1 FROM name_rectification_monitor_links e WHERE e.job_id=q.id)
-                    ORDER BY t.completed_at,t.job_id LIMIT ?2
+                    ORDER BY t.job_id LIMIT ?2
                 ) AND completed=1;
                 """)
             defer {sqlite3_finalize(stmt)}
@@ -2137,6 +2137,17 @@ public final class ChangeJournal {
                 try execute("COMMIT;")
                 return .init(removed:0,examined:0,nextAfterID:afterID,finished:false,held:true)
             }
+            guard let connection else {throw databaseFailure()}
+            final class ReceiptBudget {
+                }
+            let budget=ReceiptBudget()
+            let context=Unmanaged.passUnretained(budget).toOpaque()
+            sqlite3_progress_handler(connection,1000,{ raw in
+                guard let raw else {return 1}
+                let budget=Unmanaged<ReceiptBudget>.fromOpaque(raw).takeUnretainedValue()
+                return ProcessInfo.processInfo.systemUptime>=budget.deadline ? 1:0
+            },context)
+            defer {sqlite3_progress_handler(connection,0,nil,nil);withExtendedLifetime(budget){}}
             let count=max(1,min(100,limit))
             let scan=try prepare("""
                 SELECT id,root_id,old_path,new_path,receipt
@@ -2151,7 +2162,7 @@ public final class ChangeJournal {
                 let rc=sqlite3_step(scan)
                 if rc==SQLITE_DONE {break}
                 guard rc==SQLITE_ROW else {throw databaseFailure()}
-                guard shouldContinue() else {throw SeedVerificationError.cancelled}
+                guard shouldContinue(),ProcessInfo.processInfo.systemUptime<budget.deadline else {throw SeedVerificationError.cancelled}
                 last=sqlite3_column_int64(scan,0);examined+=1
                 // Unknown or malformed evidence is preserved, not repaired.
                 guard let r=try? JSONDecoder().decode(NameRectificationReceipt.self,from:Data(columnText(scan,at:4).utf8)),
@@ -2185,7 +2196,7 @@ public final class ChangeJournal {
             defer {sqlite3_finalize(binding)}
             let deadline=ProcessInfo.processInfo.systemUptime+0.15
             for (id,r) in candidates {
-                guard shouldContinue(),ProcessInfo.processInfo.systemUptime<deadline else {throw SeedVerificationError.cancelled}
+                guard shouldContinue(),ProcessInfo.processInfo.systemUptime<budget.deadline else {throw SeedVerificationError.cancelled}
                 sqlite3_reset(binding);sqlite3_clear_bindings(binding)
                 try bind(r.rootID,at:1,in:binding)
                 let rc=sqlite3_step(binding)

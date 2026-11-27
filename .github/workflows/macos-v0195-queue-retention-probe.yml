@@ -1,7 +1,5 @@
 name: MacSync v0.19.5 queue retention completion ledger
 on:
-  push:
-    branches: [probe-v0195-queue-retention]
   workflow_dispatch:
 permissions:
   contents: read

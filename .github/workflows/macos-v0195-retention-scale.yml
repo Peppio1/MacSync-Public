@@ -1,0 +1,41 @@
+name: MacSync v0.19.5 retention scale and predecessor compatibility
+on:
+  push:
+    branches: [probe-v0195-queue-retention]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: 175c9f150fa6330a847796c551b0ab3babd304da
+          path: predecessor
+          persist-credentials: false
+      - name: Run existing and representative retention tests
+        working-directory: candidate
+        env:
+          MACSYNC_RETENTION_SCALE: '1'
+          MACSYNC_RETENTION_COMPAT_DIR: ${{ runner.temp }}/retention-compat
+        run: swift test -Xswiftc -warnings-as-errors --filter QueueCompletionLedgerTests
+      - name: Compare identical write workload on prototype
+        working-directory: candidate
+        run: |
+          cp scripts/ci/retention-benchmark/RetentionWriteBenchmarkTests.swift.txt Tests/MacSyncCoreTests/RetentionWriteBenchmarkTests.swift
+          swift test -Xswiftc -warnings-as-errors --filter RetentionWriteBenchmarkTests
+      - name: Verify the exact released predecessor can read and write maintained backup
+        working-directory: predecessor
+        env:
+          MACSYNC_RETENTION_COMPAT_DIR: ${{ runner.temp }}/retention-compat
+        run: |
+          test "$(git rev-parse HEAD)" = "175c9f150fa6330a847796c551b0ab3babd304da"
+          cp ../candidate/scripts/ci/retention-benchmark/RetentionPredecessorReadTests.swift.txt Tests/MacSyncCoreTests/RetentionPredecessorReadTests.swift
+          cp ../candidate/scripts/ci/retention-benchmark/RetentionWriteBenchmarkTests.swift.txt Tests/MacSyncCoreTests/RetentionWriteBenchmarkTests.swift
+          swift test -Xswiftc -warnings-as-errors --filter 'RetentionPredecessorReadTests|RetentionWriteBenchmarkTests'

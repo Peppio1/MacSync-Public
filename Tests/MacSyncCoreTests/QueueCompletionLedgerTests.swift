@@ -206,4 +206,87 @@ final class QueueCompletionLedgerTests:XCTestCase {
         }
     }
 
+    private func scalar(_ db:OpaquePointer,_ sql:String)throws->Int64 {
+        var stmt:OpaquePointer?
+        defer {if let stmt {sqlite3_finalize(stmt)}}
+        guard sqlite3_prepare_v2(db,sql,-1,&stmt,nil)==SQLITE_OK,
+              let stmt,sqlite3_step(stmt)==SQLITE_ROW else {
+            throw JournalError.database(String(cString:sqlite3_errmsg(db)))
+        }
+        let value=sqlite3_column_int64(stmt,0)
+        guard sqlite3_step(stmt)==SQLITE_DONE else {throw JournalError.database("unexpected scalar result")}
+        return value
+    }
+
+    /// Opt-in representative *database* workload, no actual file copies.
+    /// Two operations per exact path; the newest remains a safety watermark.
+    func testRepresentativeRetentionScaleAndPredecessorLayout()throws {
+        guard ProcessInfo.processInfo.environment["MACSYNC_RETENTION_SCALE"]=="1" else {
+            throw XCTSkip("Representative retention test is opt-in")
+        }
+        try fixture {path,db in
+            let source=URL(fileURLWithPath:path).deletingLastPathComponent().appendingPathComponent("source")
+            try FileManager.default.createDirectory(at:source,withIntermediateDirectories:true)
+            _=try LocalInventory(path:path).reconcile(rootID:"demo",root:source)
+            let journal=try ChangeJournal(path:path)
+            let started=ProcessInfo.processInfo.systemUptime
+            try exec(db,"""
+                BEGIN IMMEDIATE;
+                WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<200000)
+                INSERT INTO change_queue(root_id,relative_path,kind,recorded_at,completed,origin)
+                SELECT 'demo','photo-'||((n-1)%100000)||'.jpg','upsert',1,0,'source_monitor' FROM seq;
+                COMMIT;
+                """)
+            let enqueue=ProcessInfo.processInfo.systemUptime-started
+            let transition=ProcessInfo.processInfo.systemUptime
+            try exec(db,"BEGIN IMMEDIATE; UPDATE change_queue SET completed=1; COMMIT;")
+            let completion=ProcessInfo.processInfo.systemUptime-transition
+            XCTAssertEqual(try scalar(db,"SELECT count(*) FROM queue_completion_ledger;"),200000)
+            let now=Date()
+            try exec(db,"UPDATE queue_completion_ledger SET completed_at=1;")
+            // Preserve a small set of older rows as explicit retired evidence.
+            try exec(db,"INSERT INTO retired_delete_evidence(job_id) SELECT id FROM change_queue WHERE id<=100;")
+            let sequence=try journal.queueSequence()
+            let before=DatabaseDiagnosticSnapshot.collect(databasePath:path)
+            var cursor:Int64=0,removed=0,examined=0,pages=0
+            var maxSeconds=0.0
+            let sweep=ProcessInfo.processInfo.systemUptime
+            while true {
+                let started=ProcessInfo.processInfo.systemUptime
+                let page=try journal.pruneCompletedQueuePage(afterID:cursor,now:now,limit:250)
+                maxSeconds=max(maxSeconds,ProcessInfo.processInfo.systemUptime-started)
+                XCTAssertFalse(page.held)
+                XCTAssertLessThanOrEqual(page.examined,250)
+                removed+=page.removed;examined+=page.examined;pages+=1
+                cursor=page.nextAfterID
+                if page.finished {break}
+                guard pages<=801 else {throw JournalError.database("retention cursor failed to progress")}
+            }
+            let sweepSeconds=ProcessInfo.processInfo.systemUptime-sweep
+            XCTAssertEqual(examined,200000)
+            XCTAssertEqual(removed,99900)
+            XCTAssertEqual(try scalar(db,"SELECT count(*) FROM change_queue;"),100100)
+            XCTAssertEqual(try scalar(db,"SELECT count(*) FROM queue_completion_ledger;"),100100)
+            XCTAssertEqual(try scalar(db,"SELECT count(*) FROM change_queue WHERE id<=100 OR id>100000;"),100100)
+            XCTAssertEqual(try journal.queueSequence(),sequence)
+            XCTAssertTrue(try journal.pending().isEmpty)
+            let after=DatabaseDiagnosticSnapshot.collect(databasePath:path)
+            let url=URL(fileURLWithPath:path)
+            try ArchiveDatabaseSafety.verify(url,readOnly:true)
+            // The currently reviewed compatibility validator checks the
+            // predecessor's operational column layouts. Not an install test.
+            try SignedRollbackTransaction.validateCompatibility(database:url)
+            let backup=url.deletingLastPathComponent().appendingPathComponent("retention-backup.sqlite")
+            try ArchiveDatabaseSafety.backup(url,to:backup)
+            try SignedRollbackTransaction.validateCompatibility(database:backup)
+            XCTAssertEqual(try ChangeJournal(path:backup.path,readOnly:true).queueSequence(),sequence)
+            print("RETENTION_SCALE rows=200000 enqueueSeconds=\(enqueue) completionSeconds=\(completion) sweepSeconds=\(sweepSeconds) pages=\(pages) maxPageSeconds=\(maxSeconds) removed=\(removed) remaining=100100 beforePages=\(before.pageCount ?? -1) afterPages=\(after.pageCount ?? -1) beforeFree=\(before.freePages ?? -1) afterFree=\(after.freePages ?? -1)")
+            if let output=ProcessInfo.processInfo.environment["MACSYNC_RETENTION_COMPAT_DIR"],!output.isEmpty {
+                let target=URL(fileURLWithPath:output,isDirectory:true)
+                try FileManager.default.createDirectory(at:target,withIntermediateDirectories:true)
+                try FileManager.default.copyItem(at:backup,to:target.appendingPathComponent("retention-backup.sqlite"))
+            }
+        }
+    }
+
 }
