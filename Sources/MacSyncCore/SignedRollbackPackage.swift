@@ -11,6 +11,10 @@ public struct SignedRollbackPackage: Equatable, Sendable {
     public let sha256:String
 
     public static func previous(for installed:String) -> Self? {
+        if installed == "0.19.5" {
+            return .init(version:"0.19.4",build:"202",byteCount:75_407_484,
+                sha256:"5ad602e21ec77bf9c4eaa79a0999543cee2c006bfe351e3c70fe089f093557bd")
+        }
         guard installed == "0.19.4" else { return nil }
         return .init(version:"0.19.3",build:"201",byteCount:74_921_776,
             sha256:"6a56f639116825b51dd6201bf0993316335c816333ee636b481acd85a1641abe")

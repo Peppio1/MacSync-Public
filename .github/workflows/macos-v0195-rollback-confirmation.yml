@@ -1,0 +1,21 @@
+name: MacSync v0.19.5 rollback confirmation
+on:
+  push:
+    branches: [develop-v0.19.5]
+    paths:
+      - 'Sources/MacSync/RollbackConfirmation.swift'
+      - 'Sources/MacSyncCore/SignedRollbackPackage.swift'
+      - '.github/workflows/macos-v0195-rollback-confirmation.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Verify native confirmation and pinned predecessor
+        run: swift test -Xswiftc -warnings-as-errors --filter MacSyncUIPreviewTests.testRollbackConfirmationRequiresExplicitApproval

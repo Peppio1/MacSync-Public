@@ -371,13 +371,12 @@ final class MacSyncRuntime: ObservableObject {
               let package=SignedRollbackPackage.previous(for:installed),
               ApplicationRollback.allowedInstallLocation(Bundle.main.bundleURL),
               NSApp.modalWindow==nil else { return }
-        let confirmation=NSAlert()
-        confirmation.alertStyle = .warning
-        confirmation.messageText="Ripristinare la versione precedente?"
-        confirmation.informativeText="Versione attuale: "+installed+"\nVersione precedente: "+package.version+"\n\nMacSync terminerà le attività, creerà un backup dell’archivio corrente e verificherà il pacchetto firmato. Il database non verrà sostituito. Dopo il riavvio copie e mirror resteranno disattivati."
-        confirmation.addButton(withTitle:"Annulla")
-        confirmation.addButton(withTitle:"Conferma ripristino")
-        guard confirmation.runModal() == .alertSecondButtonReturn else { return }
+        let confirmation=RollbackConfirmation.make(installed:installed,previous:package.version)
+        guard RollbackConfirmation.isConfirmed(confirmation.runModal()),
+              !shuttingDown,!preparingSignedUpdate,
+              Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String==installed,
+              SignedRollbackPackage.previous(for:installed)==package,
+              ApplicationRollback.allowedInstallLocation(Bundle.main.bundleURL) else { return }
         preparingSignedUpdate=true
         requestShutdown { [weak self] in
             guard let self else { return }

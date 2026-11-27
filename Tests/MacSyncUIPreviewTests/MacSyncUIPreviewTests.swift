@@ -20,6 +20,30 @@ private final class AuditBoundsCapture: @unchecked Sendable {
 
 /// Renders the actual configuration view with a preview-only runtime. All interactions are disabled; synthetic history is stored in a temporary SQLite database, never the real app archive.
 final class MacSyncUIPreviewTests: XCTestCase {
+    func testRollbackConfirmationRequiresExplicitApproval() async {
+        await MainActor.run {
+            let alert=RollbackConfirmation.make(installed:"0.19.5",previous:"0.19.4")
+            XCTAssertEqual(alert.buttons.count,2)
+            XCTAssertEqual(alert.buttons.first?.title,"Annulla")
+            XCTAssertEqual(alert.buttons.first?.keyEquivalent,"\u{1b}")
+            XCTAssertEqual(alert.buttons.last?.title,"Ripristina 0.19.4")
+            XCTAssertEqual(alert.buttons.last?.keyEquivalent,"")
+            XCTAssertTrue(alert.informativeText.contains("0.19.5"))
+            XCTAssertTrue(alert.informativeText.contains("0.19.4"))
+            XCTAssertFalse(RollbackConfirmation.isConfirmed(.alertFirstButtonReturn))
+            XCTAssertFalse(RollbackConfirmation.isConfirmed(.abort))
+            XCTAssertFalse(RollbackConfirmation.isConfirmed(.stop))
+            XCTAssertTrue(RollbackConfirmation.isConfirmed(.alertSecondButtonReturn))
+            let previous=SignedRollbackPackage.previous(for:"0.19.5")
+            XCTAssertEqual(previous?.version,"0.19.4")
+            XCTAssertEqual(previous?.build,"202")
+            XCTAssertEqual(previous?.byteCount,75407484)
+            XCTAssertEqual(previous?.sha256,"5ad602e21ec77bf9c4eaa79a0999543cee2c006bfe351e3c70fe089f093557bd")
+            XCTAssertEqual(SignedRollbackPackage.previous(for:"0.19.4")?.version,"0.19.3")
+            XCTAssertNil(SignedRollbackPackage.previous(for:"0.19.6"))
+        }
+    }
+
     func testWindowLayoutPolicy() async {
         await MainActor.run {
             XCTAssertFalse(MacSyncWindowLayout(width: 1180, height: 820).compact)
