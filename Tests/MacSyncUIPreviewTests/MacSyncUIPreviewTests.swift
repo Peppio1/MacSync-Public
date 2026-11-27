@@ -69,6 +69,52 @@ final class MacSyncUIPreviewTests: XCTestCase {
         print("Synthetic UI heartbeat max: \(maxDelay) seconds")
     }
 
+    func testRenderStructuredPathDetails() async throws {
+        guard let output=ProcessInfo.processInfo.environment["MACSYNC_UI_PREVIEW_DIR"],!output.isEmpty else {
+            throw XCTSkip("Structured path rendering requires MACSYNC_UI_PREVIEW_DIR")
+        }
+        let directory=URL(fileURLWithPath:output,isDirectory:true)
+        try await MainActor.run {
+            try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
+            let model=MacSyncViewModel(previewOnly:true)
+            let nested=ArchivePathPresentation(root:"/Example/iMac/Foto_da_editare",relative:"Vetro - 47253/Archivio lavorazioni/nuovo originale/oca pro.jpg",side:.source,kind:.file)
+            let folder=ArchivePathPresentation(root:"/Example/Server/Condivisione_Foto/Foto_da_editare",relative:"Album./materiale da verificare ",side:.destination,kind:.directory)
+            let root=ArchivePathPresentation(root:"/Example/iMac/Foto_da_editare",relative:"copertina originale.psd",side:.source,kind:.file)
+            for scheme in [ColorScheme.light,.dark] {
+                let suffix=scheme == .dark ? "dark":"light"
+                for width in [460,760] {
+                    let content=VStack(alignment:.leading,spacing:12) {
+                        Self.pathPreviewBounds("nested",VStack(alignment:.leading,spacing:6) {
+                            Text("Copia / aggiornamento").font(.headline)
+                            ArchivePathBlock(path:nested)
+                        })
+                        Self.pathPreviewBounds("finder",ArchiveFinderButton(path:nested,rootID:"photo-uploads",model:model,disabled:true))
+                        Divider()
+                        Self.pathPreviewBounds("directory",VStack(alignment:.leading,spacing:6) {
+                            Text("Eliminazione cartella").font(.headline)
+                            ArchivePathBlock(path:folder)
+                        })
+                        Divider()
+                        Self.pathPreviewBounds("root",VStack(alignment:.leading,spacing:6) {
+                            Text("File nella radice").font(.headline)
+                            ArchivePathBlock(path:root)
+                        })
+                    }
+                    try Self.render(content.allowsHitTesting(false),name:"path-\(width)-\(suffix)",scheme:scheme,directory:directory,width:width,height:520)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private static func pathPreviewBounds<V:View>(_ id:String,_ view:V)->some View {
+        view.background {
+            GeometryReader { proxy in
+                Color.clear.preference(key:AuditPreviewBoundsKey.self,value:[id:proxy.frame(in:.named("macsync-audit-capture"))])
+            }
+        }
+    }
+
     func testRenderProductionComponents() async throws {
         guard let path = ProcessInfo.processInfo.environment["MACSYNC_UI_PREVIEW_DIR"], !path.isEmpty else {
             throw XCTSkip("UI artifact rendering is opt-in via MACSYNC_UI_PREVIEW_DIR")
@@ -276,6 +322,21 @@ final class MacSyncUIPreviewTests: XCTestCase {
             let button = try XCTUnwrap(frames[idle ? "start" : "cancel"])
             XCTAssertTrue(panel.insetBy(dx: -1, dy: -1).contains(button), "Audit action outside operation panel: \(name)")
             print("Audit layout verified: \(name) — \(required.joined(separator: ", "))")
+        }
+        if name.hasPrefix("path-") {
+            let frames=auditBounds.snapshot()
+            let order=["nested","finder","directory","root"]
+            let viewport=CGRect(x:0,y:0,width:CGFloat(width),height:CGFloat(height)).insetBy(dx:-1,dy:-1)
+            var previousBottom:CGFloat = 0
+            for id in order {
+                let frame=try XCTUnwrap(frames[id],"Missing path component: \(id)")
+                XCTAssertGreaterThan(frame.height,1)
+                XCTAssertGreaterThan(frame.width,1)
+                XCTAssertTrue(viewport.contains(frame),"Clipped path component: \(id) \(frame)")
+                XCTAssertGreaterThanOrEqual(frame.minY+1,previousBottom,"Overlapping path components: \(id)")
+                previousBottom=frame.maxY
+            }
+            print("PATH_LAYOUT_VERIFIED \(name)")
         }
         let bitmap = try XCTUnwrap(NSBitmapImageRep(
             bitmapDataPlanes: nil, pixelsWide: width * 2, pixelsHigh: height * 2,

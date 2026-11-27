@@ -1,0 +1,29 @@
+name: MacSync v0.19.5 targeted path layout preview
+on:
+  push:
+    branches: [verify-v0195-path-layout]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  render:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Render actual structured path views
+        env:
+          MACSYNC_UI_PREVIEW_DIR: ${{ runner.temp }}/macsync-path-preview
+        run: |
+          swift test -Xswiftc -warnings-as-errors --filter MacSyncUIPreviewTests.testRenderStructuredPathDetails
+          test "$(find "$MACSYNC_UI_PREVIEW_DIR" -name 'path-*.png' -type f | wc -l | tr -d ' ')" = 4
+      - name: Preserve rendered previews
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macsync-v0195-path-previews
+          path: ${{ runner.temp }}/macsync-path-preview
+          if-no-files-found: warn
+          retention-days: 30
