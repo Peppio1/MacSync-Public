@@ -489,6 +489,93 @@ final class MirrorDeletionTests: XCTestCase {
             cancellation: cancellation, authorization: authorization, protections: protections)
     }
 
+    func testV0195PostMirrorReconcilesOldAliasesAcrossTwoRootsWithoutAudit() throws {
+        let f=try fixture(fileCount:0)
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        guard ["apfs","hfs"].contains(f.mapping.targetVolume.fileSystem.lowercased()) else {
+            throw XCTSkip("Native macOS fixture required")
+        }
+        let fm=FileManager.default
+        let source2=f.base.appendingPathComponent("source2")
+        let target2=f.base.appendingPathComponent("destination2")
+        for root in [source2,target2] { try fm.createDirectory(at:root,withIntermediateDirectories:true) }
+        let map2=try MountedFolderMapping(rootID:"second",source:source2,target:target2)
+        let maps=[f.mapping,map2]
+        let inventory=try LocalInventory(path:f.database)
+        for map in maps {
+            for root in [map.source,map.target] {
+                let corrected=root.appendingPathComponent("Album-")
+                try fm.createDirectory(at:corrected,withIntermediateDirectories:true)
+                try Data("keep".utf8).write(to:corrected.appendingPathComponent("photo.jpg"))
+            }
+            let alias=map.target.appendingPathComponent("Album")
+            try fm.createDirectory(at:alias,withIntermediateDirectories:true)
+            try Data("old".utf8).write(to:alias.appendingPathComponent("photo.jpg"))
+            _=try inventory.reconcile(rootID:map.rootID,root:map.source)
+        }
+        while true {
+            let page=try f.journal.pendingUploads(limit:100)
+            guard !page.isEmpty else { break }
+            for job in page { try f.journal.markCompleted(id:job.id) }
+        }
+        try f.journal.verifyDirectoryBindings(maps,allowNewTarget:true)
+        for map in maps {
+            for path in ["Album./photo.jpg","Album.","Album/photo.jpg","Album"] {
+                _=try f.journal.enqueue(rootID:map.rootID,relativePath:path,kind:.delete,origin:.sourceMonitor)
+            }
+        }
+        // Unrelated incompatible literal must not be completed by the final pass.
+        _=try f.journal.enqueue(rootID:"second",relativePath:"Unrelated.",kind:.delete,origin:.sourceMonitor)
+        let consent=try MirrorAuthorization.capture(journal:f.journal,mappings:maps,includePendingDeletes:true)
+        let jobs=try f.journal.pending().filter { $0.relativePath.hasPrefix("Album.") }
+        XCTAssertEqual(try f.journal.acknowledgeAbsentAuditDeletes(jobs,mappings:maps,shouldContinue:{true}),0)
+        let result=try persistentWorker(f,authorization:consent,mappings:maps).runCycle(pageSize:1,priorAbsenceCandidates:jobs)
+        XCTAssertEqual(result.removed,2)
+        XCTAssertEqual(result.directories,2)
+        XCTAssertEqual(result.reconciledAbsences,4)
+        XCTAssertEqual(result.reconciledDeferredByRoot,["photos":2,"second":2])
+        XCTAssertEqual(result.deferred,1)
+        XCTAssertEqual(try f.journal.pending().map(\.relativePath),["Unrelated."])
+        for map in maps {
+            XCTAssertFalse(fm.fileExists(atPath:map.target.appendingPathComponent("Album").path))
+            XCTAssertEqual(try Data(contentsOf:map.target.appendingPathComponent("Album-/photo.jpg")),Data("keep".utf8))
+        }
+    }
+
+    func testV0195FinalAbsencePassPreservesOtherRootAndNewerEvents() throws {
+        let f=try fixture(fileCount:0)
+        defer { try? FileManager.default.removeItem(at:f.base) }
+        guard ["apfs","hfs"].contains(f.mapping.targetVolume.fileSystem.lowercased()) else {
+            throw XCTSkip("Native macOS fixture required")
+        }
+        let fm=FileManager.default
+        let source2=f.base.appendingPathComponent("source2")
+        let target2=f.base.appendingPathComponent("destination2")
+        for root in [source2,target2] { try fm.createDirectory(at:root,withIntermediateDirectories:true) }
+        let map2=try MountedFolderMapping(rootID:"second",source:source2,target:target2)
+        let maps=[f.mapping,map2]
+        for map in maps { _=try LocalInventory(path:f.database).reconcile(rootID:map.rootID,root:map.source) }
+        try f.journal.verifyDirectoryBindings(maps,allowNewTarget:true)
+        for root in ["photos","second"] {
+            _=try f.journal.enqueue(rootID:root,relativePath:"Album./child.jpg",kind:.delete,origin:.sourceMonitor)
+        }
+        _=try f.journal.enqueue(rootID:"photos",relativePath:"Album",kind:.delete,origin:.sourceMonitor)
+        let jobs=try f.journal.pending()
+        let upper=try f.journal.queueSequence()
+        let tracker=PostMirrorAbsenceReconciliation(mappings:maps,prior:jobs)
+        let removed=try XCTUnwrap(jobs.first{$0.relativePath=="Album"})
+        tracker.observe(.directoryRemoved,job:removed)
+        var completed:[Int64]=[]
+        try tracker.reconcile(journal:f.journal,throughID:upper,onAcknowledged:{ job,_ in completed.append(job.id) },shouldContinue:{false})
+        XCTAssertTrue(completed.isEmpty)
+        // A new event for exactly the old path invalidates the earlier job.
+        _=try f.journal.enqueue(rootID:"photos",relativePath:"Album./child.jpg",kind:.delete,origin:.sourceMonitor)
+        try tracker.reconcile(journal:f.journal,throughID:upper,onAcknowledged:{ job,_ in completed.append(job.id) },shouldContinue:{true})
+        XCTAssertTrue(completed.isEmpty)
+        XCTAssertTrue(try f.journal.pending().contains{$0.rootID=="second" && $0.relativePath=="Album./child.jpg"})
+        XCTAssertTrue(try f.journal.pending().contains{$0.rootID=="photos" && $0.relativePath=="Album./child.jpg"})
+    }
+
     func testPersistentMirrorDefaultsAllOptionalProtectionOff() throws {
         let settings = MirrorProtectionSettings()
         XCTAssertFalse(settings.absoluteEnabled)

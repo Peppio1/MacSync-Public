@@ -1335,6 +1335,7 @@ public final class ChangeJournal {
     /// Caller provides pre-audit IDs absent from both complete inventories.
     public func acknowledgeAbsentAuditDeletes(_ entries:[QueuedChange],
         mappings:[MountedFolderMapping],auditTargetMissingPrefixes:[Int64:String] = [:],
+        onAcknowledged: ((QueuedChange)->Void)? = nil,
         shouldContinue:()->Bool) throws -> Int {
         guard !entries.isEmpty else { return 0 }
         try verifyDirectoryBindings(mappings)
@@ -1463,6 +1464,7 @@ public final class ChangeJournal {
                 """)
             defer { sqlite3_finalize(stmt) }
             var count=0
+            var acknowledged:[QueuedChange]=[]
             for entry in verified {
                 let job=entry.job
                 guard confirmed.contains(ProofKey(rootID:job.rootID,prefix:Data(entry.targetPrefix.utf8))) else { continue }
@@ -1486,10 +1488,14 @@ public final class ChangeJournal {
                 try bind(job.rootID,at:2,in:stmt);try bind(job.relativePath,at:3,in:stmt)
                 try bind(map.source.path,at:4,in:stmt)
                 guard sqlite3_step(stmt)==SQLITE_DONE else { throw databaseFailure() }
-                count+=Int(sqlite3_changes(connection))
+                let changed=Int(sqlite3_changes(connection))
+                count+=changed
+                if changed == 1,onAcknowledged != nil { acknowledged.append(job) }
             }
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             try execute("COMMIT;")
+            // Observers see only committed acknowledgments, never a rolled-back batch.
+            if let onAcknowledged { for job in acknowledged { onAcknowledged(job) } }
             return count
         } catch { try? execute("ROLLBACK;");throw error }
     }

@@ -1302,6 +1302,7 @@ final class MountedCopyController: ObservableObject {
                     var mirrorSummary = MirrorDeletionSummary()
                     var expired = 0
                     var absentDeletes=0
+                    var priorAbsenceCandidates:[QueuedChange]=[]
                     // Non-mutating acknowledgment is independent of mirror
                     // consent. Bounded page, no recursive destination scan.
                     if gate.isReady,!cancellation.isCancelled,!summary.interrupted,
@@ -1318,6 +1319,7 @@ final class MountedCopyController: ObservableObject {
                              maps.contains{ $0.rootID==job.rootID && ["apfs","hfs"].contains($0.targetVolume.fileSystem.lowercased()) })
                         }
                         if !eligible.isEmpty {
+                            priorAbsenceCandidates=eligible
                             progress.phase="Verifica eliminazioni già soddisfatte"
                             publish(force:true)
                             let tick=ProcessInfo.processInfo.systemUptime
@@ -1346,7 +1348,19 @@ final class MountedCopyController: ObservableObject {
                             progress.queueCursor?.phase = .deletes
                             progress.phase = "Cancellazioni"
                             publish(force:true)
-                            mirrorSummary = try mirrorWorker.runCycle(pageSize: 100, throughID:highWater)
+                            mirrorSummary = try mirrorWorker.runCycle(pageSize:100,throughID:highWater,
+                                priorAbsenceCandidates:priorAbsenceCandidates)
+                            absentDeletes+=mirrorSummary.reconciledAbsences
+                            // Preserve historical attempts, but final cycle totals
+                            // show only the deferred jobs not reconciled afterward.
+                            for (rootID,count) in mirrorSummary.reconciledDeferredByRoot {
+                                totals.stats.deferred=max(0,totals.stats.deferred-count)
+                                if var rootStats=totals.byRoot[rootID] {
+                                    rootStats.deferred=max(0,rootStats.deferred-count)
+                                    totals.byRoot[rootID]=rootStats
+                                }
+                                progress.deferredOperations=max(0,progress.deferredOperations-count)
+                            }
                             progress.phase = "Finalizzazione"
                             publish(force:true)
                             expired = try mirrorWorker.pruneExpiredRecovery()

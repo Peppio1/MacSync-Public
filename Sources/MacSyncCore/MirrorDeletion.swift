@@ -89,6 +89,9 @@ public struct MirrorDeletionSummary {
     public var directories = 0
     public var missing = 0
     public var deferred = 0
+    /// Confirmed already-absent paths, never physical deletions.
+    public var reconciledAbsences = 0
+    public var reconciledDeferredByRoot:[String:Int] = [:]
     public var blocked = false
     public var detail = ""
     public init() {}
@@ -410,6 +413,7 @@ public final class MirrorDeletionWorker {
     private var appliedDuringSession = 0
     private var pendingNameProtection = NameRectification.PendingProtection(relations: [])
     private var uploadUpperBoundAtStart: Int64 = 0
+    private var postMirrorAbsence:PostMirrorAbsenceReconciliation?
 
     /// Upload-first remains mandatory for every unprotected upload. An
     /// approved pending rename may leave guarded uploads in the queue;
@@ -446,6 +450,7 @@ public final class MirrorDeletionWorker {
     }
     private func emit(_ kind: SyncEventKind, job: QueuedChange, mapping: MountedFolderMapping?,
                       bytes: Int64? = nil, recoveryPath: String? = nil, detail: String = "") {
+        postMirrorAbsence?.observe(kind,job:job)
         onEvent?(SyncCycleEvent(kind:kind,job:job,mapping:mapping,bytes:bytes,recoveryPath:recoveryPath,detail:detail))
     }
     private let authorization: MirrorAuthorization?
@@ -618,7 +623,8 @@ public final class MirrorDeletionWorker {
 
     /// Entire eligible snapshot, ordered deepest/longest paths first.
     /// Every job is attempted once, even if older jobs are deferred.
-    public func runCycle(pageSize: Int = 100, throughID: Int64? = nil) throws -> MirrorDeletionSummary {
+    public func runCycle(pageSize: Int = 100, throughID: Int64? = nil,
+                         priorAbsenceCandidates:[QueuedChange] = []) throws -> MirrorDeletionSummary {
         guard let authorization else { return try runOnce(maxFiles: 100) }
         var result = MirrorDeletionSummary()
         guard try journal.queueRebuildToken() == nil else {
@@ -635,6 +641,9 @@ public final class MirrorDeletionWorker {
         }
         guard let pendingUpper = try journal.pendingDeleteUpperBound(afterID: authorization.cutoff) else { onPlan?(0); return result }
         let upper = min(pendingUpper, throughID ?? Int64.max)
+        let reconciliation=PostMirrorAbsenceReconciliation(mappings:Array(mappings.values),prior:priorAbsenceCandidates)
+        postMirrorAbsence=reconciliation
+        defer { postMirrorAbsence=nil }
         onPlan?(try journal.plannedDeleteCount(afterID: authorization.cutoff, throughID: upper))
         var length = Int64.max
         var lastID: Int64 = 0
@@ -648,6 +657,32 @@ public final class MirrorDeletionWorker {
             lastID = last.id
             try process(page, result: &result, availableRoots: &availableRoots)
             if result.blocked { break }
+        }
+        // A later successful deletion can remove the alias that prevented
+        // a literal-absence check earlier in the cycle. No physical mutation
+        // is performed here. Reuse the audit's live, transactional proof.
+        if !result.blocked,!cancellation.isCancelled,operationAllowed() {
+            let tick=ProcessInfo.processInfo.systemUptime
+            do {
+                try reconciliation.reconcile(journal:journal,throughID:throughID ?? upper,
+                    onAcknowledged:{ job,wasDeferred in
+                        result.reconciledAbsences+=1
+                        if wasDeferred {
+                            result.deferred=max(0,result.deferred-1)
+                            result.reconciledDeferredByRoot[job.rootID,default:0]+=1
+                        }
+                    },shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() })
+            } catch SeedVerificationError.cancelled {
+                // Uncommitted candidates remain queued for the next cycle.
+            } catch {
+                try? log.record(level:.warning,rootID:"app",action:"queue_absence_check_deferred",
+                    message:"Riconciliazione finale non conclusa: "+SyncDiagnostic.describe(error))
+            }
+            if result.reconciledAbsences>0 {
+                try? log.record(level:.info,rootID:"app",action:"queue_absent_reconciled",
+                    durationSeconds:ProcessInfo.processInfo.systemUptime-tick,
+                    message:"Riconciliazione finale: \(result.reconciledAbsences); nessuna rimozione fisica")
+            }
         }
         // Keep history for the longest configurable window, regardless of
         // current settings. Pending jobs remain in the original queue.
