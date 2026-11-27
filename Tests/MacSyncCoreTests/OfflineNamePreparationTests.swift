@@ -2,112 +2,118 @@ import Foundation
 import XCTest
 @testable import MacSyncCore
 
-final class OfflineNamePreparationTests: XCTestCase {
-    private struct Fixture {
-        let base: URL
-        let source: URL
-        let target: URL
-        let db: URL
-        let inventory: LocalInventory
-        let journal: ChangeJournal
-    }
-    private func fixture() throws -> Fixture {
-        let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("MacSync-offline-" + UUID().uuidString)
-            .resolvingSymlinksInPath()
-        let source = base.appendingPathComponent("source")
-        let target = base.appendingPathComponent("destination")
-        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
-        let db = base.appendingPathComponent("state.sqlite")
-        return Fixture(base: base, source: source, target: target, db: db,
-                       inventory: try LocalInventory(path: db.path), journal: try ChangeJournal(path: db.path))
-    }
+/// Same existing local rectification function before and after the archive
+/// is seeded. The benchmark is not an operating mode or a size limit.
+final class RepeatableNameRectificationTests: XCTestCase {
+    private let fixed = Date(timeIntervalSince1970: 1_700_000_000)
 
-    func testOneTime1200RectificationsBeforeExternalSeedAndQuickAudit() throws {
-        let f = try fixture()
-        defer { try? FileManager.default.removeItem(at: f.base) }
-        let fm = FileManager.default
-        let fixed = Date(timeIntervalSince1970: 1_700_000_000)
-        let folders = 120, filesPerFolder = 9
+    private func addBatch(root: URL, prefix: String, folders: Int) throws {
         for i in 0..<folders {
-            let folder = f.source.appendingPathComponent("folder-\(i) ")
-            try fm.createDirectory(at: folder, withIntermediateDirectories: false)
-            for j in 0..<filesPerFolder {
+            let folder = root.appendingPathComponent("\(prefix)-\(i) ")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+            for j in 0..<9 {
                 let file = folder.appendingPathComponent("photo-\(j)?.jpg")
                 try Data([UInt8(i), UInt8(j)]).write(to: file)
+                try FileManager.default.setAttributes([.modificationDate: fixed], ofItemAtPath: file.path)
+            }
+        }
+    }
+
+    private func verifyBatch(root: URL, prefix: String, folders: Int) throws {
+        for i in 0..<folders {
+            let folder = root.appendingPathComponent("\(prefix)-\(i)")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("\(prefix)-\(i) ").path))
+            for j in 0..<9 {
+                XCTAssertEqual(try Data(contentsOf: folder.appendingPathComponent("photo-\(j)-.jpg")),
+                    Data([UInt8(i), UInt8(j)]))
+            }
+        }
+    }
+
+    private func rectify(_ inventory: LocalInventory, root: URL, db: URL, expected: Int) throws -> Double {
+        let journal = try ChangeJournal(path: db.path)
+        let items = try inventory.incompatibleNames(rootID: "photos", sourcePath: root.path)
+        XCTAssertEqual(items.count, expected)
+        let start = ProcessInfo.processInfo.systemUptime
+        let result = try NameRectification.executeLocal(items: items, roots: ["photos": root.path],
+            journal: journal, log: SyncActivityLog(path: db.path))
+        let elapsed = ProcessInfo.processInfo.systemUptime - start
+        XCTAssertEqual(result.renamed, expected)
+        XCTAssertEqual(result.skipped, 0)
+        XCTAssertEqual(result.failed, 0)
+        XCTAssertFalse(try journal.hasPendingNameRectification())
+        return elapsed
+    }
+
+    func testRepeatableMassRectificationBeforeAndAfterBinding() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("MacSync-repeat-" + UUID().uuidString)
+            .resolvingSymlinksInPath()
+        defer { try? fm.removeItem(at: base) }
+        let source = base.appendingPathComponent("source")
+        let target = base.appendingPathComponent("target")
+        try fm.createDirectory(at: source, withIntermediateDirectories: true)
+        try fm.createDirectory(at: target, withIntermediateDirectories: false)
+        let db = base.appendingPathComponent("state.sqlite")
+        let journal = try ChangeJournal(path: db.path)
+        var inventory = try LocalInventory(path: db.path)
+
+        try addBatch(root: source, prefix: "initial", folders: 120)
+        let first = try inventory.reconcile(rootID: "photos", root: source, origin: .initialInventory)
+        XCTAssertEqual(first.queuedUpserts, 0)
+        XCTAssertEqual(first.queuedDeletes, 0)
+        let firstTime = try rectify(inventory, root: source, db: db, expected: 1200)
+        let firstUpdate = try inventory.reconcile(rootID: "photos", root: source)
+        // Existing queue behavior remains conservative until publication
+        // evidence is connected. This test must NOT bypass it just to make
+        // the initial queue empty.
+        XCTAssertEqual(firstUpdate.queuedUpserts, 1200)
+        XCTAssertEqual(firstUpdate.queuedDeletes, 1200)
+        XCTAssertTrue(try inventory.incompatibleNames(rootID: "photos", sourcePath: source.path).isEmpty)
+        XCTAssertTrue(try fm.contentsOfDirectory(atPath: target.path).isEmpty)
+        try verifyBatch(root: source, prefix: "initial", folders: 120)
+
+        // Simulate the external seed using a disposable local destination.
+        // This is not a test of real SMB or disk transport.
+        for folder in try fm.contentsOfDirectory(at: source, includingPropertiesForKeys: nil) {
+            let destination = target.appendingPathComponent(folder.lastPathComponent)
+            try fm.copyItem(at: folder, to: destination)
+            for file in try fm.contentsOfDirectory(at: destination, includingPropertiesForKeys: nil) {
                 try fm.setAttributes([.modificationDate: fixed], ofItemAtPath: file.path)
             }
         }
-        f.inventory.experimentalOfflineNamePreparation = true
-        let started = ProcessInfo.processInfo.systemUptime
-        let initial = try f.inventory.reconcile(rootID: "photos", root: f.source, origin: .initialInventory)
-        XCTAssertEqual(initial.queuedUpserts, 0)
-        XCTAssertEqual(initial.queuedDeletes, 0)
-        XCTAssertEqual(try f.inventory.pendingCount(), 0)
-        let names = try f.inventory.incompatibleNames(rootID: "photos", sourcePath: f.source.path)
-        XCTAssertEqual(names.count, 1200)
-        let indexed = ProcessInfo.processInfo.systemUptime
-        let result = try NameRectification.executeLocal(items: names, roots: ["photos": f.source.path],
-            journal: f.journal, log: SyncActivityLog(path: f.db.path))
-        XCTAssertEqual(result.renamed, 1200)
-        XCTAssertEqual(result.failed, 0)
-        XCTAssertEqual(result.skipped, 0)
-        XCTAssertFalse(try f.journal.hasPendingNameRectification())
-        let renamed = ProcessInfo.processInfo.systemUptime
-        let update = try f.inventory.reconcile(rootID: "photos", root: f.source, origin: .initialInventory)
-        XCTAssertEqual(update.queuedUpserts, 0)
-        XCTAssertEqual(update.queuedDeletes, 0)
-        XCTAssertEqual(try f.inventory.pendingCount(), 0)
-        XCTAssertTrue(try f.inventory.incompatibleNames(rootID: "photos", sourcePath: f.source.path).isEmpty)
-        XCTAssertTrue(try fm.contentsOfDirectory(atPath: f.target.path).isEmpty)
-        let reconciled = ProcessInfo.processInfo.systemUptime
-        // Model the one-time physical seed using disposable local directories.
-        // No Rclone or SMB, no destination access during rectification.
-        for i in 0..<folders {
-            let folder = f.source.appendingPathComponent("folder-\(i)")
-            let seeded = f.target.appendingPathComponent("folder-\(i)")
-            try fm.copyItem(at: folder, to: seeded)
-            for j in 0..<filesPerFolder {
-                let name = "photo-\(j)-.jpg"
-                let source = folder.appendingPathComponent(name)
-                let target = seeded.appendingPathComponent(name)
-                XCTAssertEqual(try Data(contentsOf: source), Data([UInt8(i), UInt8(j)]))
-                XCTAssertEqual(try Data(contentsOf: target), Data([UInt8(i), UInt8(j)]))
-                try fm.setAttributes([.modificationDate: fixed], ofItemAtPath: target.path)
-            }
-        }
-        f.inventory.experimentalOfflineNamePreparation = false
-        let mapping = try MountedFolderMapping(rootID: "photos", source: f.source, target: f.target)
-        try f.journal.verifyDirectoryBindings([mapping], allowNewTarget: true)
-        let auditStart = ProcessInfo.processInfo.systemUptime
-        let report = try SeededArchiveSession(database: f.db, mappings: [mapping])
+        try verifyBatch(root: target, prefix: "initial", folders: 120)
+        let mapping = try MountedFolderMapping(rootID: "photos", source: source, target: target)
+        try journal.verifyDirectoryBindings([mapping], allowNewTarget: true)
+        let report = try SeededArchiveSession(database: db, mappings: [mapping])
             .auditPreservingQueuedChanges(mode: .quick, repair: true, reconcileOrdinaryJobs: true)
-        XCTAssertEqual(report.queuedRepairs, 0)
         XCTAssertEqual(report.bytesRead, 0)
-        XCTAssertEqual(try f.inventory.pendingCount(), 0)
-        // The offline path cannot be used once a target is pinned.
-        f.inventory.experimentalOfflineNamePreparation = true
-        XCTAssertThrowsError(try f.inventory.reconcile(rootID: "photos", root: f.source, origin: .initialInventory))
-        XCTAssertEqual(try f.inventory.pendingCount(), 0)
-        print("OFFLINE_PREP_1200 folders=\(folders) files=\(folders * filesPerFolder) inventory=\(indexed-started) rectify=\(renamed-indexed) reconcile=\(reconciled-renamed) audit=\(ProcessInfo.processInfo.systemUptime-auditStart) pending=0")
-    }
 
-    func testOfflinePreparationRejectsOrdinaryEventsAndExistingQueueHistory() throws {
-        let f = try fixture()
-        defer { try? FileManager.default.removeItem(at: f.base) }
-        let file = f.source.appendingPathComponent("photo?.jpg")
-        try Data([1]).write(to: file)
-        f.inventory.experimentalOfflineNamePreparation = true
-        XCTAssertThrowsError(try f.inventory.reconcile(rootID: "photos", root: f.source, eventID: 1))
-        XCTAssertThrowsError(try f.inventory.reconcile(rootID: "photos", root: f.source, subtree: file, origin: .initialInventory))
-        XCTAssertEqual(try f.inventory.pendingCount(), 0)
-        f.inventory.experimentalOfflineNamePreparation = false
-        _ = try f.inventory.reconcile(rootID: "photos", root: f.source)
-        XCTAssertEqual(try f.inventory.pendingCount(), 1)
-        f.inventory.experimentalOfflineNamePreparation = true
-        XCTAssertThrowsError(try f.inventory.reconcile(rootID: "photos", root: f.source, origin: .initialInventory))
-        XCTAssertEqual(try f.inventory.pendingCount(), 1)
-        XCTAssertEqual(try f.journal.pending().first?.relativePath, "photo?.jpg")
+        // Same function, same root, same database, after binding and after
+        // actual queue history exists. No new operating mode or reset.
+        inventory = try LocalInventory(path: db.path)
+        inventory.experimentalSourceNameLineage = true
+        _ = try inventory.reconcile(rootID: "photos", root: source, eventID: 1)
+        try addBatch(root: source, prefix: "daily", folders: 35)
+        _ = try inventory.reconcile(rootID: "photos", root: source, eventID: 2)
+        // A historical incompatible target may exist. Keep it physically
+        // unchanged during local rectification; unknown is not absence.
+        let legacy = target.appendingPathComponent("daily-0 ")
+        try fm.createDirectory(at: legacy, withIntermediateDirectories: false)
+        let sentinel = legacy.appendingPathComponent("photo-0?.jpg")
+        try Data("legacy sentinel".utf8).write(to: sentinel)
+        let before = try LocalScanner.scan(root: target)
+        let secondTime = try rectify(inventory, root: source, db: db, expected: 350)
+        let second = try inventory.reconcile(rootID: "photos", root: source, eventID: 3)
+        XCTAssertEqual(second.queuedUpserts, 350)
+        XCTAssertEqual(second.queuedDeletes, 350)
+        XCTAssertEqual(try inventory.lastEventID(rootID: "photos"), 3)
+        XCTAssertTrue(try inventory.incompatibleNames(rootID: "photos", sourcePath: source.path).isEmpty)
+        try verifyBatch(root: source, prefix: "daily", folders: 35)
+        try verifyBatch(root: source, prefix: "initial", folders: 120)
+        XCTAssertEqual(try LocalScanner.scan(root: target), before)
+        XCTAssertEqual(try Data(contentsOf: sentinel), Data("legacy sentinel".utf8))
+        XCTAssertFalse(fm.fileExists(atPath: target.appendingPathComponent("daily-0").path))
+        print("REPEATABLE_NAME_BATCH initial=1200 initial_seconds=\(firstTime) subsequent=350 subsequent_seconds=\(secondTime) target_unchanged=true")
     }
 }
