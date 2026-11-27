@@ -142,6 +142,10 @@ final class SourceNameLineageInventoryTests: XCTestCase {
                 XCTAssertEqual(sqlite3_step(stmt), SQLITE_ROW)
                 return sqlite3_column_int64(stmt, 0)
             }
+            // The old JSON prototype consumed 5,984,256 logical bytes for
+            // this same 1000-file fixture. A generous 2 MiB overhead bound
+            // guards against reintroducing per-row binding duplication.
+            XCTAssertLessThan(try logicalBytes(shadow) - logicalBytes(baseline), 2 * 1024 * 1024)
             print("LINEAGE_SHADOW_COST count=\(count) baseline=\(baseTime) seed=\(seedTime) repeat=\(repeatTime) baseline_bytes=\(try logicalBytes(baseline)) shadow_bytes=\(try logicalBytes(shadow))")
         }
     }

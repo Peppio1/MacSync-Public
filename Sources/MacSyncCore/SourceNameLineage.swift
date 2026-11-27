@@ -60,6 +60,20 @@ enum SourceNameLineage {
             uncertainPublication = false
         }
 
+        // Rehydrate compact SQLite fields. The store validates them before use.
+        init(identity: Identity, rootID: String, sourceBinding: String,
+             targetBinding: String, path: String, evidence: Evidence,
+             recognizedPaths: [String], uncertainPublication: Bool) {
+            self.identity = identity
+            self.rootID = rootID
+            self.sourceBinding = sourceBinding
+            self.targetBinding = targetBinding
+            self.currentPath = path
+            self.evidence = evidence
+            self.recognizedPaths = recognizedPaths
+            self.uncertainPublication = uncertainPublication
+        }
+
         /// A failed, cancelled or interrupted copy can have published bytes.
         mutating func publicationStarted() {
             uncertainPublication = true

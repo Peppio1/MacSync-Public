@@ -749,6 +749,7 @@ public final class LocalInventory {
             return (row, identity)
         }
         let grouped = Dictionary(grouping: eligible, by: { $0.1 })
+        var batch: SourceNameLineageStore.Batch?
         for (row, identity) in eligible {
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             guard grouped[identity]?.count == 1 else { continue }
@@ -756,7 +757,9 @@ public final class LocalInventory {
                 sourceBinding: sourceBinding, targetBinding: targetBinding,
                 path: row.relativePath)
             let key = SourceNameLineageStore.Key(initial)
-            let saved = try SourceNameLineageStore.read(db, key: key)
+            if batch == nil { batch = try SourceNameLineageStore.batch(db, key: key, create: true) }
+            guard let batch else { throw SourceNameLineageStore.Failure.invalid }
+            let saved = try batch.read(key: key)
             var record = saved?.record ?? initial
             if let saved {
                 if saved.record.currentPath.utf8.elementsEqual(row.relativePath.utf8) { continue }
@@ -766,8 +769,7 @@ public final class LocalInventory {
             }
             // Never infer neverPublished from first observation. Never
             // promote a completed queue row to verified publication here.
-            try SourceNameLineageStore.write(db, record: record,
-                expectedRevision: saved?.revision)
+            try batch.write(record: record, expectedRevision: saved?.revision)
         }
     }
 

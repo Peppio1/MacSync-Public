@@ -129,7 +129,7 @@ final class SourceNameLineageStoreTests: XCTestCase {
             _ = try SourceNameLineageStore.write(db, record: initial, expectedRevision: nil)
             try sql(db, "COMMIT;")
             XCTAssertEqual(try journal.pending(limit: 100).map(\.id), before)
-            try sql(db, "UPDATE source_name_lineage SET record=x'00';")
+            try sql(db, "UPDATE source_lineage_index SET recognized_paths=x'00';")
             XCTAssertThrowsError(try SourceNameLineageStore.read(db, key: .init(initial)))
             XCTAssertEqual(try journal.pending(limit: 100).map(\.id), before)
         }
