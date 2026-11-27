@@ -293,6 +293,11 @@ final class QueueCompletionLedgerTests:XCTestCase {
 
     func testSweepResumesAndHonorsHourlyCadence()throws {
         try fixture {path,db in
+            let source=URL(fileURLWithPath:path).deletingLastPathComponent().appendingPathComponent("source")
+            try FileManager.default.createDirectory(at:source,withIntermediateDirectories:true)
+            // Mirror the production startup: receipt retention depends on the
+            // watched_roots and directory bindings initialized by inventory.
+            _=try LocalInventory(path:path).reconcile(rootID:"demo",root:source)
             let journal=try ChangeJournal(path:path)
             let first=try journal.enqueue(rootID:"demo",relativePath:"repeat.jpg",kind:.upsert)
             let second=try journal.enqueue(rootID:"demo",relativePath:"repeat.jpg",kind:.upsert)
@@ -318,6 +323,11 @@ final class QueueCompletionLedgerTests:XCTestCase {
 
     func testSweepYieldsToBusyWriterAndResumesWithoutLosingCursor()throws {
         try fixture {path,db in
+            let source=URL(fileURLWithPath:path).deletingLastPathComponent().appendingPathComponent("source")
+            try FileManager.default.createDirectory(at:source,withIntermediateDirectories:true)
+            // Mirror the production startup: receipt retention depends on the
+            // watched_roots and directory bindings initialized by inventory.
+            _=try LocalInventory(path:path).reconcile(rootID:"demo",root:source)
             let journal=try ChangeJournal(path:path)
             let first=try journal.enqueue(rootID:"demo",relativePath:"repeat.jpg",kind:.upsert)
             let second=try journal.enqueue(rootID:"demo",relativePath:"repeat.jpg",kind:.upsert)
