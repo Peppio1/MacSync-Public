@@ -21,6 +21,10 @@ final class DatabaseCompactionPolicyTests: XCTestCase {
         XCTAssertEqual(decision(65536, 16384, nil), .insufficientEvidence)
         XCTAssertEqual(decision(Int64.max, Int64.max / 2, Int64.max), .insufficientEvidence)
         XCTAssertEqual(decision(65536, 16384, Int64.max, wal: Int64.max), .insufficientEvidence)
+        XCTAssertEqual(decision(65536, -1, Int64.max), .insufficientEvidence)
+        XCTAssertEqual(decision(65536, 16384, Int64.max, wal: -1), .insufficientEvidence)
+        XCTAssertEqual(DatabaseCompactionPolicy.evaluate(pageSize: 3000, pageCount: 65536,
+                       freePages: 16384, walBytes: 0, availableBytes: Int64.max), .insufficientEvidence)
     }
 
     /// Exercise existing compact-backup machinery on a tiny synthetic file.
