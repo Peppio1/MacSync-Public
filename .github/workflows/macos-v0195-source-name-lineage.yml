@@ -8,6 +8,8 @@ on:
       - 'Sources/MacSyncCore/ChangeJournal.swift'
       - 'Sources/MacSyncCore/ArchiveAudit.swift'
       - 'Sources/MacSyncCore/MountedFolderCopy.swift'
+      - 'Sources/MacSyncCore/MirrorDeletion.swift'
+      - 'Tests/MacSyncCoreTests/SourceNameLineageQueueTests.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageTransferTests.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageAuditTests.swift'
       - 'Tests/MacSyncCoreTests/OfflineNamePreparationTests.swift'

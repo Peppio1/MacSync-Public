@@ -46,6 +46,18 @@ enum SourceNameLineageStore {
         ) WITHOUT ROWID;
         """
 
+    // Installed only by the queue-protection prototype, not by the ordinary
+    // shadow index. The hold is protective, never a new deletion permission.
+    private static let protectionSQL = """
+        CREATE INDEX IF NOT EXISTS idx_lineage_current_path ON source_lineage_index(mapping_id,current_path);
+        CREATE TABLE IF NOT EXISTS source_lineage_hold(
+            mapping_id INTEGER NOT NULL, identity BLOB NOT NULL, protected_path TEXT NOT NULL,
+            reason INTEGER NOT NULL CHECK(reason IN (0,1)),
+            PRIMARY KEY(mapping_id,identity,protected_path)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS idx_lineage_hold_path ON source_lineage_hold(mapping_id,protected_path);
+        """
+
     private static let maximumRecordBytes = 1_048_576
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     private static func failure(_ db: OpaquePointer) -> JournalError {
@@ -102,6 +114,172 @@ enum SourceNameLineageStore {
     static func install(_ db: OpaquePointer) throws {
         guard sqlite3_exec(db, schemaSQL, nil, nil, nil) == SQLITE_OK else { throw failure(db) }
     }
+    static func installProtection(_ db: OpaquePointer) throws {
+        try install(db)
+        guard sqlite3_exec(db,protectionSQL,nil,nil,nil) == SQLITE_OK else { throw failure(db) }
+    }
+
+    static func protectionInstalled(_ db: OpaquePointer) throws -> Bool {
+        let q = try prepare(db,"SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_lineage_hold';")
+        defer { sqlite3_finalize(q) }
+        let rc = sqlite3_step(q)
+        guard rc == SQLITE_ROW || rc == SQLITE_DONE else { throw failure(db) }
+        return rc == SQLITE_ROW
+    }
+
+    private static func bindScope(_ root: String,_ source: String,_ target: String,
+                                  _ stmt: OpaquePointer,_ db: OpaquePointer) throws {
+        try bind(root,1,stmt,db); try bind(source,2,stmt,db); try bind(target,3,stmt,db)
+    }
+
+    // Before the old path can enter the queue, persist a provisional hold.
+    // Even an event containing only a disappearance is not proof of deletion.
+    static func holdMissing(_ db: OpaquePointer,root: String,source: String,target: String,path: String) throws {
+        guard WindowsPathSafety.validRelativePath(path) else { return }
+        let q = try prepare(db,"""
+            INSERT OR IGNORE INTO source_lineage_hold(mapping_id,identity,protected_path,reason)
+            SELECT i.mapping_id,i.identity,i.current_path,0 FROM source_lineage_index i
+            JOIN source_lineage_mapping m ON m.id=i.mapping_id
+            WHERE m.root_id=?1 AND m.source_binding=?2 AND m.target_binding=?3
+              AND i.current_path=?4 AND (i.recognized_paths IS NOT NULL OR i.uncertain=1);
+            """)
+        defer { sqlite3_finalize(q) }
+        try bindScope(root,source,target,q,db); try bind(path,4,q,db)
+        guard sqlite3_step(q)==SQLITE_DONE else { throw failure(db) }
+    }
+
+    // A known new local invalid spelling cannot have been published by this
+    // worker. This is NOT a statement that a legacy server object is absent.
+    // Only retire speculative source-monitor uploads; never consume existing
+    // DELETE jobs, completed historical jobs or unresolved recovery evidence.
+    static func retireSpeculativeInvalidUpload(_ db: OpaquePointer,root: String,source: String,target: String,
+                                               path: String,old: TrackedItem) throws -> Bool {
+        guard !WindowsPathSafety.validRelativePath(path) else { return false }
+        let q = try prepare(db,"""
+            SELECT i.identity FROM source_lineage_index i
+            JOIN source_lineage_mapping m ON m.id=i.mapping_id
+            WHERE m.root_id=?1 AND m.source_binding=?2 AND m.target_binding=?3
+              AND i.current_path=?4 AND i.uncertain=0 AND i.evidence IN (1,2)
+              AND NOT EXISTS(SELECT 1 FROM change_queue q
+                WHERE q.root_id=?1 AND q.relative_path=?4
+                  AND (q.completed=1 OR q.kind<>'upsert' OR q.origin<>'source_monitor'))
+              AND NOT EXISTS(SELECT 1 FROM publication_intents p WHERE p.root_id=?1 AND p.relative_path=?4)
+              AND NOT EXISTS(SELECT 1 FROM transfer_recovery r WHERE r.root_id=?1 AND r.relative_path=?4);
+            """)
+        defer { sqlite3_finalize(q) }
+        try bindScope(root,source,target,q,db); try bind(path,4,q,db)
+        let rc=sqlite3_step(q)
+        if rc==SQLITE_DONE { return false }
+        guard rc==SQLITE_ROW, sqlite3_column_bytes(q,0)==33, let bytes=sqlite3_column_blob(q,0) else { throw Failure.invalid }
+        let identity=Data(bytes:bytes,count:33)
+        // Files retain their old inode in inventory. Directories lack that
+        // persisted fingerprint; do not suppress those speculative jobs yet.
+        guard old.kind=="file", identity.last==1,
+              let inode=old.changeStamp?.split(separator:":").first.flatMap({UInt64($0)}) else { return false }
+        var encoded=inode.bigEndian
+        let inodeBytes=withUnsafeBytes(of:&encoded){Data($0)}
+        guard Data(identity.dropFirst(8).prefix(8))==inodeBytes else { return false }
+        let next=sqlite3_step(q)
+        if next==SQLITE_ROW { return false }
+        guard next==SQLITE_DONE else { throw failure(db) }
+        let retire=try prepare(db,"""
+            DELETE FROM change_queue WHERE root_id=? AND relative_path=? AND completed=0
+              AND kind='upsert' AND origin='source_monitor';
+            """)
+        defer { sqlite3_finalize(retire) }
+        try bind(root,1,retire,db); try bind(path,2,retire,db)
+        guard sqlite3_step(retire)==SQLITE_DONE else { throw failure(db) }
+        return true
+    }
+
+    static func protected(_ db: OpaquePointer,root: String,path: String) throws -> Bool {
+        guard try protectionInstalled(db) else { return false }
+        let q=try prepare(db,"""
+            SELECT 1 FROM source_lineage_hold h JOIN source_lineage_mapping m ON m.id=h.mapping_id
+            WHERE m.root_id=?1 AND (h.protected_path=?2 OR
+              instr(h.protected_path,?2||'/')=1 OR instr(?2,h.protected_path||'/')=1) LIMIT 1;
+            """)
+        defer { sqlite3_finalize(q) }
+        try bind(root,1,q,db); try bind(path,2,q,db)
+        let rc=sqlite3_step(q)
+        guard rc==SQLITE_ROW || rc==SQLITE_DONE else { throw failure(db) }
+        return rc==SQLITE_ROW
+    }
+
+    // Resolve only provisional disappearance holds using a complete local
+    // scan already required by mirror. Hard links (not eligible for lineage)
+    // still contribute their device/inode fingerprints and retain the hold.
+    static func resolveMissing(_ db: OpaquePointer,root: String,rows: [TrackedItem],
+                               shouldContinue: () -> Bool) throws {
+        guard try protectionInstalled(db) else { return }
+        var present=Set<Data>()
+        for row in rows {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            guard let f=row.verificationFingerprint else { continue }
+            var key=Data(capacity:16)
+            for value in [f.device,f.inode] {
+                var word=value.bigEndian
+                withUnsafeBytes(of:&word){key.append(contentsOf:$0)}
+            }
+            present.insert(key)
+        }
+        let q=try prepare(db,"""
+            SELECT h.mapping_id,h.identity,h.protected_path FROM source_lineage_hold h
+            JOIN source_lineage_mapping m ON m.id=h.mapping_id
+            JOIN source_lineage_index i ON i.mapping_id=h.mapping_id AND i.identity=h.identity
+            JOIN directory_bindings s ON s.root_id=m.root_id AND s.role='source' AND s.stamp=m.source_binding
+            JOIN directory_bindings t ON t.root_id=m.root_id AND t.role='target' AND t.stamp=m.target_binding
+            WHERE m.root_id=?1 AND h.reason=0 AND i.uncertain=0 AND i.evidence=2
+              AND i.current_path=h.protected_path
+              AND NOT EXISTS(SELECT 1 FROM file_inventory f WHERE f.root_id=?1 AND f.relative_path=h.protected_path);
+            """)
+        defer { sqlite3_finalize(q) }
+        try bind(root,1,q,db)
+        var removable:[(Int64,Data,String)]=[]
+        var rc=sqlite3_step(q)
+        while rc==SQLITE_ROW {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            guard sqlite3_column_bytes(q,1)==33,let p=sqlite3_column_blob(q,1),let name=sqlite3_column_text(q,2) else { throw Failure.invalid }
+            let id=Data(bytes:p,count:33)
+            if !present.contains(Data(id.prefix(16))) {
+                removable.append((sqlite3_column_int64(q,0),id,String(cString:name)))
+            }
+            rc=sqlite3_step(q)
+        }
+        guard rc==SQLITE_DONE else { throw failure(db) }
+        let remove=try prepare(db,"DELETE FROM source_lineage_hold WHERE mapping_id=? AND identity=? AND protected_path=? AND reason=0;")
+        defer { sqlite3_finalize(remove) }
+        for (namespace,id,name) in removable {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            reset(remove)
+            guard sqlite3_bind_int64(remove,1,namespace)==SQLITE_OK else { throw failure(db) }
+            try bindBlob(id,2,remove,db); try bind(name,3,remove,db)
+            guard sqlite3_step(remove)==SQLITE_DONE else { throw failure(db) }
+        }
+    }
+
+    // Explicit mapping retirement only. Never remove archive files.
+    static func retireRoot(_ db: OpaquePointer,root: String) throws {
+        let q=try prepare(db,"SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_lineage_mapping';")
+        defer { sqlite3_finalize(q) }
+        let rc=sqlite3_step(q)
+        if rc==SQLITE_DONE { return }
+        guard rc==SQLITE_ROW else { throw failure(db) }
+        reset(q)
+        var tables=["source_lineage_index"]
+        if try protectionInstalled(db) { tables.append("source_lineage_hold") }
+        for table in tables {
+            let remove=try prepare(db,"DELETE FROM "+table+" WHERE mapping_id IN (SELECT id FROM source_lineage_mapping WHERE root_id=?);")
+            defer { sqlite3_finalize(remove) }
+            try bind(root,1,remove,db)
+            guard sqlite3_step(remove)==SQLITE_DONE else { throw failure(db) }
+        }
+        let remove=try prepare(db,"DELETE FROM source_lineage_mapping WHERE root_id=?;")
+        defer { sqlite3_finalize(remove) }
+        try bind(root,1,remove,db)
+        guard sqlite3_step(remove)==SQLITE_DONE else { throw failure(db) }
+    }
+
     private static func mapping(_ db: OpaquePointer, key: Key, create: Bool) throws -> Int64? {
         guard !key.rootID.isEmpty, !key.sourceBinding.isEmpty, !key.targetBinding.isEmpty else { throw Failure.invalid }
         func bindMapping(_ stmt: OpaquePointer) throws {
@@ -212,6 +390,44 @@ enum SourceNameLineageStore {
             return Versioned(record: record, revision: revision)
         }
 
+        func protectRename(_ record: SourceNameLineage.Record) throws {
+            let key=Key(record)
+            let q=try prepare(db,"""
+                INSERT INTO source_lineage_hold(mapping_id,identity,protected_path,reason) VALUES(?,?,?,1)
+                ON CONFLICT(mapping_id,identity,protected_path) DO UPDATE SET reason=1;
+                """)
+            defer { sqlite3_finalize(q) }
+            // Also preserve an unresolved compatible publication.
+            var paths=record.recognizedPaths
+            if record.uncertainPublication, WindowsPathSafety.validRelativePath(record.currentPath),
+               !paths.contains(where:{$0.utf8.elementsEqual(record.currentPath.utf8)}) { paths.append(record.currentPath) }
+            for path in paths {
+                reset(q)
+                try bindIdentity(key,q); try bind(path,3,q,db)
+                guard sqlite3_step(q)==SQLITE_DONE else { throw failure(db) }
+            }
+        }
+
+        // Release only when the exact corrected path has been confirmed.
+        // Alias-equivalent old paths cannot become separate delete targets.
+        func releaseConfirmed(_ record: SourceNameLineage.Record) throws {
+            guard !record.uncertainPublication, WindowsPathSafety.validRelativePath(record.currentPath),
+                  record.recognizedPaths.contains(where:{$0.utf8.elementsEqual(record.currentPath.utf8)}),
+                  try protectionInstalled(db) else { return }
+            func fold(_ value:String)->String {
+                value.split(separator:"/",omittingEmptySubsequences:false)
+                    .map{WindowsPathSafety.comparisonFold(String($0))}.joined(separator:"/")
+            }
+            let folded=fold(record.currentPath)
+            guard !record.recognizedPaths.contains(where:{
+                !$0.utf8.elementsEqual(record.currentPath.utf8) && fold($0)==folded
+            }) else { return }
+            let q=try prepare(db,"DELETE FROM source_lineage_hold WHERE mapping_id=? AND identity=?;")
+            defer { sqlite3_finalize(q) }
+            try bindIdentity(Key(record),q)
+            guard sqlite3_step(q)==SQLITE_DONE else { throw failure(db) }
+        }
+
         @discardableResult
         func write(record: SourceNameLineage.Record, expectedRevision: Int64?) throws -> Versioned {
             guard sqlite3_get_autocommit(db) == 0 else { throw Failure.transactionRequired }
@@ -248,6 +464,10 @@ enum SourceNameLineageStore {
     static func batch(_ db: OpaquePointer, key: Key, create: Bool) throws -> Batch? {
         guard let id = try mapping(db, key: key, create: create) else { return nil }
         return try Batch(db, key: key, namespace: id)
+    }
+    static func releaseConfirmed(_ db: OpaquePointer,record: SourceNameLineage.Record) throws {
+        guard try protectionInstalled(db),let batch=try batch(db,key:Key(record),create:false) else { return }
+        try batch.releaseConfirmed(record)
     }
     static func read(_ db: OpaquePointer, key: Key) throws -> Versioned? {
         try batch(db, key: key, create: false)?.read(key: key)

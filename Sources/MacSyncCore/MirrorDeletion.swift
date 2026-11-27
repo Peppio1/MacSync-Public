@@ -747,6 +747,8 @@ public final class MirrorDeletionWorker {
                         try journal.latchMirrorBlock(reason)
                         throw MirrorDeletionFailure.bulkDeletion(reason)
                     }
+                    try journal.resolveLineageMissing(rootID:job.rootID,rows:currentInventory,
+                        shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() })
                     availableRoots.insert(job.rootID)
                 }
                 guard try journal.deletionIsCurrent(

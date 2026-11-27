@@ -1370,6 +1370,7 @@ public final class ChangeJournal {
                         var record = saved.record
                         record.recognize(path:entry.relativePath)
                         try SourceNameLineageStore.write(connection,record:record,expectedRevision:saved.revision)
+                        try SourceNameLineageStore.releaseConfirmed(connection,record:record)
                     }
                 }
                 if entry.objectKind=="directory" { directories+=changed } else { files+=changed }
@@ -1462,6 +1463,7 @@ public final class ChangeJournal {
                 var record = prior?.record ?? initial
                 record.recognize(path:item.relativePath)
                 try batch.write(record:record,expectedRevision:prior?.revision)
+                try batch.releaseConfirmed(record)
             }
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             try execute("COMMIT;")
@@ -2091,6 +2093,7 @@ public final class ChangeJournal {
     /// Any new upload or inventory entry makes an old delete unsafe.
     /// Check both before the move/remove and again when acknowledging it.
     public func deletionIsCurrent(id: Int64, rootID: String, relativePath: String) throws -> Bool {
+        if let connection,try SourceNameLineageStore.protected(connection,root:rootID,path:relativePath) { return false }
         let stmt = try prepare("""
             SELECT COUNT(*) FROM change_queue q
             WHERE q.id=? AND q.root_id=? AND q.relative_path=?
@@ -2115,6 +2118,7 @@ public final class ChangeJournal {
 
     @discardableResult
     public func acknowledgeDeletion(id: Int64, rootID: String, relativePath: String) throws -> Bool {
+        if let connection,try SourceNameLineageStore.protected(connection,root:rootID,path:relativePath) { return false }
         let stmt = try prepare("""
             UPDATE change_queue SET completed=1
             WHERE id=? AND root_id=? AND relative_path=? AND kind='delete' AND completed=0
@@ -2159,6 +2163,16 @@ public final class ChangeJournal {
         try bind(job.relativePath, at: 3, in: stmt)
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseFailure() }
         return sqlite3_changes(connection) == 1
+    }
+
+    func resolveLineageMissing(rootID:String,rows:[TrackedItem],shouldContinue:()->Bool) throws {
+        guard let connection,try SourceNameLineageStore.protectionInstalled(connection) else { return }
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            try SourceNameLineageStore.resolveMissing(connection,root:rootID,rows:rows,shouldContinue:shouldContinue)
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            try execute("COMMIT;")
+        } catch { try? execute("ROLLBACK;"); throw error }
     }
 
     // Shadow publication evidence is never derived from a generic completed
@@ -2252,6 +2266,7 @@ public final class ChangeJournal {
                     var updated = saved.record
                     updated.confirmAttempt(path:job.relativePath,previousUncertainty:token.priorUncertainty)
                     try SourceNameLineageStore.write(connection,record:updated,expectedRevision:saved.revision)
+                    try SourceNameLineageStore.releaseConfirmed(connection,record:updated)
                 }
             }
             try execute("COMMIT;")

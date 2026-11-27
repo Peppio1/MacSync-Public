@@ -298,6 +298,7 @@ public final class LocalInventory {
     private var db: OpaquePointer?
     // Shadow observations only. No queue or mirror decision may depend on them.
     var experimentalSourceNameLineage = false
+    var experimentalLineageQueueProtection = false
 
     public init(path: String) throws {
         var handle: OpaquePointer?
@@ -417,6 +418,7 @@ public final class LocalInventory {
         }
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
+            if let db { try SourceNameLineageStore.retireRoot(db,root:rootID) }
             for table in ["change_queue", "file_inventory", "watched_roots", "directory_bindings", "source_name_members", "source_name_index_ready"] {
                 let statement = try prepare("DELETE FROM " + table + " WHERE root_id = ?;")
                 defer { sqlite3_finalize(statement) }
@@ -436,6 +438,7 @@ public final class LocalInventory {
     public func requeueAllForNewDestination(rootID: String) throws {
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
+            if let db { try SourceNameLineageStore.retireRoot(db,root:rootID) }
             let delete = try prepare("""
                 DELETE FROM change_queue WHERE root_id=? AND completed=0;
                 """)
@@ -480,6 +483,7 @@ public final class LocalInventory {
             }
             guard code == SQLITE_DONE else { throw failure() }
             for id in old {
+                if let db { try SourceNameLineageStore.retireRoot(db,root:id) }
                 for sql in ["DELETE FROM change_queue WHERE root_id=? AND completed=0;", "DELETE FROM file_inventory WHERE root_id=?;", "DELETE FROM watched_roots WHERE root_id=?;", "DELETE FROM directory_bindings WHERE root_id=?;", "DELETE FROM source_name_members WHERE root_id=?;", "DELETE FROM source_name_index_ready WHERE root_id=?;"] {
                     let stmt = try prepare(sql)
                     defer { sqlite3_finalize(stmt) }
@@ -659,10 +663,26 @@ public final class LocalInventory {
                 receiptCandidates[key]=result
                 return result
             }
+            var lineageTarget: String?
+            if experimentalSourceNameLineage && experimentalLineageQueueProtection {
+                guard let db else { throw failure() }
+                try SourceNameLineageStore.installProtection(db)
+                let q=try prepare("SELECT stamp FROM directory_bindings WHERE root_id=? AND role='target';")
+                defer { sqlite3_finalize(q) }
+                try bind(rootID,at:1,statement:q)
+                let rc=sqlite3_step(q)
+                if rc==SQLITE_ROW { lineageTarget=column(q,0) }
+                else if rc != SQLITE_DONE { throw failure() }
+            }
             for (path, oldItem) in affected where seen[path] == nil {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 try remove(rootID: rootID, relativePath: path)
                 if FileExclusionPolicy.excludes(path,enabled:ignoreDSStore) { continue }
+                if let targetBinding=lineageTarget,let db {
+                    try SourceNameLineageStore.holdMissing(db,root:rootID,source:binding,target:targetBinding,path:path)
+                    if try SourceNameLineageStore.retireSpeculativeInvalidUpload(db,root:rootID,
+                        source:binding,target:targetBinding,path:path,old:oldItem) { continue }
+                }
                 let jobID=try enqueue(rootID: rootID, relativePath: path, kind: .delete, origin: .sourceMonitor)
                 deletes += 1
                 // Only automatic rectifications of incompatible components
@@ -714,7 +734,9 @@ public final class LocalInventory {
             guard try DirectoryBinding.encoded(root) == binding else { throw MountedCopyError.sourceRootChanged }
             if experimentalSourceNameLineage {
                 try observeSourceNameLineage(rootID: rootID, sourceBinding: binding,
-                    rows: rows, shouldContinue: shouldContinue)
+                    rows: rows, before: before, previousScan: previousScan,
+                    sourceEvent: origin == .sourceMonitor && eventID != nil,
+                    shouldContinue: shouldContinue)
             }
             try saveRoot(rootID: rootID, rootPath: root.path, eventID: checkpoint)
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
@@ -731,7 +753,8 @@ public final class LocalInventory {
     /// the subsequent new-path observation can recover the same identity.
     /// No filesystem calls or queue decisions occur here.
     private func observeSourceNameLineage(rootID: String, sourceBinding: String,
-                                          rows: [TrackedItem],
+                                          rows: [TrackedItem], before: [String:TrackedItem],
+                                          previousScan: Date?, sourceEvent: Bool,
                                           shouldContinue: () -> Bool) throws {
         guard let db else { throw failure() }
         let query = try prepare("SELECT stamp FROM directory_bindings WHERE root_id=? AND role='target';")
@@ -753,9 +776,16 @@ public final class LocalInventory {
         for (row, identity) in eligible {
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             guard grouped[identity]?.count == 1 else { continue }
+            // New local invalid object created after a prior inventory event.
+            // This proves only lack of publication by this lifecycle, NOT
+            // absence of an independent or legacy object on the server.
+            let birth=Double(identity.birthSeconds)+Double(identity.birthNanos)/1_000_000_000
+            let newInvalid = experimentalLineageQueueProtection && sourceEvent &&
+                before[row.relativePath] == nil && !WindowsPathSafety.validRelativePath(row.relativePath) &&
+                previousScan.map{birth > $0.timeIntervalSince1970} == true
             let initial = SourceNameLineage.Record(identity: identity, rootID: rootID,
                 sourceBinding: sourceBinding, targetBinding: targetBinding,
-                path: row.relativePath)
+                path: row.relativePath,provenNew:newInvalid)
             let key = SourceNameLineageStore.Key(initial)
             if batch == nil { batch = try SourceNameLineageStore.batch(db, key: key, create: true) }
             guard let batch else { throw SourceNameLineageStore.Failure.invalid }
@@ -763,12 +793,13 @@ public final class LocalInventory {
             var record = saved?.record ?? initial
             if let saved {
                 if saved.record.currentPath.utf8.elementsEqual(row.relativePath.utf8) { continue }
+                if experimentalLineageQueueProtection { try batch.protectRename(record) }
                 _ = record.observe(identity: identity, path: row.relativePath,
                     rootID: rootID, sourceBinding: sourceBinding, targetBinding: targetBinding,
                     uniqueObservation: true)
             }
-            // Never infer neverPublished from first observation. Never
-            // promote a completed queue row to verified publication here.
+            // Unknown existing archive entries stay unknown. Never promote
+            // a generic completed queue row to verified publication here.
             try batch.write(record: record, expectedRevision: saved?.revision)
         }
     }
