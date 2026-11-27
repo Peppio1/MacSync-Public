@@ -642,7 +642,7 @@ struct MacSyncConfigurationView: View {
         .sheet(isPresented: $showSummary) {
             SyncHistorySheet(copy:copy,model:model,initialMetric:initialMetric)
         }
-        .sheet(isPresented:$showTechnicalLog) { TechnicalLogSheet(copy:copy,model:model,previewOnly:runtime.previewOnly) }
+        .sheet(isPresented:$showTechnicalLog) { TechnicalLogSheet(copy:copy) }
         .sheet(isPresented:$showQueue) { QueuePreviewSheet(copy:copy,model:model) }
     }
     private var globalActivity: String {
@@ -1186,7 +1186,7 @@ struct MacSyncConfigurationView: View {
                         }
                     }
                     Text(macSyncDateTime(entry.timestamp) + " · " + macSyncRootName(entry.rootID) + " · " + String(format: "%.2f s", entry.durationSeconds)).font(.caption).foregroundStyle(.secondary)
-                    if !entry.relativePath.isEmpty { LogArchivePathDetail(entry:entry,model:model,disabled:runtime.previewOnly || runtime.folderConfigurationBusy) }
+                    if !entry.relativePath.isEmpty { Text(entry.relativePath).lineLimit(2).help(entry.relativePath).textSelection(.enabled) }
                     Text(entry.message).lineLimit(3).help(entry.message).textSelection(.enabled)
                 }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))

@@ -421,27 +421,13 @@ private struct HistoryDetailsSheet:View {
                 Spacer()
                 Button("Visualizza"){open(show:true)}
                     .disabled(rows.first(where:{$0.id==selectedRow}).map{!canView($0.event)} ?? true)
-
-            }
-            if let row=rows.first(where:{$0.id==selectedRow}) {
-                let path=archivePath(row.event)
-                ArchivePathBlock(path:path)
-                ArchiveFinderButton(path:path,rootID:row.event.rootID,model:model)
+                Button("Apri percorso"){open(show:false)}.disabled(selectedRow==nil)
             }
             if busy { ProgressView().controlSize(.small) }
             if !message.isEmpty { Text(message).font(.caption).foregroundStyle(.orange) }
-        }.padding(18).frame(width:1000,height:620)
+        }.padding(18).frame(width:1000,height:540)
         .onAppear{load(reset:true)}
         .onChange(of:root){_ in load(reset:true)}
-    }
-    private func archivePath(_ e:SyncCycleEvent)->ArchivePathPresentation {
-        let kind:ArchivePathPresentation.Kind = [.directoryCreated,.directoryRemoved].contains(e.kind) ? .directory :
-            ([.newFile,.updatedFile,.stageCopy,.backupCopy].contains(e.kind) ? .file : .unknown)
-        if e.kind == .recovered,let recovered=e.recoveryPath,recovered.hasPrefix(e.targetRoot+"/.macsync-recovery/") {
-            return .init(root:e.targetRoot,relative:String(recovered.dropFirst(e.targetRoot.count+1)),side:.destination,kind:kind)
-        }
-        let source=(e.kind == .deferred || e.kind == .failed) && !e.isDeleteJob
-        return .init(root:source ? e.sourceRoot:e.targetRoot,relative:e.relativePath,side:source ? .source:.destination,kind:kind)
     }
     private func canView(_ e:SyncCycleEvent)->Bool {
         ![.deleted,.directoryCreated,.directoryRemoved,.recoveryExpired,.backupCopy,.stageCopy].contains(e.kind)
@@ -986,16 +972,10 @@ private struct AuditResultSheet:View {
                 Button("Successivi") { offset += 200 }.disabled(loading || offset+rows.count >= total)
                 Spacer()
                 Button("Visualizza"){open(true)}.disabled(rows.first(where:{$0.id==selected})?.objectKind != "file")
-
-            }
-            if let finding=rows.first(where:{$0.id==selected}) {
-                let destination=finding.kind == .extra || finding.kind == .matching
-                let path=ArchivePathPresentation(root:destination ? finding.targetRoot:finding.sourceRoot,relative:finding.relativePath,side:destination ? .destination:.source,kind:.init(finding.objectKind))
-                ArchivePathBlock(path:path)
-                ArchiveFinderButton(path:path,rootID:finding.rootID,model:model)
+                Button("Apri percorso"){open(false)}.disabled(selected==nil)
             }
             Text(message).foregroundStyle(.orange).font(.caption)
-        }.padding(18).frame(width:1000,height:660)
+        }.padding(18).frame(width:1000,height:600)
             .onChange(of:search) { _ in offset = 0 }
             .onChange(of:root) { _ in offset = 0 }
             .task(id:request) { await load(request) }

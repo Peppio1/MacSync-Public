@@ -70,32 +70,3 @@ struct ArchiveFinderButton: View {
         }
     }
 }
-
-/// Older activity records contain only root ID and relative name, not the
-/// historical root or reliable file type. Label current choices explicitly.
-@MainActor
-struct LogArchivePathDetail: View {
-    let entry:SyncLogEntry
-    let model:MacSyncViewModel?
-    var disabled=false
-    @State private var side:ArchivePathPresentation.Side = .source
-    var body:some View {
-        let pair=model?.configuredPairs().first(where:{$0.id==entry.rootID})
-        let kind:ArchivePathPresentation.Kind = ["rclone_mkdir","mirror_directory_removed","name_rectified_directory"].contains(entry.action) ? .directory : .unknown
-        if let pair, let model {
-            VStack(alignment:.leading,spacing:5) {
-                Text("Radice attuale della coppia (non registrata nell’evento storico)").font(.caption).foregroundStyle(.secondary)
-                Picker("Lato da consultare",selection:$side) {
-                    Text("Sorgente").tag(ArchivePathPresentation.Side.source)
-                    Text("Destinazione").tag(ArchivePathPresentation.Side.destination)
-                }.pickerStyle(.segmented).frame(maxWidth:280)
-                let path=ArchivePathPresentation(root:side == .source ? pair.path:pair.destination,relative:entry.relativePath,side:side,kind:kind)
-                ArchivePathBlock(path:path,currentRoot:true)
-                ArchiveFinderButton(path:path,rootID:entry.rootID,model:model,disabled:disabled)
-                    .id(side)
-            }
-        } else {
-            ArchivePathBlock(path:.init(root:"",relative:entry.relativePath,side:.unknown,kind:kind))
-        }
-    }
-}
