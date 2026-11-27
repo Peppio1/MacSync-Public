@@ -5,8 +5,11 @@ import Foundation
 /// Callers must still prove exclusive access and verify a recovery copy.
 public enum DatabaseCompactionPolicy {
     public enum Decision: Equatable, Sendable {
-        case insufficientEvidence, insufficientReclaim, insufficientSpace, eligible
+        case insufficientEvidence, insufficientReclaim, insufficientSpace, sizeLimit, backupLimit, preparationFailed, eligible
     }
+
+    public static let maximumAutomaticBytes: Int64 = 512 * 1024 * 1024
+    public static let maximumRetainedBackups = 3
 
     /// Conservative initial thresholds, independent of WAL size. WAL bytes
     /// are included only in the scratch-space estimate, not the reclaim estimate.
@@ -27,6 +30,7 @@ public enum DatabaseCompactionPolicy {
         let (scratch, scratchOverflow) = total.multipliedReportingOverflow(by: 3)
         let (required, requiredOverflow) = scratch.addingReportingOverflow(minimumReclaim)
         guard !totalOverflow, !scratchOverflow, !requiredOverflow else { return .insufficientEvidence }
+        guard total <= maximumAutomaticBytes else { return .sizeLimit }
         return availableBytes >= required ? .eligible : .insufficientSpace
     }
 }

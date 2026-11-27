@@ -28,28 +28,52 @@ public enum OfflineDatabaseCompaction {
     /// Startup only: the caller has acquired the archive lock but has
     /// not constructed any runtime readers, writers or source watchers.
     public static func runBeforeRuntime(in folder: URL, lock: ExclusiveArchiveLock) throws -> Result {
+        try runBeforeRuntime(in: folder, lock: lock, prepareBackup: ArchiveDatabaseSafety.backup)
+    }
+
+    // Injectable only inside the module for a deterministic pre-mutation
+    // failure test. Once the marker is published no failure is suppressed.
+    static func runBeforeRuntime(in folder: URL, lock: ExclusiveArchiveLock,
+                                 prepareBackup: (URL, URL) throws -> Void) throws -> Result {
         defer { withExtendedLifetime(lock) {} }
         try lock.verifyHeld(at: folder.appendingPathComponent("archive.lock"))
         _ = try CompactionRecovery.verifyPending(in: folder, lock: lock)
         let db = folder.appendingPathComponent("inventory.sqlite")
         let identity = try ArchiveDatabaseSafety.fileIdentity(db)
-        let sample = DatabaseDiagnosticSnapshot.collect(databasePath: db.path, includeCounts: false)
+        let sample = DatabaseDiagnosticSnapshot.collectForCompaction(databasePath: db.path)
         guard sample.complete, let before = sample.databaseBytes else {
             return .skipped(.insufficientEvidence)
         }
-        let capacity = try folder.resourceValues(forKeys: [.volumeAvailableCapacityKey]).volumeAvailableCapacity
+        let capacity = (try? folder.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?.volumeAvailableCapacity
         let decision = DatabaseCompactionPolicy.evaluate(pageSize: sample.pageSize, pageCount: sample.pageCount,
             freePages: sample.freePages, walBytes: sample.walBytes, availableBytes: capacity.map { Int64($0) })
         guard decision == .eligible else { return .skipped(decision) }
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else {
+            return .skipped(.insufficientEvidence)
+        }
+        // Never delete recovery copies automatically. When the conservative
+        // cap is reached, defer rather than create additional backups.
+        guard entries.filter({ $0.hasPrefix("compaction-backup-") }).count
+                < DatabaseCompactionPolicy.maximumRetainedBackups else {
+            return .skipped(.backupLimit)
+        }
         let digest = try ApplicationRollback.operationalDatabaseDigest(db)
         let backupID = UUID()
         let backupFolder = folder.appendingPathComponent("compaction-backup-" + backupID.uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: backupFolder, withIntermediateDirectories: false,
-                                                attributes: [.posixPermissions: 0o700])
         let backup = backupFolder.appendingPathComponent("inventory.sqlite")
-        // Retain this recovery copy on any error; never automatically roll
-        // back a database by replacing it with an older snapshot.
-        try ArchiveDatabaseSafety.backup(db, to: backup)
+        do {
+            try FileManager.default.createDirectory(at: backupFolder, withIntermediateDirectories: false,
+                                                    attributes: [.posixPermissions: 0o700])
+            try prepareBackup(db, backup)
+        } catch {
+            // No compaction marker or VACUUM has been issued here.
+            // Resume only when the original is independently verified.
+            // Keep any incomplete backup directory for inspection.
+            try lock.verifyHeld(at: folder.appendingPathComponent("archive.lock"))
+            guard try ArchiveDatabaseSafety.fileIdentity(db) == identity,
+                  try ApplicationRollback.operationalDatabaseDigest(db) == digest else { throw error }
+            return .skipped(.preparationFailed)
+        }
         guard try ApplicationRollback.databaseDigest(backup, scratch: folder) == digest,
               try ApplicationRollback.operationalDatabaseDigest(db) == digest,
               try ArchiveDatabaseSafety.fileIdentity(db) == identity else {

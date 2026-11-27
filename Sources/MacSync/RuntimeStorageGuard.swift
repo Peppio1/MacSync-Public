@@ -129,10 +129,19 @@ final class RuntimeStorageGuard {
                 // Persist the attempt before work so a crash cannot cause
                 // repeated expensive maintenance at every restart.
                 defaults.set(now, forKey: compactionKey)
+                let started = ProcessInfo.processInfo.systemUptime
                 let result = try OfflineDatabaseCompaction.runBeforeRuntime(in: folder, lock: lock)
-                if case .compacted = result {
+                let seconds = ProcessInfo.processInfo.systemUptime - started
+                let message: String
+                switch result {
+                case let .compacted(before, after, _):
                     try ArchiveDatabaseSafety.verify(db)
+                    message = "Compattazione SQLite: prima=\(before) byte, dopo=\(after) byte, durata=\(seconds) s"
+                case let .skipped(reason):
+                    message = "Compattazione SQLite rinviata: \(reason), durata=\(seconds) s"
                 }
+                TechnicalFallbackLog.record(databasePath: db.path, cycleID: nil,
+                    action: "database_compaction", message: message)
             }
             // One verified snapshot per calendar day on startup; the migration
             // backup is a separate immutable directory. No automatic restore.

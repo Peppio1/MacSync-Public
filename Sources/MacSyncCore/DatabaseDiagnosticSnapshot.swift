@@ -15,6 +15,16 @@ public struct DatabaseDiagnosticSnapshot: Codable, Equatable, Sendable {
     public let complete:Bool
 
     public static func collect(databasePath:String, includeCounts:Bool=true) -> DatabaseDiagnosticSnapshot {
+        collect(databasePath: databasePath, includeCounts: includeCounts, allowWALRecovery: false)
+    }
+
+    /// Only for offline maintenance under the archive lock. The ordinary
+    /// export remains read-only. No SQL writes or CREATE are permitted.
+    static func collectForCompaction(databasePath:String) -> DatabaseDiagnosticSnapshot {
+        collect(databasePath: databasePath, includeCounts: false, allowWALRecovery: true)
+    }
+
+    private static func collect(databasePath:String, includeCounts:Bool, allowWALRecovery:Bool) -> DatabaseDiagnosticSnapshot {
         let start=ProcessInfo.processInfo.systemUptime
         let now=Date()
         func size(_ path:String,optional:Bool=false)->Int64? {
@@ -32,7 +42,7 @@ public struct DatabaseDiagnosticSnapshot: Codable, Equatable, Sendable {
         var counts:[String:Int64]=[:]
         var complete=false
         var db:OpaquePointer?
-        if sqlite3_open_v2(databasePath,&db,SQLITE_OPEN_READONLY,nil)==SQLITE_OK,let db {
+        if sqlite3_open_v2(databasePath,&db,allowWALRecovery ? SQLITE_OPEN_READWRITE : SQLITE_OPEN_READONLY,nil)==SQLITE_OK,let db {
             defer { sqlite3_close(db) }
             sqlite3_busy_timeout(db,100)
             // Bound read lock duration and total query work. A busy/large

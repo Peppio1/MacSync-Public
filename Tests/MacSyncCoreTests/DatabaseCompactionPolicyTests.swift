@@ -19,6 +19,7 @@ final class DatabaseCompactionPolicyTests: XCTestCase {
         XCTAssertEqual(decision(65536, 65536, Int64.max), .insufficientEvidence)
         XCTAssertEqual(decision(nil, 16384, Int64.max), .insufficientEvidence)
         XCTAssertEqual(decision(65536, 16384, nil), .insufficientEvidence)
+        XCTAssertEqual(decision(262144, 65536, 4096 * mib), .sizeLimit)
         XCTAssertEqual(decision(Int64.max, Int64.max / 2, Int64.max), .insufficientEvidence)
         XCTAssertEqual(decision(65536, 16384, Int64.max, wal: Int64.max), .insufficientEvidence)
         XCTAssertEqual(decision(65536, -1, Int64.max), .insufficientEvidence)
