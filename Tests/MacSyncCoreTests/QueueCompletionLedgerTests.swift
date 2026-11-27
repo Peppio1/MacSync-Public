@@ -229,19 +229,21 @@ final class QueueCompletionLedgerTests:XCTestCase {
             try FileManager.default.createDirectory(at:source,withIntermediateDirectories:true)
             _=try LocalInventory(path:path).reconcile(rootID:"demo",root:source)
             let journal=try ChangeJournal(path:path)
+            let count=ProcessInfo.processInfo.environment["MACSYNC_RETENTION_ROWS"]=="200000" ? 200000 : 10000
+            let half=count/2
             let started=ProcessInfo.processInfo.systemUptime
             try exec(db,"""
                 BEGIN IMMEDIATE;
-                WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<200000)
+                WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<\(count))
                 INSERT INTO change_queue(root_id,relative_path,kind,recorded_at,completed,origin)
-                SELECT 'demo','photo-'||((n-1)%100000)||'.jpg','upsert',1,0,'source_monitor' FROM seq;
+                SELECT 'demo','photo-'||((n-1)%\(half))||'.jpg','upsert',1,0,'source_monitor' FROM seq;
                 COMMIT;
                 """)
             let enqueue=ProcessInfo.processInfo.systemUptime-started
             let transition=ProcessInfo.processInfo.systemUptime
             try exec(db,"BEGIN IMMEDIATE; UPDATE change_queue SET completed=1; COMMIT;")
             let completion=ProcessInfo.processInfo.systemUptime-transition
-            XCTAssertEqual(try scalar(db,"SELECT count(*) FROM queue_completion_ledger;"),200000)
+            XCTAssertEqual(try scalar(db,"SELECT count(*) FROM queue_completion_ledger;"),Int64(count))
             let now=Date()
             try exec(db,"UPDATE queue_completion_ledger SET completed_at=1;")
             // Preserve a small set of older rows as explicit retired evidence.
@@ -260,14 +262,14 @@ final class QueueCompletionLedgerTests:XCTestCase {
                 removed+=page.removed;examined+=page.examined;pages+=1
                 cursor=page.nextAfterID
                 if page.finished {break}
-                guard pages<=801 else {throw JournalError.database("retention cursor failed to progress")}
+                guard pages<=count/250+1 else {throw JournalError.database("retention cursor failed to progress")}
             }
             let sweepSeconds=ProcessInfo.processInfo.systemUptime-sweep
-            XCTAssertEqual(examined,200000)
-            XCTAssertEqual(removed,99900)
-            XCTAssertEqual(try scalar(db,"SELECT count(*) FROM change_queue;"),100100)
-            XCTAssertEqual(try scalar(db,"SELECT count(*) FROM queue_completion_ledger;"),100100)
-            XCTAssertEqual(try scalar(db,"SELECT count(*) FROM change_queue WHERE id<=100 OR id>100000;"),100100)
+            XCTAssertEqual(examined,count)
+            XCTAssertEqual(removed,half-100)
+            XCTAssertEqual(try scalar(db,"SELECT count(*) FROM change_queue;"),Int64(half+100))
+            XCTAssertEqual(try scalar(db,"SELECT count(*) FROM queue_completion_ledger;"),Int64(half+100))
+            XCTAssertEqual(try scalar(db,"SELECT count(*) FROM change_queue WHERE id<=100 OR id>\(half);"),Int64(half+100))
             XCTAssertEqual(try journal.queueSequence(),sequence)
             XCTAssertTrue(try journal.pending().isEmpty)
             let after=DatabaseDiagnosticSnapshot.collect(databasePath:path)
@@ -280,7 +282,7 @@ final class QueueCompletionLedgerTests:XCTestCase {
             try ArchiveDatabaseSafety.backup(url,to:backup)
             try SignedRollbackTransaction.validateCompatibility(database:backup)
             XCTAssertEqual(try ChangeJournal(path:backup.path,readOnly:true).queueSequence(),sequence)
-            print("RETENTION_SCALE rows=200000 enqueueSeconds=\(enqueue) completionSeconds=\(completion) sweepSeconds=\(sweepSeconds) pages=\(pages) maxPageSeconds=\(maxSeconds) removed=\(removed) remaining=100100 beforePages=\(before.pageCount ?? -1) afterPages=\(after.pageCount ?? -1) beforeFree=\(before.freePages ?? -1) afterFree=\(after.freePages ?? -1)")
+            print("RETENTION_SCALE rows=\(count) enqueueSeconds=\(enqueue) completionSeconds=\(completion) sweepSeconds=\(sweepSeconds) pages=\(pages) maxPageSeconds=\(maxSeconds) removed=\(removed) remaining=\(half+100) beforePages=\(before.pageCount ?? -1) afterPages=\(after.pageCount ?? -1) beforeFree=\(before.freePages ?? -1) afterFree=\(after.freePages ?? -1)")
             if let output=ProcessInfo.processInfo.environment["MACSYNC_RETENTION_COMPAT_DIR"],!output.isEmpty {
                 let target=URL(fileURLWithPath:output,isDirectory:true)
                 try FileManager.default.createDirectory(at:target,withIntermediateDirectories:true)

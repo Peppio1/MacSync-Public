@@ -3,6 +3,14 @@ on:
   push:
     branches: [probe-v0195-queue-retention]
   workflow_dispatch:
+    inputs:
+      rows:
+        description: Synthetic records (10000 routine; 200000 final)
+        type: choice
+        options: ['10000', '200000']
+        default: '10000'
+env:
+  MACSYNC_RETENTION_ROWS: ${{ inputs.rows || '10000' }}
 permissions:
   contents: read
 jobs:

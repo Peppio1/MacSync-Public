@@ -8,10 +8,11 @@ final class RetentionPredecessorReadTests:XCTestCase {
         let url=URL(fileURLWithPath:path)
         try SignedRollbackTransaction.validateCompatibility(database:url)
         let journal=try ChangeJournal(path:path)
-        XCTAssertEqual(try journal.queueSequence(),200000)
+        let count:Int64=ProcessInfo.processInfo.environment["MACSYNC_RETENTION_ROWS"]=="200000" ? 200000 : 10000
+        XCTAssertEqual(try journal.queueSequence(),count)
         XCTAssertTrue(try journal.pending().isEmpty)
         let id=try journal.enqueue(rootID:"demo",relativePath:"after-rollback.jpg",kind:.upsert)
-        XCTAssertEqual(id,200001)
+        XCTAssertEqual(id,count+1)
         XCTAssertEqual(try journal.pending().map(\.id),[id])
         try journal.markCompleted(id:id)
         XCTAssertTrue(try journal.pending().isEmpty)

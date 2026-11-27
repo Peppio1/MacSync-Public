@@ -2139,7 +2139,8 @@ public final class ChangeJournal {
             }
             guard let connection else {throw databaseFailure()}
             final class ReceiptBudget {
-                }
+                let deadline=ProcessInfo.processInfo.systemUptime+0.15
+            }
             let budget=ReceiptBudget()
             let context=Unmanaged.passUnretained(budget).toOpaque()
             sqlite3_progress_handler(connection,1000,{ raw in

@@ -19,13 +19,13 @@ final class RetentionWriteBenchmarkTests:XCTestCase {
         func exec(_ sql:String)throws {
             guard sqlite3_exec(db,sql,nil,nil,nil)==SQLITE_OK else {throw JournalError.database(String(cString:sqlite3_errmsg(db)))}
         }
-        let n=200000
+        let n=ProcessInfo.processInfo.environment["MACSYNC_RETENTION_ROWS"]=="200000" ? 200000 : 10000
         let start=ProcessInfo.processInfo.systemUptime
         try exec("""
             BEGIN IMMEDIATE;
             WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<\(n))
             INSERT INTO change_queue(root_id,relative_path,kind,recorded_at,completed,origin)
-            SELECT 'demo','photo-'||((n-1)%100000)||'.jpg','upsert',1,0,'source_monitor' FROM seq;
+            SELECT 'demo','photo-'||((n-1)%\(n/2))||'.jpg','upsert',1,0,'source_monitor' FROM seq;
             COMMIT;
             """)
         let insert=ProcessInfo.processInfo.systemUptime-start
