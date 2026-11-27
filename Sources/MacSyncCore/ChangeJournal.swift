@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import Darwin
 
 public enum ChangeKind: String, Codable, Sendable {
     case upsert
@@ -48,6 +49,8 @@ struct NameRectificationProgressRecord: Codable, Equatable {
 public final class ChangeJournal {
     private var connection: OpaquePointer?
     private let databasePath: String
+    // Test-only shadow evidence. Never grants a deletion or changes a queue decision.
+    var experimentalSourceNameLineage = false
 
     /// UI readers use a strict read-only connection without schema DDL or
     /// journal-mode changes. Existing operational writers retain the original
@@ -893,6 +896,12 @@ public final class ChangeJournal {
     }
 
     public func verifyDirectoryBindings(_ maps: [MountedFolderMapping], allowNewTarget: Bool = false) throws {
+        _ = try verifiedDirectoryBindingSnapshot(maps, allowNewTarget: allowNewTarget)
+    }
+
+    /// Return the exact stamps already checked by the existing preflight;
+    /// shadow evidence must never obtain a new SMB fingerprint per item.
+    private func verifiedDirectoryBindingSnapshot(_ maps: [MountedFolderMapping], allowNewTarget: Bool = false) throws -> [(String,String,String)] {
         let bindings = try maps.flatMap { map -> [(String,String,String)] in
             try map.verify()
             return try [("source",map.source),("target",map.target)].map { (map.rootID,$0.0,try DirectoryBinding.encoded($0.1)) }
@@ -920,6 +929,7 @@ public final class ChangeJournal {
             }
             try execute("COMMIT;")
         } catch { try? execute("ROLLBACK;"); throw error }
+        return bindings
     }
 
     /// Startup-only recovery of an already Finder-mounted SMB share whose
@@ -1277,7 +1287,7 @@ public final class ChangeJournal {
     public func acknowledgeOperationalAuditMatches(_ entries:[SeedVerifiedMatch],
         mappings:[MountedFolderMapping],shouldContinue:()->Bool) throws -> (files:Int,directories:Int) {
         guard !entries.isEmpty else { return (0,0) }
-        try verifyDirectoryBindings(mappings)
+        let bindings = try verifiedDirectoryBindingSnapshot(mappings)
         let maps=Dictionary(uniqueKeysWithValues:mappings.map{($0.rootID,$0)})
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
@@ -1286,6 +1296,22 @@ public final class ChangeJournal {
                 try execute("COMMIT;"); return (0,0)
             }
             let protection=try NameRectification.pendingProtection(journal:self)
+            var shadowBindings: [String: [String:String]] = [:]
+            if experimentalSourceNameLineage {
+                guard let connection else { throw databaseFailure() }
+                try SourceNameLineageStore.install(connection)
+                let lookup = try prepare("SELECT stamp FROM directory_bindings WHERE root_id=? AND role=?;")
+                defer { sqlite3_finalize(lookup) }
+                for (rootID, role, stamp) in bindings {
+                    sqlite3_reset(lookup); sqlite3_clear_bindings(lookup)
+                    try bind(rootID,at:1,in:lookup); try bind(role,at:2,in:lookup)
+                    let rc=sqlite3_step(lookup)
+                    guard rc == SQLITE_ROW, columnText(lookup,at:0).utf8.elementsEqual(stamp.utf8) else {
+                        throw MountedCopyError.invalidMapping
+                    }
+                    shadowBindings[rootID,default:[:]][role] = stamp
+                }
+            }
             let stmt=try prepare("""
                 UPDATE change_queue SET completed=1
                 WHERE id=?1 AND root_id=?2 AND relative_path=?3 AND completed=0 AND kind='upsert'
@@ -1311,9 +1337,13 @@ public final class ChangeJournal {
                       !FileExclusionPolicy.excludes(entry.relativePath,enabled:FileExclusionPolicy.ignoreDSStore),
                       !protection.protects(rootID:entry.rootID,path:entry.relativePath) else { continue }
                 let url=try map.fileURL(relativePath:entry.relativePath,destination:false)
-                guard url.resolvingSymlinksInPath().path==url.path,
-                      let live=try? SeededArchiveVerifier.fingerprint(url,directory:entry.objectKind=="directory"),
-                      live==entry.source else { continue }
+                guard url.resolvingSymlinksInPath().path==url.path else { continue }
+                // Same live no-follow stat as fingerprint(), with identity
+                // obtained from the same observation when shadow mode is on.
+                var info = stat()
+                guard url.path.withCString({ lstat($0, &info) }) == 0,
+                      (info.st_mode & mode_t(S_IFMT)) == mode_t(entry.objectKind == "directory" ? S_IFDIR : S_IFREG),
+                      SeedFileFingerprint(fileStat: info) == entry.source else { continue }
                 sqlite3_reset(stmt); sqlite3_clear_bindings(stmt)
                 guard sqlite3_bind_int64(stmt,1,entry.jobID)==SQLITE_OK else { throw databaseFailure() }
                 try bind(entry.rootID,at:2,in:stmt); try bind(entry.relativePath,at:3,in:stmt)
@@ -1323,6 +1353,25 @@ public final class ChangeJournal {
                 try bind("\(entry.source.inode):\(entry.source.ctimeSeconds):\(entry.source.ctimeNanos)",at:8,in:stmt)
                 guard sqlite3_step(stmt)==SQLITE_DONE else { throw databaseFailure() }
                 let changed=Int(sqlite3_changes(connection))
+                if experimentalSourceNameLineage, changed == 1,
+                   let identity = SourceNameLineage.Identity(stat: info),
+                   let sourceBinding = shadowBindings[entry.rootID]?["source"],
+                   let targetBinding = shadowBindings[entry.rootID]?["target"],
+                   let connection {
+                    // Only a genuinely accepted audit match, never a generic
+                    // completed job. Absence of a prior identity observation
+                    // cannot be upgraded to a historical publication proof.
+                    let initial = SourceNameLineage.Record(identity: identity,
+                        rootID: entry.rootID, sourceBinding: sourceBinding,
+                        targetBinding: targetBinding, path: entry.relativePath)
+                    let key = SourceNameLineageStore.Key(initial)
+                    if let saved = try SourceNameLineageStore.read(connection,key:key),
+                       saved.record.currentPath.utf8.elementsEqual(entry.relativePath.utf8) {
+                        var record = saved.record
+                        record.recognize(path:entry.relativePath)
+                        try SourceNameLineageStore.write(connection,record:record,expectedRevision:saved.revision)
+                    }
+                }
                 if entry.objectKind=="directory" { directories+=changed } else { files+=changed }
             }
             guard shouldContinue() else { throw SeedVerificationError.cancelled }

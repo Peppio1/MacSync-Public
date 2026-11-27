@@ -5,6 +5,8 @@ on:
     paths:
       - 'Sources/MacSyncCore/SourceNameLineage.swift'
       - 'Sources/MacSyncCore/LocalInventory.swift'
+      - 'Sources/MacSyncCore/ChangeJournal.swift'
+      - 'Tests/MacSyncCoreTests/SourceNameLineageAuditTests.swift'
       - 'Tests/MacSyncCoreTests/OfflineNamePreparationTests.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageInventoryTests.swift'
       - 'Sources/MacSyncCore/SourceNameLineageStore.swift'
@@ -22,4 +24,4 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - run: swift test -Xswiftc -warnings-as-errors --filter 'RepeatableNameRectificationTests|SourceNameLineageInventoryTests'
+      - run: swift test -Xswiftc -warnings-as-errors --filter 'SourceNameLineageAuditTests|SeededArchiveVerifierTests.testV0192OperationalAuditRecognizesOnlySafePreAuditJobs'
