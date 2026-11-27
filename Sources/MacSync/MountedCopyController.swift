@@ -1195,7 +1195,7 @@ final class MountedCopyController: ObservableObject {
                         publish(force:true)
                         let decision=NamePromptDecision()
                         DispatchQueue.main.async {
-                            NameRectificationPrompt.present(items:incompatible,decision:decision)
+                            NameRectificationPrompt.present(items:incompatible,decision:decision,sourceRoots:Dictionary(uniqueKeysWithValues:configured.map{($0.id,$0.path)}))
                         }
                         while decision.answer == nil && !cancellation.isCancelled {
                             Thread.sleep(forTimeInterval:0.10)

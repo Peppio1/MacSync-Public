@@ -3,12 +3,12 @@ import Darwin
 
 /// Presentation only. Never feed decorated text back to filesystem operations.
 public struct ArchivePathPresentation: Equatable, Sendable {
-    public enum Side: Sendable { case source, destination, unknown
+    public enum Side: Hashable, Sendable { case source, destination, unknown
         public var label: String {
             switch self { case .source: return "Sorgente"; case .destination: return "Destinazione"; case .unknown: return "Radice" }
         }
     }
-    public enum Kind: Sendable { case file, directory, unknown
+    public enum Kind: Hashable, Sendable { case file, directory, unknown
         public init(_ value: String) {
             switch value { case "file": self = .file; case "directory": self = .directory; default: self = .unknown }
         }
