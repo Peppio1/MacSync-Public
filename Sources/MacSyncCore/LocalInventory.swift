@@ -680,8 +680,10 @@ public final class LocalInventory {
                 if FileExclusionPolicy.excludes(path,enabled:ignoreDSStore) { continue }
                 if let targetBinding=lineageTarget,let db {
                     try SourceNameLineageStore.holdMissing(db,root:rootID,source:binding,target:targetBinding,path:path)
-                    if try SourceNameLineageStore.retireSpeculativeInvalidUpload(db,root:rootID,
-                        source:binding,target:targetBinding,path:path,old:oldItem) { continue }
+                    let retired=try SourceNameLineageStore.retireSpeculativeInvalidUpload(db,root:rootID,
+                        source:binding,target:targetBinding,path:path,old:oldItem)
+                    try SourceNameLineageStore.forgetInvalidObservation(db,root:rootID,source:binding,target:targetBinding,path:path)
+                    if retired { continue }
                 }
                 let jobID=try enqueue(rootID: rootID, relativePath: path, kind: .delete, origin: .sourceMonitor)
                 deletes += 1
@@ -792,7 +794,10 @@ public final class LocalInventory {
             let saved = try batch.read(key: key)
             var record = saved?.record ?? initial
             if let saved {
-                if saved.record.currentPath.utf8.elementsEqual(row.relativePath.utf8) { continue }
+                if saved.record.currentPath.utf8.elementsEqual(row.relativePath.utf8) {
+                    if experimentalLineageQueueProtection { try batch.rememberInvalidObservation(saved.record) }
+                    continue
+                }
                 if experimentalLineageQueueProtection { try batch.protectRename(record) }
                 _ = record.observe(identity: identity, path: row.relativePath,
                     rootID: rootID, sourceBinding: sourceBinding, targetBinding: targetBinding,
@@ -801,6 +806,7 @@ public final class LocalInventory {
             // Unknown existing archive entries stay unknown. Never promote
             // a generic completed queue row to verified publication here.
             try batch.write(record: record, expectedRevision: saved?.revision)
+            if experimentalLineageQueueProtection { try batch.rememberInvalidObservation(record) }
         }
     }
 

@@ -63,6 +63,11 @@ public enum SignedRollbackTransaction {
         guard try scalar(db,"SELECT COUNT(*) FROM change_queue WHERE kind NOT IN ('upsert','delete') OR origin NOT IN ('initial_inventory','source_monitor','archive_audit','destination_rebind','legacy_unknown');")==0 else {
             throw ApplicationRollback.Failure("Operazioni in coda di formato non compatibile.")
         }
+        if try SourceNameLineageStore.protectionInstalled(db) {
+            guard try scalar(db,"SELECT COUNT(*) FROM source_lineage_hold;")==0 else {
+                throw ApplicationRollback.Failure("Rettifiche con copie protette ancora pendenti: completa la riconciliazione prima del rollback.")
+            }
+        }
         for table in ["name_rectification_batch","name_rectification_groups","queue_rebuild_hold","publication_intents","transfer_recovery","retired_publication_evidence"] {
             guard try scalar(db,"SELECT COUNT(*) FROM \(table);")==0 else {
                 throw ApplicationRollback.Failure("Operazioni di recupero o rettifiche non concluse: completa la riconciliazione prima del rollback.")
@@ -73,9 +78,28 @@ public enum SignedRollbackTransaction {
         let db=try open(database,write:true)
         defer { sqlite3_close(db) }
         // Rebuild the derived index on the predecessor to avoid stale classification.
-        guard sqlite3_exec(db,"DELETE FROM source_name_index_ready;",nil,nil,nil)==SQLITE_OK else {
+        guard sqlite3_exec(db,"BEGIN IMMEDIATE TRANSACTION;",nil,nil,nil)==SQLITE_OK else {
             throw ApplicationRollback.Failure("Impossibile invalidare l’indice derivato.")
         }
+        do {
+            if try SourceNameLineageStore.protectionInstalled(db) {
+                guard try scalar(db,"SELECT COUNT(*) FROM source_lineage_hold;")==0 else {
+                    throw ApplicationRollback.Failure("Rettifiche con copie protette ancora pendenti.")
+                }
+            }
+            // The predecessor cannot maintain these derived observations.
+            // Invalidate them instead of allowing stale evidence on re-upgrade.
+            for table in ["source_lineage_invalid_observation","source_lineage_hold","source_lineage_index","source_lineage_mapping"] {
+                if try scalar(db,"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='"+table+"';") == 1 {
+                    guard sqlite3_exec(db,"DELETE FROM "+table+";",nil,nil,nil)==SQLITE_OK else {
+                        throw ApplicationRollback.Failure("Impossibile invalidare lo storico derivato.")
+                    }
+                }
+            }
+            guard sqlite3_exec(db,"DELETE FROM source_name_index_ready; COMMIT;",nil,nil,nil)==SQLITE_OK else {
+                throw ApplicationRollback.Failure("Impossibile invalidare l’indice derivato.")
+            }
+        } catch { sqlite3_exec(db,"ROLLBACK;",nil,nil,nil); throw error }
     }
     private static func requirePrivateDirectory(_ url:URL) throws {
         let values=try url.resourceValues(forKeys:[.isDirectoryKey,.isSymbolicLinkKey])

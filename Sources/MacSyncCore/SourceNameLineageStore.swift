@@ -56,6 +56,10 @@ enum SourceNameLineageStore {
             PRIMARY KEY(mapping_id,identity,protected_path)
         ) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS idx_lineage_hold_path ON source_lineage_hold(mapping_id,protected_path);
+        CREATE TABLE IF NOT EXISTS source_lineage_invalid_observation(
+            mapping_id INTEGER NOT NULL, path TEXT NOT NULL, identity BLOB NOT NULL CHECK(length(identity)=33),
+            PRIMARY KEY(mapping_id,path)
+        ) WITHOUT ROWID;
         """
 
     private static let maximumRecordBytes = 1_048_576
@@ -155,16 +159,26 @@ enum SourceNameLineageStore {
     static func retireSpeculativeInvalidUpload(_ db: OpaquePointer,root: String,source: String,target: String,
                                                path: String,old: TrackedItem) throws -> Bool {
         guard !WindowsPathSafety.validRelativePath(path) else { return false }
+        // Only the exact invalid observation from the previous committed
+        // inventory is eligible, including directories. A historical
+        // recognized path is not a claim that a server spelling is absent.
         let q = try prepare(db,"""
-            SELECT i.identity FROM source_lineage_index i
-            JOIN source_lineage_mapping m ON m.id=i.mapping_id
+            SELECT o.identity,j.id FROM source_lineage_invalid_observation o
+            JOIN source_lineage_mapping m ON m.id=o.mapping_id
+            JOIN source_lineage_index i ON i.mapping_id=o.mapping_id AND i.identity=o.identity
+            JOIN change_queue j ON j.root_id=m.root_id AND j.relative_path=o.path
             WHERE m.root_id=?1 AND m.source_binding=?2 AND m.target_binding=?3
-              AND i.current_path=?4 AND i.uncertain=0 AND i.evidence IN (1,2)
+              AND o.path=?4 AND i.uncertain=0 AND i.evidence IN (1,2)
+              AND j.completed=0 AND j.kind='upsert' AND j.origin='source_monitor'
               AND NOT EXISTS(SELECT 1 FROM change_queue q
-                WHERE q.root_id=?1 AND q.relative_path=?4
-                  AND (q.completed=1 OR q.kind<>'upsert' OR q.origin<>'source_monitor'))
+                WHERE q.root_id=?1 AND q.relative_path=?4 AND q.id<>j.id)
               AND NOT EXISTS(SELECT 1 FROM publication_intents p WHERE p.root_id=?1 AND p.relative_path=?4)
-              AND NOT EXISTS(SELECT 1 FROM transfer_recovery r WHERE r.root_id=?1 AND r.relative_path=?4);
+              AND NOT EXISTS(SELECT 1 FROM transfer_recovery r WHERE r.root_id=?1 AND r.relative_path=?4)
+              AND NOT EXISTS(SELECT 1 FROM upload_retry r WHERE r.root_id=?1 AND (r.scope='root' OR r.job_id=j.id))
+              AND NOT EXISTS(SELECT 1 FROM retired_publication_evidence r WHERE r.job_id=j.id)
+              AND NOT EXISTS(SELECT 1 FROM retired_delete_evidence r WHERE r.job_id=j.id)
+              AND NOT EXISTS(SELECT 1 FROM name_rectification_monitor_links r WHERE r.job_id=j.id)
+              AND NOT EXISTS(SELECT 1 FROM mirror_attempts r WHERE r.job_id=j.id);
             """)
         defer { sqlite3_finalize(q) }
         try bindScope(root,source,target,q,db); try bind(path,4,q,db)
@@ -172,24 +186,38 @@ enum SourceNameLineageStore {
         if rc==SQLITE_DONE { return false }
         guard rc==SQLITE_ROW, sqlite3_column_bytes(q,0)==33, let bytes=sqlite3_column_blob(q,0) else { throw Failure.invalid }
         let identity=Data(bytes:bytes,count:33)
-        // Files retain their old inode in inventory. Directories lack that
-        // persisted fingerprint; do not suppress those speculative jobs yet.
-        guard old.kind=="file", identity.last==1,
-              let inode=old.changeStamp?.split(separator:":").first.flatMap({UInt64($0)}) else { return false }
-        var encoded=inode.bigEndian
-        let inodeBytes=withUnsafeBytes(of:&encoded){Data($0)}
-        guard Data(identity.dropFirst(8).prefix(8))==inodeBytes else { return false }
+        let jobID=sqlite3_column_int64(q,1)
+        if old.kind=="file" {
+            guard identity.last==1,let inode=old.changeStamp?.split(separator:":").first.flatMap({UInt64($0)}) else { return false }
+            var encoded=inode.bigEndian
+            guard Data(identity.dropFirst(8).prefix(8))==withUnsafeBytes(of:&encoded,{Data($0)}) else { return false }
+        } else {
+            guard old.kind=="directory",identity.last==2 else { return false }
+        }
         let next=sqlite3_step(q)
         if next==SQLITE_ROW { return false }
         guard next==SQLITE_DONE else { throw failure(db) }
-        let retire=try prepare(db,"""
-            DELETE FROM change_queue WHERE root_id=? AND relative_path=? AND completed=0
-              AND kind='upsert' AND origin='source_monitor';
-            """)
-        defer { sqlite3_finalize(retire) }
-        try bind(root,1,retire,db); try bind(path,2,retire,db)
-        guard sqlite3_step(retire)==SQLITE_DONE else { throw failure(db) }
+        // A blocked-name marker is diagnostic only. Remove exactly that
+        // marker alongside its never-published speculative upload.
+        for sql in ["DELETE FROM blocked_name_jobs WHERE job_id=?;",
+                    "DELETE FROM change_queue WHERE id=? AND completed=0 AND kind='upsert' AND origin='source_monitor';"] {
+            let retire=try prepare(db,sql)
+            defer { sqlite3_finalize(retire) }
+            guard sqlite3_bind_int64(retire,1,jobID)==SQLITE_OK,sqlite3_step(retire)==SQLITE_DONE else { throw failure(db) }
+        }
+        guard sqlite3_changes(db)==1 else { throw Failure.stale }
         return true
+    }
+
+    static func forgetInvalidObservation(_ db: OpaquePointer,root:String,source:String,target:String,path:String) throws {
+        guard !WindowsPathSafety.validRelativePath(path) else { return }
+        let q=try prepare(db,"""
+            DELETE FROM source_lineage_invalid_observation WHERE path=?4 AND mapping_id IN
+              (SELECT id FROM source_lineage_mapping WHERE root_id=?1 AND source_binding=?2 AND target_binding=?3);
+            """)
+        defer { sqlite3_finalize(q) }
+        try bindScope(root,source,target,q,db); try bind(path,4,q,db)
+        guard sqlite3_step(q)==SQLITE_DONE else { throw failure(db) }
     }
 
     static func protected(_ db: OpaquePointer,root: String,path: String) throws -> Bool {
@@ -212,6 +240,9 @@ enum SourceNameLineageStore {
     static func resolveMissing(_ db: OpaquePointer,root: String,rows: [TrackedItem],
                                shouldContinue: () -> Bool) throws {
         guard try protectionInstalled(db) else { return }
+        // A symlink can hide an unobserved subtree on some enumerators.
+        // Never resolve absence from such a potentially incomplete snapshot.
+        guard !rows.contains(where:{$0.kind=="symlink"}) else { return }
         var present=Set<Data>()
         for row in rows {
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
@@ -268,6 +299,12 @@ enum SourceNameLineageStore {
         reset(q)
         var tables=["source_lineage_index"]
         if try protectionInstalled(db) { tables.append("source_lineage_hold") }
+        let observed=try prepare(db,"SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_lineage_invalid_observation';")
+        defer { sqlite3_finalize(observed) }
+        let exists=sqlite3_step(observed)
+        guard exists==SQLITE_ROW || exists==SQLITE_DONE else { throw failure(db) }
+        if exists==SQLITE_ROW { tables.append("source_lineage_invalid_observation") }
+        reset(observed)
         for table in tables {
             let remove=try prepare(db,"DELETE FROM "+table+" WHERE mapping_id IN (SELECT id FROM source_lineage_mapping WHERE root_id=?);")
             defer { sqlite3_finalize(remove) }
@@ -388,6 +425,17 @@ enum SourceNameLineageStore {
                 recognizedPaths: paths, uncertainPublication: uncertain == 1)
             try validate(record)
             return Versioned(record: record, revision: revision)
+        }
+
+        func rememberInvalidObservation(_ record: SourceNameLineage.Record) throws {
+            guard !WindowsPathSafety.validRelativePath(record.currentPath) else { return }
+            let q=try prepare(db,"""
+                INSERT INTO source_lineage_invalid_observation(mapping_id,identity,path) VALUES(?,?,?)
+                ON CONFLICT(mapping_id,path) DO UPDATE SET identity=excluded.identity;
+                """)
+            defer { sqlite3_finalize(q) }
+            try bindIdentity(Key(record),q); try bind(record.currentPath,3,q,db)
+            guard sqlite3_step(q)==SQLITE_DONE else { throw failure(db) }
         }
 
         func protectRename(_ record: SourceNameLineage.Record) throws {

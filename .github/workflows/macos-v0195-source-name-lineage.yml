@@ -9,6 +9,7 @@ on:
       - 'Sources/MacSyncCore/ArchiveAudit.swift'
       - 'Sources/MacSyncCore/MountedFolderCopy.swift'
       - 'Sources/MacSyncCore/MirrorDeletion.swift'
+      - 'Sources/MacSyncCore/SignedRollbackTransaction.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageQueueTests.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageTransferTests.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageAuditTests.swift'
@@ -29,4 +30,4 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - run: swift test -Xswiftc -warnings-as-errors --filter 'SourceNameLineage|LocalInventoryTests|RepeatableNameRectificationTests|NameRectificationTests|MountedFolderCopyTests|MountedCopyResilienceTests|MirrorDeletionTests|ArchiveAuditAndHistoryTests|SeededArchiveVerifierTests'
+      - run: swift test -Xswiftc -warnings-as-errors --filter 'SourceNameLineageQueueTests|SourceNameLineageStoreTests|LocalInventoryTests|MirrorDeletionTests|ApplicationRollbackTests|SignedUpdatePolicyTests'

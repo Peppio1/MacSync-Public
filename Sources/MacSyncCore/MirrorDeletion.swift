@@ -741,13 +741,14 @@ public final class MirrorDeletionWorker {
             do {
                 try self.verifyRoots(mapping, baseline)
                 if !availableRoots.contains(job.rootID) {
+                    let absenceSnapshot=try journal.lineageAbsenceSnapshot(rootID:job.rootID)
                     let currentInventory = try LocalScanner.scan(root: mapping.source,shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() })
                     if authorization != nil && protections.emptyEnabled && currentInventory.isEmpty {
                         let reason = job.rootID + ": Sorgente completamente vuota"
                         try journal.latchMirrorBlock(reason)
                         throw MirrorDeletionFailure.bulkDeletion(reason)
                     }
-                    try journal.resolveLineageMissing(rootID:job.rootID,rows:currentInventory,
+                    try journal.resolveLineageMissing(rootID:job.rootID,rows:currentInventory,snapshot:absenceSnapshot,
                         shouldContinue:{ !self.cancellation.isCancelled && self.operationAllowed() })
                     availableRoots.insert(job.rootID)
                 }

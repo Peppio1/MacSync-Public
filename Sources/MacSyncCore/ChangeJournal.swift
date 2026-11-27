@@ -2165,10 +2165,31 @@ public final class ChangeJournal {
         return sqlite3_changes(connection) == 1
     }
 
-    func resolveLineageMissing(rootID:String,rows:[TrackedItem],shouldContinue:()->Bool) throws {
-        guard let connection,try SourceNameLineageStore.protectionInstalled(connection) else { return }
+    // Capture the durable source inventory version and queue sequence before
+    // the already-existing mirror scan. A newer event invalidates absence.
+    struct LineageAbsenceSnapshot: Equatable {
+        let sequence:Int64
+        let scan: String
+        let event: String
+    }
+    func lineageAbsenceSnapshot(rootID:String) throws -> LineageAbsenceSnapshot? {
+        guard let connection,try SourceNameLineageStore.protectionInstalled(connection) else { return nil }
+        let stmt=try prepare("SELECT CAST(last_scan_at AS TEXT),COALESCE(last_event_id,'') FROM watched_roots WHERE root_id=?;")
+        defer { sqlite3_finalize(stmt) }
+        try bind(rootID,at:1,in:stmt)
+        let rc=sqlite3_step(stmt)
+        if rc==SQLITE_DONE { return nil }
+        guard rc==SQLITE_ROW else { throw databaseFailure() }
+        return LineageAbsenceSnapshot(sequence:try queueSequence(),scan:columnText(stmt,at:0),event:columnText(stmt,at:1))
+    }
+
+    func resolveLineageMissing(rootID:String,rows:[TrackedItem],snapshot:LineageAbsenceSnapshot?,shouldContinue:()->Bool) throws {
+        guard let connection,let snapshot else { return }
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
+            guard try lineageAbsenceSnapshot(rootID:rootID)==snapshot,shouldContinue() else {
+                try execute("COMMIT;"); return
+            }
             try SourceNameLineageStore.resolveMissing(connection,root:rootID,rows:rows,shouldContinue:shouldContinue)
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             try execute("COMMIT;")
