@@ -1,0 +1,23 @@
+name: MacSync v0.19.5 SMB batch metadata probe
+on:
+  push:
+    branches: [probe-v0195-smb-batch-metadata]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - run: brew install samba
+      - run: bash scripts/ci/prepare-local-samba.sh
+      - run: swift test -Xswiftc -warnings-as-errors --filter SMBBatchMetadataProbeTests
+      - if: always()
+        run: bash scripts/ci/cleanup-local-samba.sh
