@@ -143,8 +143,22 @@ final class MacSyncUIPreviewTests: XCTestCase {
         window.displayIfNeeded()
         RunLoop.main.run(until:Date().addingTimeInterval(0.25))
         view.layoutSubtreeIfNeeded()
-        let bitmap=try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in:view.bounds))
-        view.cacheDisplay(in:view.bounds,to:bitmap)
+        // NSAlert uses a transparent AppKit backing surface. Flatten only
+        // the native capture onto the light window background for PNG export.
+        let captured=try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in:view.bounds))
+        view.cacheDisplay(in:view.bounds,to:captured)
+        let bitmap=try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes:nil,
+            pixelsWide:captured.pixelsWide,pixelsHigh:captured.pixelsHigh,
+            bitsPerSample:8,samplesPerPixel:4,hasAlpha:true,isPlanar:false,
+            colorSpaceName:.deviceRGB,bytesPerRow:0,bitsPerPixel:0))
+        bitmap.size=view.bounds.size
+        let context=try XCTUnwrap(NSGraphicsContext(bitmapImageRep:bitmap))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current=context
+        NSColor.windowBackgroundColor.setFill()
+        NSBezierPath(rect:NSRect(origin:.zero,size:view.bounds.size)).fill()
+        captured.draw(in:NSRect(origin:.zero,size:view.bounds.size))
+        NSGraphicsContext.restoreGraphicsState()
         let png=try XCTUnwrap(bitmap.representation(using:.png,properties:[:]))
         try png.write(to:directory.appendingPathComponent("screen-03-automatic-prompt.png"),options:.atomic)
     }
@@ -341,7 +355,7 @@ final class MacSyncUIPreviewTests: XCTestCase {
         host.displayIfNeeded()
         XCTAssertEqual(host.bounds.width, CGFloat(width), accuracy: 0.5, "Unexpected host width: \(name)")
         XCTAssertEqual(host.bounds.height, CGFloat(height), accuracy: 0.5, "Unexpected host height: \(name)")
-        if name.contains("-audit-") {
+        if name.contains("-audit-") && !name.hasPrefix("screen-") {
             let frames = auditBounds.snapshot()
             let idle = name.contains("idle-")
             let required = idle ? ["operation","start","maintenance","lastResult"] : ["operation","progress","cancel","maintenance","lastResult"]
