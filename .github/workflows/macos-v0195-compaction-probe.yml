@@ -13,5 +13,5 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - name: Verify eligibility and compact snapshot without replacing database
-        run: swift test -Xswiftc -warnings-as-errors --filter DatabaseCompactionPolicyTests
+      - name: Verify offline exclusive lock, compact snapshot and database identity
+        run: swift test -Xswiftc -warnings-as-errors --filter 'DatabaseCompactionPolicyTests|OfflineDatabaseCompactionTests'
