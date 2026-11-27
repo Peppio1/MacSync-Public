@@ -33,7 +33,7 @@ public enum OfflineDatabaseCompaction {
         _ = try CompactionRecovery.verifyPending(in: folder, lock: lock)
         let db = folder.appendingPathComponent("inventory.sqlite")
         let identity = try ArchiveDatabaseSafety.fileIdentity(db)
-        let sample = DatabaseDiagnosticSnapshot.collect(databasePath: db.path)
+        let sample = DatabaseDiagnosticSnapshot.collect(databasePath: db.path, includeCounts: false)
         guard sample.complete, let before = sample.databaseBytes else {
             return .skipped(.insufficientEvidence)
         }

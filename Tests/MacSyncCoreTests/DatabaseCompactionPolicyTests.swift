@@ -52,6 +52,11 @@ final class DatabaseCompactionPolicyTests: XCTestCase {
                 throw JournalError.database("fixture SQL")
             }
         }
+        let sample = DatabaseDiagnosticSnapshot.collect(databasePath: original.path, includeCounts: false)
+        XCTAssertTrue(sample.complete)
+        XCTAssertTrue(sample.counts.isEmpty)
+        XCTAssertNotNil(sample.pageCount)
+        XCTAssertGreaterThan(sample.freePages ?? 0, 0)
         let identity = try ArchiveDatabaseSafety.fileIdentity(original)
         let digest = try ApplicationRollback.databaseDigest(original, scratch: root)
         try ArchiveDatabaseSafety.backup(original, to: target)

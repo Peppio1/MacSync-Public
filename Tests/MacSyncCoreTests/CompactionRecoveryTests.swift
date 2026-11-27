@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import SQLite3
 import XCTest
 @testable import MacSyncCore
@@ -55,6 +56,58 @@ final class CompactionRecoveryTests: XCTestCase {
             XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("compaction-pending.json").path))
             XCTAssertEqual(try ApplicationRollback.databaseDigest(db, scratch: folder), changed)
             XCTAssertNotEqual(try ApplicationRollback.databaseDigest(backup, scratch: folder), changed)
+        }
+    }
+
+    func testKilledSQLiteWriterWithUncommittedWALRecoversOriginal() throws {
+        try fixture { folder, db, backup, lock in
+            try execute(db, "PRAGMA journal_mode=WAL;")
+            let digest = try ApplicationRollback.databaseDigest(db, scratch: folder)
+            let output = folder.appendingPathComponent("child-output.txt")
+            XCTAssertTrue(FileManager.default.createFile(atPath: output.path, contents: nil))
+            let writer = try FileHandle(forWritingTo: output)
+            defer { try? writer.close() }
+            let input = Pipe()
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+            process.arguments = ["-batch", db.path]
+            process.standardInput = input
+            process.standardOutput = writer
+            process.standardError = writer
+            try process.run()
+            defer {
+                if process.isRunning { _ = Darwin.kill(process.processIdentifier, SIGKILL) }
+                process.waitUntilExit()
+                try? input.fileHandleForWriting.close()
+            }
+            // Force dirty pages out of a tiny cache, but never commit.
+            // The print is an explicit barrier, not a timing assumption.
+            let sql = """
+                .bail on
+                PRAGMA cache_size=1;
+                BEGIN IMMEDIATE;
+                INSERT INTO data(value) VALUES(hex(zeroblob(1048576)));
+                .print CHILD_READY
+
+                """
+            try input.fileHandleForWriting.write(contentsOf: Data(sql.utf8))
+            let deadline = ProcessInfo.processInfo.systemUptime + 5
+            var ready = false
+            while process.isRunning && ProcessInfo.processInfo.systemUptime < deadline {
+                if (try String(contentsOf: output, encoding: .utf8)).contains("CHILD_READY") {
+                    ready = true
+                    break
+                }
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+            XCTAssertTrue(ready, "SQLite child did not reach transaction barrier")
+            guard ready else { return }
+            XCTAssertEqual(Darwin.kill(process.processIdentifier, SIGKILL), 0)
+            process.waitUntilExit()
+            XCTAssertEqual(process.terminationReason, .uncaughtSignal)
+            XCTAssertTrue(try CompactionRecovery.verifyPending(in: folder, lock: lock))
+            XCTAssertEqual(try ApplicationRollback.databaseDigest(db, scratch: folder), digest)
+            XCTAssertEqual(try ApplicationRollback.databaseDigest(backup, scratch: folder), digest)
         }
     }
 

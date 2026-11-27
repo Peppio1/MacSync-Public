@@ -14,7 +14,7 @@ public struct DatabaseDiagnosticSnapshot: Codable, Equatable, Sendable {
     public let elapsedSeconds:Double
     public let complete:Bool
 
-    public static func collect(databasePath:String) -> DatabaseDiagnosticSnapshot {
+    public static func collect(databasePath:String, includeCounts:Bool=true) -> DatabaseDiagnosticSnapshot {
         let start=ProcessInfo.processInfo.systemUptime
         let now=Date()
         func size(_ path:String,optional:Bool=false)->Int64? {
@@ -69,7 +69,7 @@ public struct DatabaseDiagnosticSnapshot: Codable, Equatable, Sendable {
                     "retired_delete_evidence","retired_publication_evidence","blocked_name_jobs",
                     "sync_activity","sync_cycles_v1","sync_cycle_events_v1","mirror_recovery"]
                 var all=true
-                for table in tables {
+                for table in includeCounts ? tables : [] {
                     let exists=scalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='"+table+"';")
                     if exists==0 { continue } // older/partial archives
                     guard exists==1,let count=scalar("SELECT count(*) FROM "+table+";") else { all=false;continue }
