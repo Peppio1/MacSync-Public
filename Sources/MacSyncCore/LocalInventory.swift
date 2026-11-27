@@ -296,9 +296,9 @@ public enum LocalScanner {
 /// mutations are in a single atomic transaction.
 public final class LocalInventory {
     private var db: OpaquePointer?
-    // Shadow observations only. No queue or mirror decision may depend on them.
-    var experimentalSourceNameLineage = false
-    var experimentalLineageQueueProtection = false
+    // Same opt-in policy for monitor, audit and copy writers.
+    var experimentalSourceNameLineage = SourceLineageRuntimePolicy.enabled
+    var experimentalLineageQueueProtection = SourceLineageRuntimePolicy.enabled
 
     public init(path: String) throws {
         var handle: OpaquePointer?

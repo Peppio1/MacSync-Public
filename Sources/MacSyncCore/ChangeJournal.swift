@@ -49,7 +49,7 @@ struct NameRectificationProgressRecord: Codable, Equatable {
 public final class ChangeJournal {
     private var connection: OpaquePointer?
     private let databasePath: String
-    // Test-only shadow evidence. Never grants a deletion or changes a queue decision.
+    // Shared candidate policy, never enable writes on a read-only connection.
     var experimentalSourceNameLineage = false
 
     /// UI readers use a strict read-only connection without schema DDL or
@@ -57,6 +57,7 @@ public final class ChangeJournal {
     /// constructor behavior and all transactional safety checks.
     public init(path: String, readOnly: Bool = false) throws {
         self.databasePath = path
+        self.experimentalSourceNameLineage = !readOnly && SourceLineageRuntimePolicy.enabled
         var handle: OpaquePointer?
         let flags = readOnly ? SQLITE_OPEN_READONLY : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)
         guard sqlite3_open_v2(path, &handle, flags, nil) == SQLITE_OK else {
@@ -1218,7 +1219,8 @@ public final class ChangeJournal {
         _ entries: [SeedVerifiedMatch],
         sourceRoots: [String: String],
         shouldContinue: () -> Bool = { true },
-        onCounts: (Int, Int) -> Void = { _,_ in }
+        onCounts: (Int, Int) -> Void = { _,_ in },
+        lineageBindings: [String:[String:String]] = [:]
     ) throws -> Int {
         guard !entries.isEmpty else { onCounts(0,0); return 0 }
         try execute("BEGIN IMMEDIATE TRANSACTION;")
@@ -1267,6 +1269,32 @@ public final class ChangeJournal {
                 try bind(root, at: 7, in: statement)
                 guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseFailure() }
                 let delta = Int(sqlite3_changes(connection))
+                if experimentalSourceNameLineage, delta == 1, let connection,
+                   let src = lineageBindings[entry.rootID]?["source"],
+                   let dst = lineageBindings[entry.rootID]?["target"],
+                   WindowsPathSafety.validRelativePath(entry.relativePath) {
+                    let url=URL(fileURLWithPath:root).appendingPathComponent(entry.relativePath)
+                    var info=stat()
+                    if url.resolvingSymlinksInPath().path==url.path,
+                       url.path.withCString({ lstat($0,&info) })==0,
+                       SeedFileFingerprint(fileStat:info)==entry.source,
+                       let identity=SourceNameLineage.Identity(stat:info) {
+                        let initial=SourceNameLineage.Record(identity:identity,rootID:entry.rootID,
+                            sourceBinding:src,targetBinding:dst,path:entry.relativePath)
+                        if try lineageBindingsCurrent(initial) {
+                            try SourceNameLineageStore.install(connection)
+                            let prior=try SourceNameLineageStore.read(connection,key:.init(initial))
+                            if prior == nil || prior?.record.currentPath.utf8.elementsEqual(entry.relativePath.utf8)==true {
+                                var record=prior?.record ?? initial
+                                // Existing uncertainty may concern another path.
+                                // A hash match of this path cannot clear it.
+                                record.recognize(path:entry.relativePath)
+                                try SourceNameLineageStore.write(connection,record:record,expectedRevision:prior?.revision)
+                                try SourceNameLineageStore.releaseConfirmed(connection,record:record)
+                            }
+                        }
+                    }
+                }
                 changed += delta
                 if entry.objectKind == "directory" { directories += delta }
             }
@@ -1441,7 +1469,8 @@ public final class ChangeJournal {
                           !prior.record.uncertainPublication else { continue }
                     // Ordinary unchanged recognized entries need no writes or
                     // fresh stat. This is historical evidence, not permission.
-                    if prior.record.recognizedPaths.contains(where:{$0.utf8.elementsEqual(item.relativePath.utf8)}) { continue }
+                    if prior.record.recognizedPaths.contains(where:{$0.utf8.elementsEqual(item.relativePath.utf8)}),
+                       try !SourceNameLineageStore.protected(connection,root:mapping.rootID,path:item.relativePath) { continue }
                 }
                 sqlite3_reset(eligibility); sqlite3_clear_bindings(eligibility)
                 try bind(mapping.rootID,at:1,in:eligibility)
@@ -1610,6 +1639,7 @@ public final class ChangeJournal {
                 guard confirmed.contains(ProofKey(rootID:job.rootID,prefix:Data(entry.targetPrefix.utf8))) else { continue }
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 guard let map=maps[job.rootID],!protection.protects(rootID:job.rootID,path:job.relativePath) else { continue }
+                if let connection,try SourceNameLineageStore.protected(connection,root:job.rootID,path:job.relativePath) { continue }
                 // Only metadata reads on the local source in the write transaction.
                 // Recheck the same strict absence predicate for repairable
                 // literal names; an equivalent spelling is not absence.

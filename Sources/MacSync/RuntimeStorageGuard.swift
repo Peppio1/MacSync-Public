@@ -30,7 +30,7 @@ final class RuntimeStorageGuard {
     }
 
     func createRollbackSnapshot() throws -> URL {
-        try SignedRollbackTransaction.validateCompatibility(database:folder.appendingPathComponent("inventory.sqlite"))
+        try SignedRollbackTransaction.validateCompatibility(database:folder.appendingPathComponent("inventory.sqlite"),allowProtectedDeletions:true)
         return try createUpdateSnapshot()
     }
 

@@ -3,7 +3,7 @@ import Darwin
 import SQLite3
 
 /// Offline voluntary rollback, separate from Sparkle's forward transaction.
-/// Only the reviewed 0.19.4 -> 0.19.3 schema is supported; do not extend without validation.
+/// Only explicitly pinned predecessor packages and validated schemas are supported.
 /// The caller must hold the exclusive operational archive lock.
 public enum SignedRollbackTransaction {
     private static func open(_ url:URL,write:Bool=false) throws -> OpaquePointer {
@@ -29,7 +29,7 @@ public enum SignedRollbackTransaction {
         }
         return value
     }
-    public static func validateCompatibility(database:URL) throws {
+    public static func validateCompatibility(database:URL, allowProtectedDeletions:Bool = false) throws {
         try ArchiveDatabaseSafety.verify(database,readOnly:true)
         let db=try open(database)
         defer { sqlite3_close(db) }
@@ -63,7 +63,7 @@ public enum SignedRollbackTransaction {
         guard try scalar(db,"SELECT COUNT(*) FROM change_queue WHERE kind NOT IN ('upsert','delete') OR origin NOT IN ('initial_inventory','source_monitor','archive_audit','destination_rebind','legacy_unknown');")==0 else {
             throw ApplicationRollback.Failure("Operazioni in coda di formato non compatibile.")
         }
-        if try SourceNameLineageStore.protectionInstalled(db) {
+        if !allowProtectedDeletions,try SourceNameLineageStore.protectionInstalled(db) {
             guard try scalar(db,"SELECT COUNT(*) FROM source_lineage_hold;")==0 else {
                 throw ApplicationRollback.Failure("Rettifiche con copie protette ancora pendenti: completa la riconciliazione prima del rollback.")
             }
@@ -75,6 +75,14 @@ public enum SignedRollbackTransaction {
         }
     }
     public static func invalidateDerivedNameIndex(database:URL) throws {
+        try preparePredecessorDatabase(database:database,allowProtectedDeletions:false)
+    }
+
+    /// Only call after a verified snapshot and explicit rollback consent.
+    /// A predecessor cannot understand the lineage hold table. Archive the
+    /// exact protected delete jobs instead of exposing them as executable.
+    /// No filesystem mutation; the full pre-rollback database is retained.
+    static func preparePredecessorDatabase(database:URL,allowProtectedDeletions:Bool) throws {
         let db=try open(database,write:true)
         defer { sqlite3_close(db) }
         // Rebuild the derived index on the predecessor to avoid stale classification.
@@ -82,9 +90,35 @@ public enum SignedRollbackTransaction {
             throw ApplicationRollback.Failure("Impossibile invalidare l’indice derivato.")
         }
         do {
-            if try SourceNameLineageStore.protectionInstalled(db) {
-                guard try scalar(db,"SELECT COUNT(*) FROM source_lineage_hold;")==0 else {
+            if try SourceNameLineageStore.protectionInstalled(db),
+               try scalar(db,"SELECT COUNT(*) FROM source_lineage_hold;") > 0 {
+                guard allowProtectedDeletions else {
                     throw ApplicationRollback.Failure("Rettifiche con copie protette ancora pendenti.")
+                }
+                let sql = """
+                    CREATE TABLE IF NOT EXISTS rollback_protected_deletions(
+                        job_id INTEGER PRIMARY KEY, root_id TEXT NOT NULL, relative_path TEXT NOT NULL,
+                        kind TEXT NOT NULL, recorded_at REAL NOT NULL, original_completed INTEGER NOT NULL,
+                        origin TEXT NOT NULL, archived_at REAL NOT NULL
+                    );
+                    INSERT INTO rollback_protected_deletions
+                    SELECT q.id,q.root_id,q.relative_path,q.kind,q.recorded_at,q.completed,q.origin,
+                           (julianday('now')-2440587.5)*86400.0
+                    FROM change_queue q
+                    WHERE q.kind='delete'
+                      AND (q.completed=0 OR EXISTS(SELECT 1 FROM retired_delete_evidence e WHERE e.job_id=q.id))
+                      AND EXISTS(SELECT 1 FROM source_lineage_hold h JOIN source_lineage_mapping m ON m.id=h.mapping_id
+                        WHERE m.root_id=q.root_id AND
+                        (h.protected_path=q.relative_path OR instr(h.protected_path,q.relative_path||'/')=1
+                         OR instr(q.relative_path,h.protected_path||'/')=1));
+                    DELETE FROM retired_delete_evidence WHERE job_id IN (SELECT job_id FROM rollback_protected_deletions);
+                    DELETE FROM blocked_name_jobs WHERE job_id IN (SELECT job_id FROM rollback_protected_deletions);
+                    DELETE FROM change_queue WHERE id IN (SELECT job_id FROM rollback_protected_deletions);
+                    INSERT OR IGNORE INTO mirror_safety_lock(singleton,reason)
+                        VALUES(1,'Rollback: cancellazioni protette conservate nel backup e sospese. Verifica archivio e controlla la coda prima di riprendere la sincronizzazione.');
+                    """
+                guard sqlite3_exec(db,sql,nil,nil,nil)==SQLITE_OK else {
+                    throw ApplicationRollback.Failure("Impossibile conservare le cancellazioni protette.")
                 }
             }
             // The predecessor cannot maintain these derived observations.
@@ -134,8 +168,7 @@ public enum SignedRollbackTransaction {
               snapshot.deletingLastPathComponent().path==backupRoot.path,
               snapshot.lastPathComponent.hasPrefix("update-backup-"),
               let uuid=UUID(uuidString:String(snapshot.lastPathComponent.dropFirst("update-backup-".count))),
-              snapshot.lastPathComponent=="update-backup-"+uuid.uuidString,
-              let package=SignedRollbackPackage.previous(for:"0.19.4") else {
+              snapshot.lastPathComponent=="update-backup-"+uuid.uuidString else {
             throw ApplicationRollback.Failure("Destinazione o versione rollback non autorizzata.")
         }
         let stage=snapshot.appendingPathComponent("signed-rollback",isDirectory:true)
@@ -146,19 +179,25 @@ public enum SignedRollbackTransaction {
         try requireAbsent(root.appendingPathComponent("factory-reset.pending"))
         let saved=snapshot.appendingPathComponent("inventory.sqlite")
         let current=coordinator.database
-        try ApplicationRollback.validateBundle(target,version:"0.19.4")
-        try ApplicationRollback.validateBundle(snapshot.appendingPathComponent("MacSync.app"),version:"0.19.4")
-        try validateCompatibility(database:current)
+        let info=try Data(contentsOf:target.appendingPathComponent("Contents/Info.plist"))
+        guard let plist=try PropertyListSerialization.propertyList(from:info,format:nil) as? [String:Any],
+              let installed=plist["CFBundleShortVersionString"] as? String,
+              let package=SignedRollbackPackage.previous(for:installed) else {
+            throw ApplicationRollback.Failure("Versione rollback non autorizzata.")
+        }
+        try ApplicationRollback.validateBundle(target,version:installed)
+        try ApplicationRollback.validateBundle(snapshot.appendingPathComponent("MacSync.app"),version:installed)
+        try validateCompatibility(database:current,allowProtectedDeletions:true)
         try ArchiveDatabaseSafety.verify(saved,readOnly:true)
         guard try ApplicationRollback.databaseDigest(current,scratch:stage)==ApplicationRollback.databaseDigest(saved,scratch:stage) else {
             throw ApplicationRollback.Failure("L’archivio è cambiato dopo il backup. Nessun ripristino effettuato.")
         }
         let candidate=try package.extractVerified(in:stage)
-        try Self.validateCompatibility(database:current)
+        try Self.validateCompatibility(database:current,allowProtectedDeletions:true)
         try UpdateRecoveryCoordinator.disableCopyAuthorizations(defaults)
-        defaults.set("v0.19.4",forKey:"MacSync.updates.skippedStableTag")
+        defaults.set("v"+installed,forKey:"MacSync.updates.skippedStableTag")
         guard defaults.synchronize() else { throw ApplicationRollback.Failure("Preferenze non salvate.") }
-        try invalidateDerivedNameIndex(database:current)
+        try preparePredecessorDatabase(database:current,allowProtectedDeletions:true)
         _ = try ApplicationRollback.replaceApplication(target:target,backup:candidate) {
             try package.validateApplication($0)
         }

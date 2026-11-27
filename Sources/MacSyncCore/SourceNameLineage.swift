@@ -158,3 +158,14 @@ enum SourceNameLineage {
             deletionCandidates: [], suppressPreviousDelete: false, uncertain: true)
     }
 }
+
+
+/// Single process-wide integration switch for a candidate laboratory.
+/// All monitor, audit and copy connections use the same policy. Remains
+/// opt-in until the integrated regression and predecessor tests pass.
+/// Existing durable holds are enforced independently of this switch.
+enum SourceLineageRuntimePolicy {
+    static var enabled: Bool {
+        ProcessInfo.processInfo.environment["MACSYNC_INTERNAL_NAME_LINEAGE"] == "1"
+    }
+}

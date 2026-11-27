@@ -8,7 +8,7 @@ enum RollbackConfirmation {
         let alert=NSAlert()
         alert.alertStyle = .warning
         alert.messageText="Confermi il ripristino di MacSync?"
-        alert.informativeText="Versione attuale: "+installed+"\nVersione da ripristinare: "+previous+"\n\nSolo dopo la conferma MacSync terminerà le attività, creerà un backup e verificherà il pacchetto firmato. Il database attuale verrà conservato. L’applicazione verrà chiusa e, al riavvio, copie automatiche e mirror resteranno disattivati.\n\nAnnulla per continuare a utilizzare la versione attuale."
+        alert.informativeText="Versione attuale: "+installed+"\nVersione da ripristinare: "+previous+"\n\nSolo dopo la conferma MacSync terminerà le attività, creerà un backup e verificherà il pacchetto firmato. Il database attuale verrà conservato. Eventuali cancellazioni ancora protette saranno conservate nel backup e archiviate fuori dalla coda attiva: non verranno rieseguite automaticamente dalla versione precedente. L’applicazione verrà chiusa e, al riavvio, copie automatiche e mirror resteranno disattivati.\n\nAnnulla per continuare a utilizzare la versione attuale."
         let cancel=alert.addButton(withTitle:"Annulla")
         let confirm=alert.addButton(withTitle:"Ripristina "+previous)
         // Escape cancels. Return cannot select the destructive action.

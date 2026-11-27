@@ -394,8 +394,10 @@ public final class SeededArchiveVerifier {
         if !cancellation.mayCommit { throw SeedVerificationError.cancelled }
         onCommit()
         let sources = mappings.mapValues { $0.source.path }
+        let bindings = stillValid.isEmpty ? [:] : try journal.lineageCopyBindings(Array(mappings.values))
         let changed = try journal.acknowledgeVerifiedFiles(
-            stillValid, sourceRoots: sources, shouldContinue: { cancellation.mayCommit }, onCounts:onCounts
+            stillValid, sourceRoots: sources, shouldContinue: { cancellation.mayCommit }, onCounts:onCounts,
+            lineageBindings:bindings
         )
         progress?(report.matches.count, report.matches.count)
         return changed

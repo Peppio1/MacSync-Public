@@ -12,6 +12,11 @@ on:
       - 'Sources/MacSyncCore/SignedRollbackTransaction.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageQueueTests.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageSMBTests.swift'
+      - 'Tests/MacSyncCoreTests/SourceNameLineageRuntimeTests.swift'
+      - 'Tests/MacSyncCoreTests/SignedRollbackIntegrationTests.swift'
+      - 'Sources/MacSyncCore/SeededArchiveVerifier.swift'
+      - 'Sources/MacSync/RuntimeStorageGuard.swift'
+      - 'Sources/MacSync/RollbackConfirmation.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageTransferTests.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageAuditTests.swift'
       - 'Tests/MacSyncCoreTests/OfflineNamePreparationTests.swift'
@@ -35,6 +40,16 @@ jobs:
         with:
           persist-credentials: false
       - run: swift test -Xswiftc -warnings-as-errors --filter 'SourceNameLineageQueueTests|SourceNameLineageStoreTests|LocalInventoryTests|MirrorDeletionTests|ApplicationRollbackTests|SignedUpdatePolicyTests'
+      - name: Integrated runtime policy and safe rollback database
+        env:
+          MACSYNC_INTERNAL_NAME_LINEAGE: '1'
+        run: swift test -Xswiftc -warnings-as-errors --filter SourceNameLineageRuntimeTests
+      - name: Actual signed v0.19.4 predecessor rollback
+        env:
+          MACSYNC_V0195_ROLLBACK_LAB: '1'
+        run: swift test -Xswiftc -warnings-as-errors --filter SignedRollbackIntegrationTests
+      - name: Compile application and rollback helper
+        run: swift build -Xswiftc -warnings-as-errors
       - name: Prepare pinned Rclone helper
         run: |
           bash Packaging/prepare-rclone.sh "$RUNNER_TEMP/macsync-rclone"
