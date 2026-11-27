@@ -79,6 +79,15 @@ managed = root / ".macsync-temp"
 managed.mkdir(mode=0o770)
 (managed / "ignored").write_bytes(b"x")
 PY
+  # Independent raw trailing-space fixture and ordinary control in each
+  # problematic parent, created before the first SMB connection.
+  mkdir -m 770 "$share/macsync-ci-space"
+  mkdir -m 770 "$share/macsync-ci-space/Space "
+  printf '%s' 'literal space bytes' > "$share/macsync-ci-space/Space /child.jpg"
+  for parent in macsync-ci-raw macsync-ci-sfm macsync-ci-alias macsync-ci-colon macsync-ci-dot-duplicates macsync-ci-space; do
+    mkdir -p "$share/$parent/compatible-control"
+    printf '%s' 'independent normal control' > "$share/$parent/compatible-control/sentinel.jpg"
+  done
   echo "MACSYNC_TEST_BULK_PRESEEDED=macsync-ci-bulk-preseeded" >> "$GITHUB_ENV"
 fi
 prefix="$(brew --prefix)"

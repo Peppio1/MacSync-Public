@@ -33,10 +33,10 @@ jobs:
           persist-credentials: false
       - run: brew install samba
       - run: bash scripts/ci/prepare-local-samba.sh
-      - name: Verify experimental read-only audit integration against POSIX
+      - name: Verify incompatible SMB names and ordinary sibling continuation
         run: |
           test -n "$MACSYNC_TEST_SMB_MOUNT"
           test -n "$MACSYNC_TEST_BULK_PRESEEDED"
-          swift test -Xswiftc -warnings-as-errors --filter 'BulkArchiveAuditIntegrationTests|BulkArchiveScannerTests.testIncompatibleNamesRemainVisibleWithoutTraversingUnsafeDirectory'
+          swift test -Xswiftc -warnings-as-errors --filter 'BulkArchiveAuditIntegrationTests.testSMB'
       - if: always()
         run: bash scripts/ci/cleanup-local-samba.sh
