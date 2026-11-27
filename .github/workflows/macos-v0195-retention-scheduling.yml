@@ -1,0 +1,17 @@
+name: MacSync v0.19.5 retention scheduling
+on:
+  push:
+    branches: [probe-v0195-retention-scheduling]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Verify incremental scheduling and contention
+        run: swift test -Xswiftc -warnings-as-errors --filter 'QueueCompletionLedgerTests.testSweep'

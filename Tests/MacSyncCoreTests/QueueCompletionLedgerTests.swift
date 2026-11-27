@@ -291,4 +291,49 @@ final class QueueCompletionLedgerTests:XCTestCase {
         }
     }
 
+    func testSweepResumesAndHonorsHourlyCadence()throws {
+        try fixture {path,db in
+            let journal=try ChangeJournal(path:path)
+            let first=try journal.enqueue(rootID:"demo",relativePath:"repeat.jpg",kind:.upsert)
+            let second=try journal.enqueue(rootID:"demo",relativePath:"repeat.jpg",kind:.upsert)
+            try journal.markCompleted(id:first);try journal.markCompleted(id:second)
+            try exec(db,"UPDATE queue_completion_ledger SET completed_at=1;")
+            var sweep=RetentionSweep()
+            var clock=100.0
+            let disabled=try sweep.advance(journal:journal,uptime:{clock},shouldContinue:{false})
+            XCTAssertFalse(disabled.attempted)
+            let part=try sweep.advance(journal:journal,uptime:{clock},shouldContinue:{true},maxPages:1)
+            XCTAssertTrue(part.attempted)
+            XCTAssertEqual(part.queueRemoved,1)
+            XCTAssertFalse(part.finished)
+            let end=try sweep.advance(journal:journal,uptime:{clock},shouldContinue:{true},maxPages:1)
+            XCTAssertTrue(end.finished)
+            XCTAssertFalse(try sweep.advance(journal:journal,uptime:{clock},shouldContinue:{true}).attempted)
+            clock+=3599
+            XCTAssertFalse(try sweep.advance(journal:journal,uptime:{clock},shouldContinue:{true}).attempted)
+            clock+=1
+            XCTAssertTrue(try sweep.advance(journal:journal,uptime:{clock},shouldContinue:{true}).finished)
+        }
+    }
+
+    func testSweepYieldsToBusyWriterAndResumesWithoutLosingCursor()throws {
+        try fixture {path,db in
+            let journal=try ChangeJournal(path:path)
+            let first=try journal.enqueue(rootID:"demo",relativePath:"repeat.jpg",kind:.upsert)
+            let second=try journal.enqueue(rootID:"demo",relativePath:"repeat.jpg",kind:.upsert)
+            try journal.markCompleted(id:first);try journal.markCompleted(id:second)
+            try exec(db,"UPDATE queue_completion_ledger SET completed_at=1;")
+            var sweep=RetentionSweep()
+            try exec(db,"BEGIN IMMEDIATE;")
+            let start=ProcessInfo.processInfo.systemUptime
+            XCTAssertThrowsError(try sweep.advance(journal:journal,shouldContinue:{true}))
+            XCTAssertLessThan(ProcessInfo.processInfo.systemUptime-start,1.0)
+            try exec(db,"ROLLBACK;")
+            XCTAssertNotNil(try time(db,first))
+            let result=try sweep.advance(journal:journal,shouldContinue:{true})
+            XCTAssertEqual(result.queueRemoved,1)
+            XCTAssertNotNil(try time(db,second))
+        }
+    }
+
 }

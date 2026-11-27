@@ -2048,6 +2048,10 @@ public final class ChangeJournal {
         guard shouldContinue() else { return .init(removed:0,examined:0,nextAfterID:afterID,finished:false,held:true) }
         let cutoff=now.addingTimeInterval(-30*86400).timeIntervalSince1970
         guard cutoff.isFinite else { throw JournalError.database("Invalid retention date") }
+        // This connection is owned by the serial worker; maintenance may
+        // yield to an FSEvents writer rather than wait five seconds.
+        guard sqlite3_busy_timeout(connection,25)==SQLITE_OK else {throw databaseFailure()}
+        defer {sqlite3_busy_timeout(connection,5000)}
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
@@ -2130,6 +2134,10 @@ public final class ChangeJournal {
         guard shouldContinue() else {return .init(removed:0,examined:0,nextAfterID:afterID,finished:false,held:true)}
         let cutoff=now.addingTimeInterval(-90*86400)
         guard cutoff.timeIntervalSince1970.isFinite else {throw JournalError.database("Invalid retention date")}
+        // This connection is owned by the serial worker; maintenance may
+        // yield to an FSEvents writer rather than wait five seconds.
+        guard sqlite3_busy_timeout(connection,25)==SQLITE_OK else {throw databaseFailure()}
+        defer {sqlite3_busy_timeout(connection,5000)}
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
             guard shouldContinue() else {throw SeedVerificationError.cancelled}

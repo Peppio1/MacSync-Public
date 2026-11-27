@@ -988,6 +988,7 @@ final class MountedCopyController: ObservableObject {
             var maps: [MountedFolderMapping] = []
             var absencePreviousLength=Int64.max
             var absencePreviousID:Int64=0
+            var retentionSweep=RetentionSweep()
             var worker: MountedFolderCopyWorker?
             // Initial source audit can be expensive on a large archive.
             // Create the armed deletion worker on the serial background queue.
@@ -1392,9 +1393,27 @@ final class MountedCopyController: ObservableObject {
                         durationSeconds: max(0, Date().timeIntervalSince(startedAt)),
                         message: (cancellation.isCancelled || summary.interrupted ? "Ciclo interrotto: " : "Ciclo concluso: ") + "\(summary.copied) copie, \(summary.reconciled) pubblicazioni precedenti riconciliate, \(summary.deferred) rimandate, \(summary.failed) errori." + " Eliminazioni già soddisfatte: \(absentDeletes)." + mirrorDetails
                     )
-                    // Only the SQLite activity table is pruned, never file
-                    // inventory, queue, photographs, backups or staging.
-                    _ = try? log.prune(retainNewest: 20_000, maxAgeDays: 90)
+                    // Local SQLite only, after transfers and mirror work.
+                    // Never start during a suspended/interrupted/partial cycle.
+                    _ = try? log.prune(retainNewest:20_000,maxAgeDays:90)
+                    if outcomeState=="completed",gate.isReady,!cancellation.isCancelled {
+                        let maintenanceStart=ProcessInfo.processInfo.systemUptime
+                        do {
+                            let retention=try retentionSweep.advance(journal:journal,
+                                shouldContinue:{gate.isReady && !cancellation.isCancelled})
+                            if retention.attempted {
+                                log.currentJob=nil
+                                try? log.record(level:.info,rootID:"app",action:"database_retention",
+                                    durationSeconds:ProcessInfo.processInfo.systemUptime-maintenanceStart,
+                                    message:"Manutenzione SQLite: \(retention.examined) esaminati, \(retention.queueRemoved) operazioni e \(retention.receiptsRemoved) ricevute rimosse; lotti \(retention.pages), sospesa \(retention.held), scansione conclusa \(retention.finished).")
+                            }
+                        } catch {
+                            log.currentJob=nil
+                            try? log.record(level:.warning,rootID:"app",action:"database_retention_deferred",
+                                durationSeconds:ProcessInfo.processInfo.systemUptime-maintenanceStart,
+                                message:"Manutenzione SQLite rinviata; transazione non conclusa annullata.")
+                        }
+                    }
                     let result = (summary.interrupted
                         ? "Ciclo interrotto: " : "Ultimo ciclo: ") + "\(summary.copied) copie, "
                         + "\(summary.deferred) rimandate, \(summary.failed) errori, "
