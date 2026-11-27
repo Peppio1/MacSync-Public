@@ -2,6 +2,25 @@ name: v0.19.5 mounted SMB deletion validation
 on:
   push:
     branches: [develop-v0.19.5]
+    paths:
+      - 'Sources/MacSyncCore/ChangeJournal.swift'
+      - 'Sources/MacSyncCore/LocalInventory.swift'
+      - 'Sources/MacSyncCore/MirrorDeletion.swift'
+      - 'Sources/MacSyncCore/PostMirrorAbsenceReconciliation.swift'
+      - 'Sources/MacSyncCore/RectifiedDuplicateProof.swift'
+      - 'Sources/MacSyncCore/NameRectification*.swift'
+      - 'Sources/MacSyncCore/MountedFolderCopy.swift'
+      - 'Sources/MacSyncCore/DeletionSafety.swift'
+      - 'Sources/MacSyncCore/TransferPreflight.swift'
+      - 'Sources/MacSyncCore/OperationalSafety.swift'
+      - 'Sources/MacSyncCore/StageTransferEngine.swift'
+      - 'Sources/MacSyncCore/SQLiteConnectionSetup.swift'
+      - 'Sources/MacSync/MountedCopyController.swift'
+      - 'Package.swift'
+      - 'Tests/MacSyncCoreTests/SMBV0192DeletionValidationTests.swift'
+      - 'scripts/ci/prepare-local-samba.sh'
+      - 'scripts/ci/cleanup-local-samba.sh'
+      - 'Packaging/RcloneSMBRename/**'
   workflow_dispatch:
 permissions:
   contents: read

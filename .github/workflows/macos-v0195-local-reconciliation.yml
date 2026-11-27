@@ -2,6 +2,25 @@ name: MacSync v0.19.5 local reconciliation
 on:
   push:
     branches: [develop-v0.19.5]
+    paths:
+      - 'Sources/MacSyncCore/ChangeJournal.swift'
+      - 'Sources/MacSyncCore/LocalInventory.swift'
+      - 'Sources/MacSyncCore/MirrorDeletion.swift'
+      - 'Sources/MacSyncCore/PostMirrorAbsenceReconciliation.swift'
+      - 'Sources/MacSyncCore/RectifiedDuplicateProof.swift'
+      - 'Sources/MacSyncCore/NameRectification*.swift'
+      - 'Sources/MacSyncCore/MountedFolderCopy.swift'
+      - 'Sources/MacSyncCore/DeletionSafety.swift'
+      - 'Sources/MacSyncCore/TransferPreflight.swift'
+      - 'Sources/MacSyncCore/OperationalSafety.swift'
+      - 'Sources/MacSyncCore/StageTransferEngine.swift'
+      - 'Sources/MacSyncCore/SQLiteConnectionSetup.swift'
+      - 'Sources/MacSync/MountedCopyController.swift'
+      - 'Package.swift'
+      - 'Sources/MacSyncCore/SeededArchiveVerifier.swift'
+      - 'Sources/MacSyncCore/ArchiveAudit.swift'
+      - 'Tests/MacSyncCoreTests/MirrorDeletionTests.swift'
+      - 'Tests/MacSyncCoreTests/SeededArchiveVerifierTests.swift'
   workflow_dispatch:
 permissions:
   contents: read

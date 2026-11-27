@@ -3,10 +3,12 @@ on:
   push:
     branches: [develop-v0.19.5]
     paths:
-      - 'Sources/MacSync/**'
+      - 'Sources/MacSync/ArchivePathViews.swift'
+      - 'Sources/MacSync/QueuePreviewSheet.swift'
       - 'Sources/MacSyncCore/ArchivePathPresentation.swift'
+      - 'Sources/MacSyncCore/QueuePreview.swift'
       - 'Tests/MacSyncCoreTests/ArchivePathPresentationTests.swift'
-      - '.github/workflows/macos-v0195-path-display.yml'
+      - 'Package.swift'
   workflow_dispatch:
 permissions:
   contents: read
