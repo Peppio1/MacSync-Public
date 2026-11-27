@@ -3,25 +3,28 @@ import XCTest
 @testable import MacSyncCore
 
 final class BulkArchiveScannerTests: XCTestCase {
-    private func fixture(_ root: URL, links: Bool) throws {
-        let folder = root.appendingPathComponent("bulk-tree-" + UUID().uuidString)
+    private func fixture(_ root: URL, links: Bool, writeRoot: URL? = nil,
+                         label: String) throws {
+        let name = "bulk-tree-" + UUID().uuidString
+        let folder = root.appendingPathComponent(name)
+        let fixtureFolder = (writeRoot ?? root).appendingPathComponent(name)
         let fm = FileManager.default
-        try fm.createDirectory(at: folder, withIntermediateDirectories: false)
-        defer { try? fm.removeItem(at: folder) }
+        try fm.createDirectory(at: fixtureFolder, withIntermediateDirectories: false)
+        defer { try? fm.removeItem(at: fixtureFolder) }
         for d in 0..<8 {
-            let sub = folder.appendingPathComponent("folder-\(d)")
+            let sub = fixtureFolder.appendingPathComponent("folder-\(d)")
             try fm.createDirectory(at: sub, withIntermediateDirectories: false)
             for i in 0..<12 {
                 try Data([UInt8(i)]).write(to: sub.appendingPathComponent("foto-\(i)-é.jpg"))
             }
             try Data([1]).write(to: sub.appendingPathComponent(".DS_Store"))
         }
-        let managed = folder.appendingPathComponent(".macsync-temp")
+        let managed = fixtureFolder.appendingPathComponent(".macsync-temp")
         try fm.createDirectory(at: managed, withIntermediateDirectories: false)
         try Data([1]).write(to: managed.appendingPathComponent("ignored"))
         if links {
-            try fm.createSymbolicLink(at: folder.appendingPathComponent("link"),
-                                      withDestinationURL: folder.appendingPathComponent("folder-0"))
+            try fm.createSymbolicLink(at: fixtureFolder.appendingPathComponent("link"),
+                                      withDestinationURL: fixtureFolder.appendingPathComponent("folder-0"))
         }
         let legacy = try LocalScanner.scan(root: folder, excludeManaged: true,
                                            ignoreDSStore: true, preferPOSIXMetadata: true)
@@ -31,11 +34,40 @@ final class BulkArchiveScannerTests: XCTestCase {
         guard case let .complete(rows) = result else { return XCTFail("Bulk unavailable") }
         let expected = Dictionary(uniqueKeysWithValues: legacy.map { (Data($0.relativePath.utf8), $0) })
         let actual = Dictionary(uniqueKeysWithValues: rows.map { (Data($0.relativePath.utf8), $0) })
-        XCTAssertEqual(Set(expected.keys), Set(actual.keys))
+        let missing = Set(expected.keys).subtracting(actual.keys)
+        let extra = Set(actual.keys).subtracting(expected.keys)
+        func describe(_ key: Data) -> String {
+            "\(String(decoding: key, as: UTF8.self)) [\(key.map { String(format: "%02x", $0) }.joined())]"
+        }
+        print("BULK_DIAG label=\(label) baseline=\(legacy.count) bulk=\(rows.count) missing=\(missing.count) extra=\(extra.count)")
+        for key in missing.sorted(by: { $0.lexicographicallyPrecedes($1) }) {
+            print("BULK_PATH_ONLY_POSIX \(describe(key))")
+        }
+        for key in extra.sorted(by: { $0.lexicographicallyPrecedes($1) }) {
+            print("BULK_PATH_ONLY_BULK \(describe(key))")
+        }
+        // Independent expected topology, not a normalization-based replacement
+        // for the original byte-exact equivalence gate.
+        var planned = Set<String>()
+        for d in 0..<8 {
+            planned.insert("folder-\(d)")
+            for i in 0..<12 { planned.insert("folder-\(d)/foto-\(i)-é.jpg") }
+        }
+        if links { planned.insert("link") }
+        XCTAssertEqual(Set(rows.map(\.relativePath)), planned)
+        XCTAssertEqual(Set(legacy.map(\.relativePath)), planned, "Legacy topology differs")
+        XCTAssertTrue(missing.isEmpty && extra.isEmpty, "Exact path mismatch; see BULK_PATH_ONLY logs")
+        // Read a fresh no-follow fingerprint only for differences. Compare
+        // all three observations, without changing production or tolerances.
         for (key, item) in expected {
-            let other = try XCTUnwrap(actual[key])
-            XCTAssertEqual(item, other)
-            XCTAssertEqual(item.verificationFingerprint, other.verificationFingerprint)
+            guard let other = actual[key] else { continue }
+            if item != other || item.verificationFingerprint != other.verificationFingerprint {
+                let live = try? SeededArchiveVerifier.fingerprint(folder.appendingPathComponent(item.relativePath),
+                                                                  directory: item.kind == "directory")
+                print("BULK_FINGERPRINT_DIAG label=\(label) path=\(item.relativePath) posix=\(String(describing: item.verificationFingerprint)) bulk=\(String(describing: other.verificationFingerprint)) fresh=\(String(describing: live))")
+                XCTAssertEqual(item, other)
+                XCTAssertEqual(item.verificationFingerprint, other.verificationFingerprint)
+            }
         }
         XCTAssertEqual(rows.count, links ? 105 : 104)
         var cancelled = false
@@ -57,13 +89,30 @@ final class BulkArchiveScannerTests: XCTestCase {
         print("BULK_SWIFT_TREE_COMPLETE entries=\(rows.count) seconds=\(elapsed)")
     }
     func testLocalTreeEquivalenceAndConcurrentReplacement() throws {
-        try fixture(FileManager.default.temporaryDirectory, links: true)
+        try fixture(FileManager.default.temporaryDirectory, links: true, label: "local-link")
     }
     func testSMBTreeEquivalenceAndConcurrentReplacement() throws {
         guard let mount = ProcessInfo.processInfo.environment["MACSYNC_TEST_SMB_MOUNT"] else {
             throw XCTSkip("Disposable SMB fixture not mounted")
         }
-        try fixture(URL(fileURLWithPath: mount), links: false)
+        try fixture(URL(fileURLWithPath: mount), links: false, label: "smb-fresh-mount")
+    }
+    func testLocalTreeWithoutSymlink() throws {
+        try fixture(FileManager.default.temporaryDirectory, links: false, label: "local-no-link")
+    }
+    func testStableServerCreatedSMBTree() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let mount = env["MACSYNC_TEST_SMB_MOUNT"],
+              let base = env["MACSYNC_TEST_SMB_ROOT"] else {
+            throw XCTSkip("Disposable SMB fixture not mounted")
+        }
+        let marker = URL(fileURLWithPath: base).appendingPathComponent("share-path")
+        let path = try String(contentsOf: marker, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard path.hasPrefix("/private/tmp/macsync-ci-share."), env["MACSYNC_TEST_SMB_HOST"] == "127.0.0.1" else {
+            return XCTFail("Not the disposable loopback fixture")
+        }
+        try fixture(URL(fileURLWithPath: mount), links: false, writeRoot: URL(fileURLWithPath: path),
+                    label: "smb-server-created")
     }
     func testIncompatibleNameFailsClosed() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
