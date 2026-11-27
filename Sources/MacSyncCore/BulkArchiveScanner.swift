@@ -6,10 +6,25 @@ import Darwin
 /// Do not infer literal absence on SMB from any successful enumeration.
 enum BulkArchiveScanner {
     enum Failure: Error, Equatable {
-        case changed, unsupportedName, limit, filesystem(Int32)
+        case changed, limit, filesystem(Int32)
     }
     private enum Capability: Error { case unsupported }
     private static let directoryFlags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+
+    /// For grouping only, never construct a filesystem path from this key.
+    /// SFM maps reserved characters and final space/dot to private-use codes.
+    static func comparisonKey(_ name: String) -> String {
+        var decoded = String.UnicodeScalarView()
+        let mapping: [UInt32: UInt32] = [
+            0xF020: 0x22, 0xF021: 0x2A, 0xF022: 0x3A, 0xF023: 0x3C,
+            0xF024: 0x3E, 0xF025: 0x3F, 0xF026: 0x5C, 0xF027: 0x7C,
+            0xF028: 0x20, 0xF029: 0x2E
+        ]
+        for scalar in name.unicodeScalars {
+            decoded.append(mapping[scalar.value].flatMap(Unicode.Scalar.init) ?? scalar)
+        }
+        return WindowsPathSafety.comparisonFold(String(decoded))
+    }
 
     static func scan(root: URL, excludeManaged: Bool = false,
                      ignoreDSStore: Bool = FileExclusionPolicy.ignoreDSStore,
@@ -54,30 +69,43 @@ enum BulkArchiveScanner {
             try check()
             let listing = try BulkDirectoryMetadata.read(fd: fd, shouldContinue: shouldContinue)
             guard case .complete(let rows) = listing else { throw Capability.unsupported }
-            var folded = Set<String>()
-            for row in rows {
+            // Group the whole parent before visiting any child. Mark both
+            // spellings of a case/trailing-dot/SFM alias, regardless of order.
+            let visible = rows.filter { row in
+                !(excludeManaged && row.name.lowercased().hasPrefix(".macsync-")) &&
+                !FileExclusionPolicy.excludes(row.name, enabled: ignoreDSStore)
+            }
+            let groups = Dictionary(grouping: visible, by: { comparisonKey($0.name) })
+            for row in visible {
                 try check()
-                if excludeManaged && row.name.lowercased().hasPrefix(".macsync-") { continue }
-                if FileExclusionPolicy.excludes(row.name, enabled: ignoreDSStore) { continue }
-                // Refuse ambiguous, raw incompatible, and SFM private-use
-                // names for this conservative candidate. Never reinterpret
-                // them as absent or return a partial inventory.
-                guard WindowsPathSafety.validComponent(row.name),
-                      !row.name.unicodeScalars.contains(where: { (0xF000...0xF0FF).contains($0.value) }),
-                      folded.insert(WindowsPathSafety.comparisonFold(row.name)).inserted else {
-                    throw Failure.unsupportedName
-                }
                 let path = prefix.isEmpty ? row.name : prefix + "/" + row.name
+                let ambiguous = (groups[comparisonKey(row.name)]?.count ?? 0) > 1
+                let incompatible = !WindowsPathSafety.validComponent(row.name) ||
+                    row.name.unicodeScalars.contains(where: { (0xF000...0xF0FF).contains($0.value) })
+                let uncertain = ambiguous || incompatible
+                let reason = ambiguous ? "Nomi equivalenti o ambigui nella destinazione" :
+                    "Nome incompatibile o rappresentazione SFM nella destinazione"
                 onVisit(path)
                 try check()
                 guard row.device == UInt64(bitPattern: Int64(before.st_dev)) else { throw Failure.changed }
+                if uncertain && row.kind != "file" {
+                    // A directory or link with a problematic spelling might
+                    // resolve to a different object. Preserve the enumerated
+                    // name, type and timestamp; do not address it or descend.
+                    // Size is unavailable, not proof of an empty directory.
+                    found.append(TrackedItem(relativePath: path, kind: row.kind, size: 0,
+                        modifiedAt: Double(row.mtimeSeconds) + Double(row.mtimeNanos) / 1_000_000_000,
+                        verificationUncertainty: reason + " · contenuto non verificato"))
+                    continue
+                }
                 switch row.kind {
                 case "file":
                     guard let f = row.fileFingerprint else { throw Failure.changed }
                     found.append(TrackedItem(relativePath: path, kind: row.kind, size: f.size,
                         modifiedAt: f.modifiedAt,
-                        changeStamp: "\(f.inode):\(f.ctimeSeconds):\(f.ctimeNanos)",
-                        verificationFingerprint: f))
+                        changeStamp: uncertain ? nil : "\(f.inode):\(f.ctimeSeconds):\(f.ctimeNanos)",
+                        verificationFingerprint: uncertain ? nil : f,
+                        verificationUncertainty: uncertain ? reason : nil))
                 case "directory":
                     let child = row.name.withCString { openat(fd, $0, directoryFlags) }
                     guard child >= 0 else { throw Failure.filesystem(errno) }

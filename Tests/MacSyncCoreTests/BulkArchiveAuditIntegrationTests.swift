@@ -29,7 +29,13 @@ final class BulkArchiveAuditIntegrationTests: XCTestCase {
             try put(target, "changed.jpg", [3])
             try put(source, "missing.jpg", [4])
             try put(target, "extra.jpg", [5])
-            if incompatible { try put(target, "bad.", [6]) }
+            if incompatible {
+                try put(target, "bad.", [6])
+                try put(target, "old./hidden.jpg", [7])
+                try put(source, "old/hidden.jpg", [7])
+                try put(source, "ordinary/same.jpg", [8])
+                try put(target, "ordinary/same.jpg", [8])
+            }
         } else {
             let relative = "folder-0/foto-0-é.jpg"
             let file = target.appendingPathComponent(relative)
@@ -50,17 +56,28 @@ final class BulkArchiveAuditIntegrationTests: XCTestCase {
             var phases: [String] = []
             let result = try candidate.run(mode: mode, progress: { phases.append($0.phase) })
             XCTAssertTrue(phases.contains("Analisi destinazione · metadati raggruppati · prova"))
-            XCTAssertEqual(phases.contains("Analisi destinazione · POSIX · fallback"), incompatible)
-            XCTAssertEqual(result.findings, baseline.findings)
+            XCTAssertFalse(phases.contains("Analisi destinazione · POSIX · fallback"))
+            if incompatible {
+                let findings = Dictionary(uniqueKeysWithValues: result.findings.map { ($0.relativePath, $0) })
+                XCTAssertEqual(findings["bad."]?.kind, .uncertain)
+                XCTAssertEqual(findings["old."]?.kind, .uncertain)
+                XCTAssertEqual(findings["old/hidden.jpg"]?.kind, .uncertain)
+                XCTAssertEqual(findings["missing.jpg"]?.kind, .uncertain)
+                XCTAssertEqual(findings["ordinary/same.jpg"]?.kind, .matching)
+                XCTAssertFalse(result.findings.contains { $0.relativePath == "old./hidden.jpg" })
+                XCTAssertFalse(result.findings.filter { $0.kind == .uncertain }.contains { $0.repairEligible == true })
+            } else {
+                XCTAssertEqual(result.findings, baseline.findings)
+            }
             XCTAssertEqual(result.sourceMetrics?.files, baseline.sourceMetrics?.files)
-            XCTAssertEqual(result.destinationMetrics?.files, baseline.destinationMetrics?.files)
+            if !incompatible { XCTAssertEqual(result.destinationMetrics?.files, baseline.destinationMetrics?.files) }
             XCTAssertEqual(result.destinationMetrics?.directories, baseline.destinationMetrics?.directories)
-            XCTAssertEqual(result.destinationMetrics?.detectedBytes, baseline.destinationMetrics?.detectedBytes)
-            XCTAssertEqual(result.metadataMatches, baseline.metadataMatches)
-            XCTAssertEqual(result.bytesRead, baseline.bytesRead)
+            if !incompatible { XCTAssertEqual(result.destinationMetrics?.detectedBytes, baseline.destinationMetrics?.detectedBytes) }
+            if !incompatible { XCTAssertEqual(result.metadataMatches, baseline.metadataMatches) }
+            if !incompatible { XCTAssertEqual(result.bytesRead, baseline.bytesRead) }
             XCTAssertEqual(result.queuedRepairs, 0)
             XCTAssertEqual(try journal.pending(limit: 10000).map(\.id), before)
-            print("BULK_AUDIT_INTEGRATION mode=\(mode.rawValue) fallback=\(incompatible) findings=\(result.findings.count)")
+            print("BULK_AUDIT_INTEGRATION mode=\(mode.rawValue) incompatible=\(incompatible) fallback=false findings=\(result.findings.count)")
         }
         if exerciseRepair {
             var phases: [String] = []
@@ -75,7 +92,7 @@ final class BulkArchiveAuditIntegrationTests: XCTestCase {
     func testReadOnlyQuickAndIntelligentMatchPOSIX() throws {
         try fixture(exerciseRepair: true)
     }
-    func testIncompatibleNameRestartsOnceWithPOSIX() throws {
+    func testIncompatibleNameDoesNotRestartAndUncertaintyProtectsMissing() throws {
         try fixture(incompatible: true)
     }
     func testMountedReadOnlyQuickAndIntelligentMatchPOSIX() throws {

@@ -339,6 +339,9 @@ public final class ArchiveAudit {
             let source: [String:TrackedItem]
             let target: [String:TrackedItem]
             let ambiguous: Set<String>
+            let uncertainTargetParents: Set<String>
+            let uncertainTargetPaths: Set<String>
+            let bulkUsed: Bool
             let sourceStamp: String
             let targetStamp: String
             let cacheBinding: String?
@@ -391,7 +394,7 @@ public final class ArchiveAudit {
             enum ScanUpdate: Sendable {
                 case visit(String), item(TrackedItem), metadata(DiagnosticTiming), method(String)
             }
-            let target = try InventoryReadLane.archive.read(
+            let targetResult = try InventoryReadLane.archive.read(
                 shouldContinue: { !cancellation.isCancelled }, onUpdate: { (updates: [ScanUpdate]) in
                     for update in updates {
                         switch update {
@@ -416,7 +419,7 @@ public final class ArchiveAudit {
                             shouldContinue: active, onVisit: { report(.visit($0)) }, onItem: { report(.item($0)) },
                             onPOSIXMetadataTiming: { report(.metadata($0)) }, measurePOSIXMetadata: DiagnosticCollectionLevel.current != .standard)
                     }
-                    guard useBulk else { return try posix() }
+                    guard useBulk else { return (try posix(), false) }
                     return try withoutActuallyEscaping(active) { checkActive in
                         let selection = try BulkInventoryFallback.scan(
                             shouldContinue: checkActive,
@@ -427,13 +430,8 @@ public final class ArchiveAudit {
                                 }
                             }, bulk: {
                                 report(.method("metadati raggruppati · prova"))
-                                do {
-                                    return try BulkArchiveScanner.scan(root: mapping.target, excludeManaged: true,
-                                        shouldContinue: checkActive, onVisit: { report(.visit($0)) })
-                                } catch BulkArchiveScanner.Failure.unsupportedName {
-                                    // Discard the candidate; restart inside the same lane.
-                                    return .unsupported
-                                }
+                                return try BulkArchiveScanner.scan(root: mapping.target, excludeManaged: true,
+                                    shouldContinue: checkActive, onVisit: { report(.visit($0)) })
                             }, posix: {
                                 report(.method("POSIX · fallback"))
                                 return try posix()
@@ -445,9 +443,10 @@ public final class ArchiveAudit {
                                 report(.item(item))
                             }
                         }
-                        return selection.value
+                        return (selection.value, selection.method == .bulk)
                     }
                 })
+            let (target, bulkUsed) = targetResult
             state.destination.scanSeconds = targetPrior + ProcessInfo.processInfo.systemUptime-scanStart
             try mapping.verify()
             guard try Self.rootStamp(mapping.source) == sourceStamp,
@@ -465,8 +464,23 @@ public final class ArchiveAudit {
                 volume: nil, date: Date(), rows: try IncompatibleName.collect(
                     rootID: mapping.rootID, rootPath: mapping.source.path, side: .source,
                     items: source, shouldContinue: { !cancellation.isCancelled })))
-            pairs.append(Pair(mapping:mapping,source:Dictionary(uniqueKeysWithValues:source.map{($0.relativePath,$0)}),
-                target:Dictionary(uniqueKeysWithValues:target.map{($0.relativePath,$0)}),ambiguous:ambiguous,
+            // Preserve all visible byte spellings in the scanner. Swift
+            // String keys collapse canonical-equivalent Unicode spellings;
+            // group explicitly instead of trapping on a duplicate key.
+            let sourceGroups = Dictionary(grouping: source, by: \.relativePath)
+            let targetGroups = Dictionary(grouping: target, by: \.relativePath)
+            let duplicates = Set(sourceGroups.filter { $0.value.count > 1 }.keys)
+                .union(targetGroups.filter { $0.value.count > 1 }.keys)
+            let marked = bulkUsed ? target.filter { $0.verificationUncertainty != nil }.map(\.relativePath) : []
+            func bulkKey(_ path: String) -> String {
+                path.split(separator: "/").map { BulkArchiveScanner.comparisonKey(String($0)) }.joined(separator: "/")
+            }
+            let riskyPaths = Set((marked + Array(duplicates)).map(bulkKey))
+            let riskyParents = Set(marked.map { bulkKey($0.split(separator: "/").dropLast().joined(separator: "/")) })
+            pairs.append(Pair(mapping:mapping,source:sourceGroups.compactMapValues { $0.first },
+                target:targetGroups.compactMapValues { $0.first },
+                ambiguous:ambiguous.union(duplicates.map(Self.fold)),
+                uncertainTargetParents:riskyParents,uncertainTargetPaths:riskyPaths,bulkUsed:bulkUsed,
                 sourceStamp:sourceStamp,targetStamp:targetStamp,
                 cacheBinding: mode == .intelligent ? (try? DirectoryBinding.encoded(mapping.source) + "\0" + DirectoryBinding.encoded(mapping.target)) : nil,
                 sourceBinding:sourceBinding,targetBinding:targetBinding))
@@ -505,7 +519,17 @@ public final class ArchiveAudit {
                             pair.source[name]?.kind != pair.target[name]?.kind) ||
                         pair.source[name]?.kind == "symlink" || pair.target[name]?.kind == "symlink"
                     }
-                    if pendingRenames.protects(rootID: mapping.rootID, path: path) {
+                    let bulkKeys = pair.bulkUsed ? ancestors.map { ancestor in
+                        ancestor.split(separator: "/").map { BulkArchiveScanner.comparisonKey(String($0)) }.joined(separator: "/")
+                    } : []
+                    let nameUncertain = pair.bulkUsed &&
+                        (bulkKeys.contains(where: { pair.uncertainTargetPaths.contains($0) }) ||
+                         (dst == nil && (pair.uncertainTargetParents.contains("") ||
+                           bulkKeys.contains(where: { pair.uncertainTargetParents.contains($0) }))))
+                    if nameUncertain {
+                        detail = dst?.verificationUncertainty ??
+                            "Nome ambiguo o contenuto non verificabile: presenza o assenza non confermata"
+                    } else if pendingRenames.protects(rootID: mapping.rootID, path: path) {
                         // A known outstanding rename can present as a missing
                         // source-name and an extra old destination-name. Do
                         // not hash, enqueue repairs or authorize deletion.

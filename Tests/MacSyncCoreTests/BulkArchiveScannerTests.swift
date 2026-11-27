@@ -203,13 +203,23 @@ final class BulkArchiveScannerTests: XCTestCase {
         try fixture(URL(fileURLWithPath: mount), links: false, precreatedName: name,
                     label: "smb-server-preseeded")
     }
-    func testIncompatibleNameFailsClosed() throws {
+    func testIncompatibleNamesRemainVisibleWithoutTraversingUnsafeDirectory() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
-        defer { try? FileManager.default.removeItem(at: folder) }
+        let fm = FileManager.default
+        try fm.createDirectory(at: folder, withIntermediateDirectories: false)
+        defer { try? fm.removeItem(at: folder) }
         try Data([1]).write(to: folder.appendingPathComponent("bad."))
-        XCTAssertThrowsError(try BulkArchiveScanner.scan(root: folder)) { error in
-            XCTAssertEqual(error as? BulkArchiveScanner.Failure, .unsupportedName)
-        }
+        let unsafe = folder.appendingPathComponent("old.")
+        try fm.createDirectory(at: unsafe, withIntermediateDirectories: false)
+        try Data([2]).write(to: unsafe.appendingPathComponent("hidden-child.jpg"))
+        try Data([3]).write(to: folder.appendingPathComponent("normal.jpg"))
+        let result = try BulkArchiveScanner.scan(root: folder)
+        guard case .complete(let rows) = result else { return XCTFail("Unexpected fallback") }
+        XCTAssertEqual(Set(rows.map(\.relativePath)), ["bad.", "old.", "normal.jpg"])
+        XCTAssertNotNil(rows.first { $0.relativePath == "bad." }?.verificationUncertainty)
+        XCTAssertEqual(rows.first { $0.relativePath == "bad." }?.size, 1)
+        XCTAssertNil(rows.first { $0.relativePath == "bad." }?.verificationFingerprint)
+        XCTAssertNotNil(rows.first { $0.relativePath == "old." }?.verificationUncertainty)
+        XCTAssertNil(rows.first { $0.relativePath == "normal.jpg" }?.verificationUncertainty)
     }
 }

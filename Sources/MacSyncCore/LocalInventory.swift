@@ -32,15 +32,19 @@ public struct TrackedItem: Equatable, Sendable {
     /// Used only to avoid duplicating SMB calls in a quick archive audit;
     /// queue acknowledgements still require a live revalidation.
     public let verificationFingerprint: SeedFileFingerprint?
+    /// Experimental read-only inventory annotation, never persisted or
+    /// accepted as an operational fingerprint for an uncertain entry.
+    public let verificationUncertainty: String?
 
     public init(relativePath: String, kind: String, size: Int64, modifiedAt: Double, changeStamp: String? = nil,
-                verificationFingerprint: SeedFileFingerprint? = nil) {
+                verificationFingerprint: SeedFileFingerprint? = nil, verificationUncertainty: String? = nil) {
         self.relativePath = relativePath
         self.kind = kind
         self.size = size
         self.modifiedAt = modifiedAt
         self.changeStamp = changeStamp
         self.verificationFingerprint = verificationFingerprint
+        self.verificationUncertainty = verificationUncertainty
     }
 
     /// Preserve the persisted inventory comparison semantics. The live

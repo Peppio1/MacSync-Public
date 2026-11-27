@@ -37,6 +37,6 @@ jobs:
         run: |
           test -n "$MACSYNC_TEST_SMB_MOUNT"
           test -n "$MACSYNC_TEST_BULK_PRESEEDED"
-          swift test -Xswiftc -warnings-as-errors --filter BulkArchiveAuditIntegrationTests
+          swift test -Xswiftc -warnings-as-errors --filter 'BulkArchiveAuditIntegrationTests|BulkArchiveScannerTests.testIncompatibleNamesRemainVisibleWithoutTraversingUnsafeDirectory'
       - if: always()
         run: bash scripts/ci/cleanup-local-samba.sh
