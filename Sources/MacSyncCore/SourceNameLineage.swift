@@ -93,6 +93,15 @@ enum SourceNameLineage {
             // have left a different path behind.
         }
 
+        // Only the exact successful in-flight attempt can clear uncertainty
+        // introduced by itself. Older unresolved attempts remain uncertain.
+        mutating func confirmAttempt(path: String, previousUncertainty: Bool) {
+            guard WindowsPathSafety.validRelativePath(path),
+                  currentPath.utf8.elementsEqual(path.utf8) else { return }
+            recognize(path: path)
+            uncertainPublication = previousUncertainty
+        }
+
         /// No deletion is authorized by this method. A caller may use the
         /// candidates only after copy success + normal mirror validation.
         mutating func observe(identity observed: Identity, path: String,
@@ -112,24 +121,29 @@ enum SourceNameLineage {
             }
             let sameRecognized = recognizedPaths.contains { $0.utf8.elementsEqual(path.utf8) }
             // Fold-equivalent paths are not safe separate deletion targets.
-            let folded = WindowsPathSafety.comparisonFold(path)
+            func fold(_ value: String) -> String {
+                value.split(separator: "/", omittingEmptySubsequences: false)
+                    .map { WindowsPathSafety.comparisonFold(String($0)) }.joined(separator: "/")
+            }
+            let folded = fold(path)
             let obsolete = recognizedPaths.filter {
                 !$0.utf8.elementsEqual(path.utf8) &&
-                WindowsPathSafety.comparisonFold($0) != folded
+                fold($0) != folded
             }
             let alias = recognizedPaths.contains {
                 !$0.utf8.elementsEqual(path.utf8) &&
-                WindowsPathSafety.comparisonFold($0) == folded
+                fold($0) == folded
             }
             let previousInvalid = !WindowsPathSafety.validRelativePath(previous)
             let canSuppress = previousInvalid && evidence == .neverPublished &&
                 !uncertainPublication
             // A recognized compatible path is a candidate for revalidation,
             // not an unconditional skip of a copy if content has changed.
+            let uncertain = evidence == .unknown || uncertainPublication || alias
             return Decision(upload: sameRecognized ? .revalidate(path) : .copy(path),
-                protectedPaths: recognizedPaths, deletionCandidates: obsolete,
-                suppressPreviousDelete: canSuppress,
-                uncertain: evidence == .unknown || uncertainPublication || alias)
+                protectedPaths: recognizedPaths, deletionCandidates: uncertain ? [] : obsolete,
+                suppressPreviousDelete: canSuppress && !uncertain,
+                uncertain: uncertain)
         }
     }
 

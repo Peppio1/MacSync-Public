@@ -262,6 +262,7 @@ public final class MountedFolderCopyWorker {
     private var pendingNameProtection = NameRectification.PendingProtection(relations: [])
     private var pendingLocalNamePaths:[String:Set<String>] = [:]
     private var transferDiagnostics: [String: DiagnosticTiming] = [:]
+    private var lineageBindings: [String:[String:String]] = [:]
 
     private func recordDuration(_ action: String, since started: Double) {
         transferDiagnostics[action, default: DiagnosticTiming()].observe(ProcessInfo.processInfo.systemUptime - started)
@@ -368,6 +369,7 @@ public final class MountedFolderCopyWorker {
             .mapValues { Set($0.map(\.relativePath)) }
         rectificationScopes = try journal.nameRectificationScopes()
         transferDiagnostics = [:]
+        lineageBindings = try journal.lineageCopyBindings(Array(mappings.values))
         return true
     }
 
@@ -465,9 +467,11 @@ public final class MountedFolderCopyWorker {
                     defer { recordDuration("metric_job_retry_preparation",since:retryTick) }
                     try prepareRetry(job,mapping:mapping,publicationUncertain:previousPublication)
                 }
+                let lineage = try journal.beginLineageTransfer(job,mapping:mapping,
+                    bindings:lineageBindings[job.rootID] ?? [:])
                 let outcome = try transfer(job, mapping: mapping)
                 let acknowledgeStarted = ProcessInfo.processInfo.systemUptime
-                let acknowledged = try journal.acknowledgeUpload(job)
+                let acknowledged = try journal.acknowledgeLineageTransfer(job,token:lineage)
                 if stageEngine.isDirect { recordDuration("metric_queue_acknowledgment", since: acknowledgeStarted) }
                 guard acknowledged else {
                     // The published version may have been superseded while

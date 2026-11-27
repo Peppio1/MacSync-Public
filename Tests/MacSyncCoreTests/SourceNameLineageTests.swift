@@ -111,6 +111,22 @@ final class SourceNameLineageTests: XCTestCase {
             XCTAssertNil(SourceNameLineage.Identity(stat: st))
         }
     }
+    func testUnresolvedPublicationAndAliasNeverExposeDeletionCandidates() throws {
+        try fixture { _, id in
+            var history = record(id,path:"folder/photo.jpg")
+            history.recognize(path:"folder/photo.jpg")
+            history.publicationStarted()
+            let uncertain = observe(&history,id,"elsewhere/photo.jpg")
+            XCTAssertTrue(uncertain.uncertain)
+            XCTAssertTrue(uncertain.deletionCandidates.isEmpty)
+            var clean = record(id,path:"folder/photo.jpg")
+            clean.recognize(path:"folder/photo.jpg")
+            let alias = observe(&clean,id,"FOLDER/photo.jpg")
+            XCTAssertTrue(alias.uncertain)
+            XCTAssertTrue(alias.deletionCandidates.isEmpty)
+        }
+    }
+
     func testInvalidAncestorProtectsRecognizedDescendant() throws {
         try fixture { _, id in
             var history = record(id, path: "folder/photo.jpg")

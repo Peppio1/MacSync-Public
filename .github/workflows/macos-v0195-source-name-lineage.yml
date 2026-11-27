@@ -7,6 +7,8 @@ on:
       - 'Sources/MacSyncCore/LocalInventory.swift'
       - 'Sources/MacSyncCore/ChangeJournal.swift'
       - 'Sources/MacSyncCore/ArchiveAudit.swift'
+      - 'Sources/MacSyncCore/MountedFolderCopy.swift'
+      - 'Tests/MacSyncCoreTests/SourceNameLineageTransferTests.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageAuditTests.swift'
       - 'Tests/MacSyncCoreTests/OfflineNamePreparationTests.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageInventoryTests.swift'
@@ -25,4 +27,4 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - run: swift test -Xswiftc -warnings-as-errors --filter 'SourceNameLineageAuditTests|SeededArchiveVerifierTests.testV0192OperationalAuditRecognizesOnlySafePreAuditJobs'
+      - run: swift test -Xswiftc -warnings-as-errors --filter 'SourceNameLineage|LocalInventoryTests|RepeatableNameRectificationTests|NameRectificationTests|MountedFolderCopyTests|MountedCopyResilienceTests|MirrorDeletionTests|ArchiveAuditAndHistoryTests|SeededArchiveVerifierTests'

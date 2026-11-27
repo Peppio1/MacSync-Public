@@ -2161,6 +2161,104 @@ public final class ChangeJournal {
         return sqlite3_changes(connection) == 1
     }
 
+    // Shadow publication evidence is never derived from a generic completed
+    // job. The worker supplies the exact local source identity before transfer.
+    struct LineageTransferToken {
+        let jobID: Int64
+        let record: SourceNameLineage.Record
+        let revision: Int64
+        let priorUncertainty: Bool
+        let fingerprint: SeedFileFingerprint
+        let sourceURL: URL
+    }
+
+    func lineageCopyBindings(_ maps: [MountedFolderMapping]) throws -> [String:[String:String]] {
+        guard experimentalSourceNameLineage else { return [:] }
+        let stamps = try verifiedDirectoryBindingSnapshot(maps)
+        var result: [String:[String:String]] = [:]
+        for (root,role,stamp) in stamps { result[root,default:[:]][role] = stamp }
+        return result
+    }
+
+    private func lineageBindingsCurrent(_ record: SourceNameLineage.Record) throws -> Bool {
+        let stmt = try prepare("SELECT role,stamp FROM directory_bindings WHERE root_id=?;")
+        defer { sqlite3_finalize(stmt) }
+        try bind(record.rootID,at:1,in:stmt)
+        var found: [String:String] = [:]
+        var rc = sqlite3_step(stmt)
+        while rc == SQLITE_ROW {
+            found[columnText(stmt,at:0)] = columnText(stmt,at:1)
+            rc = sqlite3_step(stmt)
+        }
+        guard rc == SQLITE_DONE else { throw databaseFailure() }
+        return found["source"]?.utf8.elementsEqual(record.sourceBinding.utf8) == true &&
+            found["target"]?.utf8.elementsEqual(record.targetBinding.utf8) == true
+    }
+
+    func beginLineageTransfer(_ job: QueuedChange, mapping: MountedFolderMapping,
+                              bindings: [String:String]) throws -> LineageTransferToken? {
+        guard experimentalSourceNameLineage, job.kind == .upsert, let connection,
+              job.rootID == mapping.rootID, WindowsPathSafety.validRelativePath(job.relativePath),
+              let src = bindings["source"], let dst = bindings["target"] else { return nil }
+        let url = try mapping.fileURL(relativePath:job.relativePath,destination:false)
+        var info = stat()
+        guard url.resolvingSymlinksInPath().path == url.path,
+              url.path.withCString({ lstat($0,&info) }) == 0,
+              let id = SourceNameLineage.Identity(stat:info) else { return nil }
+        let initial = SourceNameLineage.Record(identity:id,rootID:job.rootID,
+            sourceBinding:src,targetBinding:dst,path:job.relativePath)
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            guard try uploadIsCurrent(job), try lineageBindingsCurrent(initial),
+                  try watchedRootPath(rootID:job.rootID) == mapping.source.path else {
+                try execute("COMMIT;"); return nil
+            }
+            try SourceNameLineageStore.install(connection)
+            let saved = try SourceNameLineageStore.read(connection,key:.init(initial))
+            guard saved == nil || saved?.record.currentPath.utf8.elementsEqual(job.relativePath.utf8) == true else {
+                try execute("COMMIT;"); return nil
+            }
+            var record = saved?.record ?? initial
+            let prior = record.uncertainPublication
+            record.publicationStarted()
+            let written = try SourceNameLineageStore.write(connection,record:record,expectedRevision:saved?.revision)
+            try execute("COMMIT;")
+            return LineageTransferToken(jobID:job.id,record:record,revision:written.revision,
+                priorUncertainty:prior,fingerprint:SeedFileFingerprint(fileStat:info),sourceURL:url)
+        } catch { try? execute("ROLLBACK;"); throw error }
+    }
+
+    /// The successful-transfer branch is the only caller. Atomic ACK and
+    /// history commit; no new SMB read or change to generic completion.
+    func acknowledgeLineageTransfer(_ job: QueuedChange, token: LineageTransferToken?) throws -> Bool {
+        guard experimentalSourceNameLineage, let token, let connection else {
+            return try acknowledgeUpload(job)
+        }
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            let accepted = try acknowledgeUpload(job)
+            if accepted, token.jobID == job.id,
+               token.record.rootID == job.rootID,
+               token.record.currentPath.utf8.elementsEqual(job.relativePath.utf8),
+               try lineageBindingsCurrent(token.record),
+               let saved = try SourceNameLineageStore.read(connection,key:.init(token.record)),
+               saved.revision == token.revision,
+               saved.record.currentPath.utf8.elementsEqual(job.relativePath.utf8) {
+                var info = stat()
+                if token.sourceURL.resolvingSymlinksInPath().path == token.sourceURL.path,
+                   token.sourceURL.path.withCString({ lstat($0,&info) }) == 0,
+                   SourceNameLineage.Identity(stat:info) == token.record.identity,
+                   SeedFileFingerprint(fileStat:info) == token.fingerprint {
+                    var updated = saved.record
+                    updated.confirmAttempt(path:job.relativePath,previousUncertainty:token.priorUncertainty)
+                    try SourceNameLineageStore.write(connection,record:updated,expectedRevision:saved.revision)
+                }
+            }
+            try execute("COMMIT;")
+            return accepted
+        } catch { try? execute("ROLLBACK;"); throw error }
+    }
+
     public func markCompleted(id: Int64) throws {
         let statement = try prepare("UPDATE change_queue SET completed = 1 WHERE id = ?;")
         defer { sqlite3_finalize(statement) }
