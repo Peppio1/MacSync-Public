@@ -10,6 +10,7 @@ import (
     "path/filepath"
     "strings"
     "testing"
+    "syscall"
     "time"
 )
 
@@ -152,6 +153,33 @@ func TestMacSyncProtectedDeletionFixture(t *testing.T) {
             t.Fatalf("Expected raw absence: %q", name)
         }
     }
+
+    // Diagnostic only: a same number alone cannot authorize an operation.
+    // Compare the mounted inode with the direct SMB file reference for a
+    // compatible control, and report rather than assume this invariant.
+    mount := os.Getenv("MACSYNC_TEST_SMB_MOUNT")
+    if mount != filepath.Join(fixture, "mounted") { t.Fatal("Unexpected mount") }
+    for _, name := range []string{"Equal-", "Nonempty-", "Nonempty-/child.jpg"} {
+        direct := listed(name)
+        local, e := os.Lstat(filepath.Join(mount, folder, name))
+        if e != nil { t.Fatal("Mounted control unavailable") }
+        inode, ok := local.Sys().(*syscall.Stat_t)
+        if !ok || inode.Ino == 0 { t.Fatal("Mounted control identity unavailable") }
+        fmt.Printf("MOUNT_DIRECT_ID_COMPARISON name=%q equal=%t\n", name, uint64(inode.Ino) == direct.FileId)
+    }
+
+    // Existing open handle does not grant share-delete. A separate deletion
+    // attempt must not circumvent this sharing restriction or retry blindly.
+    held, e := share.Open(wire("Locked."))
+    if e != nil { t.Fatal("Could not establish held file") }
+    if e = removeDuplicate("Locked.", "Locked-", []byte("locked-bytes"), false); e == nil {
+        held.Close()
+        t.Fatal("Open file sharing restriction bypassed")
+    }
+    if e = held.Close(); e != nil { t.Fatal("Held file close failed") }
+    checkBytes("Locked.", "locked-bytes")
+    checkBytes("Locked-", "locked-bytes")
+    fmt.Println("OPEN_FILE_PRESERVED")
 
     correctedID := listed("Equal-").FileId
     if e := removeDuplicate("Equal.", "Equal-", []byte("equal-bytes"), false); e != nil {
