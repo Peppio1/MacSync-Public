@@ -688,6 +688,21 @@ public final class ExclusiveArchiveLock {
         else { Darwin.close(opened); throw JournalError.database("Un'altra istanza usa già l'archivio MacSync") }
         fd = opened
     }
+
+    /// Check that the retained lock still represents this exact lock file.
+    /// No second descriptor or new inode is used to authorize maintenance.
+    public func verifyHeld(at url: URL) throws {
+        var held = stat()
+        var named = stat()
+        guard fstat(fd, &held) == 0,
+              url.path.withCString({ lstat($0, &named) }) == 0,
+              named.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+              held.st_dev == named.st_dev, held.st_ino == named.st_ino,
+              flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            throw JournalError.database("Blocco esclusivo archivio non verificabile")
+        }
+    }
+
     deinit { Darwin.close(fd) }
 }
 

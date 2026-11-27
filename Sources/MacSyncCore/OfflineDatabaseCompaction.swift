@@ -22,7 +22,14 @@ public enum OfflineDatabaseCompaction {
             throw JournalError.database("Directory archivio non valida")
         }
         let lock = try ExclusiveArchiveLock(url: folder.appendingPathComponent("archive.lock"))
+        return try runBeforeRuntime(in: folder, lock: lock)
+    }
+
+    /// Startup only: the caller has acquired the archive lock but has
+    /// not constructed any runtime readers, writers or source watchers.
+    public static func runBeforeRuntime(in folder: URL, lock: ExclusiveArchiveLock) throws -> Result {
         defer { withExtendedLifetime(lock) {} }
+        try lock.verifyHeld(at: folder.appendingPathComponent("archive.lock"))
         let db = folder.appendingPathComponent("inventory.sqlite")
         let identity = try ArchiveDatabaseSafety.fileIdentity(db)
         let sample = DatabaseDiagnosticSnapshot.collect(databasePath: db.path)
@@ -46,6 +53,7 @@ public enum OfflineDatabaseCompaction {
               try ArchiveDatabaseSafety.fileIdentity(db) == identity else {
             throw JournalError.database("Backup di compattazione non equivalente")
         }
+        try lock.verifyHeld(at: folder.appendingPathComponent("archive.lock"))
         try compactSQLite(db)
         guard try ArchiveDatabaseSafety.fileIdentity(db) == identity,
               try ApplicationRollback.databaseDigest(db, scratch: folder) == digest else {

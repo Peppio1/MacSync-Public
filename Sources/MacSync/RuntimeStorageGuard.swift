@@ -84,7 +84,8 @@ final class RuntimeStorageGuard {
             let pendingUpdate = try inspectPendingUpdate(folder: folder, defaults: defaults)
             let currentIdentity = exists ? try ArchiveDatabaseSafety.fileIdentity(db) : nil
             let restored = previousIdentity != nil && currentIdentity != previousIdentity
-            if !defaults.bool(forKey:"MacSync.safetyMigration.v014") || restored {
+            let migrationNeeded = !defaults.bool(forKey:"MacSync.safetyMigration.v014") || restored
+            if migrationNeeded {
                 if FileManager.default.fileExists(atPath:db.path) {
                     let backup = folder.appendingPathComponent((restored ? "restored-database-" : "migration-v0.13.9-")+UUID().uuidString,isDirectory:true)
                     try FileManager.default.createDirectory(at:backup,withIntermediateDirectories:false,
@@ -113,6 +114,23 @@ final class RuntimeStorageGuard {
             _ = try ChangeJournal(path:db.path)
             try ArchiveDatabaseSafety.verify(db)
             defaults.set(try ArchiveDatabaseSafety.fileIdentity(db),forKey:"MacSync.databaseFileIdentity.v014")
+            // Only before constructing the runtime or FSEvents watchers.
+            // Never combine compaction with a restore, reset or update.
+            let compactionKey = "MacSync.databaseCompactionLastCheck.v0195"
+            let now = Date()
+            if StartupCompactionPolicy.shouldCheck(existing: exists,
+                stableIdentity: previousIdentity != nil && previousIdentity == currentIdentity,
+                migrationNeeded: migrationNeeded, resetCompleted: completedReset,
+                updatePending: pendingUpdate != nil,
+                lastCheck: defaults.object(forKey: compactionKey) as? Date, now: now) {
+                // Persist the attempt before work so a crash cannot cause
+                // repeated expensive maintenance at every restart.
+                defaults.set(now, forKey: compactionKey)
+                let result = try OfflineDatabaseCompaction.runBeforeRuntime(in: folder, lock: lock)
+                if case .compacted = result {
+                    try ArchiveDatabaseSafety.verify(db)
+                }
+            }
             // One verified snapshot per calendar day on startup; the migration
             // backup is a separate immutable directory. No automatic restore.
             if FileManager.default.fileExists(atPath:db.path) {
