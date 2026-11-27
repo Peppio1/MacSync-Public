@@ -1,0 +1,34 @@
+name: MacSync v0.19.5 protected SMB rename probe
+on:
+  push:
+    branches: [probe-v0.19.5-smb-protected]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macsync-v0195-protected-probe-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  compare:
+    runs-on: macos-15-intel
+    timeout-minutes: 25
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.0'
+          cache: false
+      - name: Install disposable Samba
+        run: brew install samba
+      - name: Mount genuine SMB filesystem
+        run: bash scripts/ci/prepare-local-samba.sh
+      - name: Verify protected SMB rename on synthetic objects only
+        run: bash scripts/ci/test-smb-protected-rename.sh
+      - name: Cleanup disposable share
+        if: always()
+        run: bash scripts/ci/cleanup-local-samba.sh

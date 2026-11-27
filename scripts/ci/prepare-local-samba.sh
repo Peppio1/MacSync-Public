@@ -61,6 +61,13 @@ printf '%s' 'old bytes!' > "$share/macsync-ci-dot-duplicates/$dot_different/chil
 printf '%s' 'new bytes!' > "$share/macsync-ci-dot-duplicates/Different-/child.jpg"
 printf '%s' 'old hidden' > "$share/macsync-ci-dot-duplicates/Hidden./child.jpg"
 printf '%s' 'new hidden' > "$share/macsync-ci-dot-duplicates/Hidden-/child.jpg"
+# CI-only protected rename fixture: distinct identities and contents.
+mkdir -m 770 "$share/macsync-ci-protected" "$share/macsync-ci-protected/Directory."
+printf '%s' 'file-source' > "$share/macsync-ci-protected/File."
+printf '%s' 'collision-old' > "$share/macsync-ci-protected/Collision."
+printf '%s' 'collision-new' > "$share/macsync-ci-protected/Collision-"
+printf '%s' 'wrong-source' > "$share/macsync-ci-protected/Wrong."
+printf '%s' 'directory-child' > "$share/macsync-ci-protected/Directory./child.jpg"
 prefix="$(brew --prefix)"
 smbd="$prefix/sbin/samba-dot-org-smbd"
 test -x "$smbd"
