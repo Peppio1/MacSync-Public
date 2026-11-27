@@ -6,6 +6,8 @@ import MacSyncCore
 struct TechnicalLogSheet: View {
     @ObservedObject var copy: MountedCopyController
     var fixtureRows:[TechnicalLogRow]? = nil
+    var model:MacSyncViewModel? = nil
+    var previewOnly=false
     @AppStorage(TechnicalLogVerbosity.preferenceKey) private var verbosity="normal"
     @Environment(\.dismiss) private var dismiss
     @State private var rows:[TechnicalLogRow]=[]
@@ -148,7 +150,7 @@ struct TechnicalLogSheet: View {
                 Text("Azione: "+e.action+" · radice: "+e.rootID)
                 if let cycle=row.cycleID { Text("Ciclo: "+cycle) }
                 if let job=row.jobID { Text("Operazione: #"+String(job)) }
-                if !e.relativePath.isEmpty { Text("File: "+e.relativePath) }
+                if !e.relativePath.isEmpty { LogArchivePathDetail(entry:e,model:model,disabled:previewOnly || fixtureRows != nil) }
                 if e.bytes>0 { Text(ByteCountFormatter.string(fromByteCount:e.bytes,countStyle:.file)) }
                 if e.durationSeconds>0 { Text(String(format:"Durata: %.3f s",e.durationSeconds)) }
                 Text(e.message)

@@ -27,7 +27,6 @@ struct IncompatibleNamesPanel:View {
     @State private var directories=true
     @State private var search=""
     @State private var message=""
-    @State private var revealing=false
     @State private var selected=Set<String>()
     @State private var confirmation:NameConfirmation?
     @State private var pageOffset=0
@@ -148,12 +147,12 @@ struct IncompatibleNamesPanel:View {
                                     } else {
                                         Text("Correzione manuale").font(.caption).foregroundStyle(.orange)
                                     }
-                                    Text(item.rootPath+"/"+item.relativePath).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                                    ArchivePathBlock(path:archivePath(item))
                                     if item.affectedDescendants>0 {
                                         Text("\(item.affectedDescendants) elementi contenuti interessati").font(.caption)
                                     }
                                 }.frame(maxWidth:.infinity,alignment:.leading)
-                                Button("Apri in Finder") { reveal(item) }.disabled(revealing || runtime.previewOnly)
+                                ArchiveFinderButton(path:archivePath(item),rootID:item.rootID,model:model,disabled:runtime.previewOnly || runtime.folderConfigurationBusy)
                             }
                             Divider()
                         }
@@ -192,7 +191,8 @@ struct IncompatibleNamesPanel:View {
                 List(snapshot.items) { item in
                     VStack(alignment:.leading,spacing:3) {
                         Text(item.displayName+" → "+(NameRectification.proposedName(item.name) ?? "Correzione manuale")).font(.headline)
-                        Text(item.rootPath+"/"+item.relativePath).font(.caption).foregroundStyle(.secondary)
+                        ArchivePathBlock(path:archivePath(item))
+                        ArchiveFinderButton(path:archivePath(item),rootID:item.rootID,model:model,disabled:runtime.previewOnly || runtime.folderConfigurationBusy)
                     }
                 }
                 HStack {
@@ -244,34 +244,7 @@ struct IncompatibleNamesPanel:View {
         resolvedSelection = request
     }
 
-    private func reveal(_ item:IncompatibleName) {
-        guard let pair=model.configuredPairs().first(where:{$0.id==item.rootID}) else { message="Coppia non più configurata"; return }
-        let expected=item.side == .source ? pair.path : pair.destination
-        let volume=pair.expected
-        revealing=true; message=""
-        DispatchQueue.global(qos:.utility).async {
-            do {
-                let root=URL(fileURLWithPath:expected).standardizedFileURL
-                let path=item.side == .source ? root.resolvingSymlinksInPath().path : root.path
-                if item.side == .destination {
-                    guard let volume,try VolumeFingerprint.read(at:root)==volume else { throw MountedCopyError.volumeChanged }
-                }
-                let url=try item.revealURL(expectedRoot:path)
-                DispatchQueue.main.async {
-                    self.revealing=false
-                    guard !self.runtime.folderConfigurationBusy, let current=self.model.configuredPairs().first(where:{$0.id==item.rootID}),
-                          (item.side == .source ? current.path : current.destination)==expected else {
-                        self.message="Configurazione cambiata; aggiorna l'elenco"; return
-                    }
-                    NSWorkspace.shared.activateFileViewerSelecting([url])
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.revealing=false
-                    self.message="Elemento non più presente o percorso non verificabile. Aggiorna l'elenco."
-                    self.copy.refreshIncompatibleNames(pairs:self.model.configuredPairs())
-                }
-            }
-        }
+    private func archivePath(_ item:IncompatibleName)->ArchivePathPresentation {
+        .init(root:item.rootPath,relative:item.relativePath,side:item.side == .source ? .source:.destination,kind:.init(item.objectKind))
     }
 }

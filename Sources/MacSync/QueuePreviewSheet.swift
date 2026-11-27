@@ -27,13 +27,12 @@ struct QueuePreviewSheet: View {
         default:return "Origine non determinata"
         }
     }
-    private func path(_ row:QueuePreviewRow)->String {
+    private func path(_ row:QueuePreviewRow)->ArchivePathPresentation {
         let pair=model.configuredPairs().first{$0.id==row.job.rootID}
-        let root=(row.job.kind == .delete ? pair?.destination : pair?.path) ?? row.job.rootID
-        return root+"/"+row.job.relativePath.split(separator:"/",omittingEmptySubsequences:false).map { part in
-            let count=part.reversed().prefix{$0==" " || $0=="."}.count
-            return String(part.dropLast(count))+part.suffix(count).map{$0==" " ? "␠" : "."}.joined()
-        }.joined(separator:"/")
+        let deleting=row.job.kind == .delete
+        return .init(root:(deleting ? pair?.destination : pair?.path) ?? "",
+                     relative:row.job.relativePath,side:deleting ? .destination : .source,
+                     kind:.init(row.objectKind))
     }
     var body:some View {
         VStack(alignment:.leading,spacing:12) {
@@ -76,7 +75,8 @@ struct QueuePreviewSheet: View {
                                             Spacer()
                                             Text("#\(row.id)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                                         }
-                                        Text(path(row)).font(.subheadline).textSelection(.enabled).fixedSize(horizontal:false,vertical:true)
+                                        ArchivePathBlock(path:path(row))
+                                        ArchiveFinderButton(path:path(row),rootID:row.job.rootID,model:model)
                                         Text("Accodata: "+macSyncDateTime(row.job.recordedAt)+" · "+origin(row.origin))
                                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                                         if row.relatedToRectification {

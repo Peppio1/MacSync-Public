@@ -26,7 +26,8 @@ enum NameRectificationPrompt {
             let proposed=NameRectification.proposedName(row.name) ?? "Correzione manuale necessaria"
             text.append(NSAttributedString(string:"Nome proposto: "+proposed+"\n",attributes:emphasized))
             let detail=(row.isDirectory ? "Cartella · \(row.affectedDescendants) elementi contenuti" : "File")+" · "+row.reason
-            text.append(NSAttributedString(string:detail+"\n"+row.rootPath+"/"+row.relativePath+"\n\n",attributes:normal))
+            let path=ArchivePathPresentation(root:row.rootPath,relative:row.relativePath,side:row.side == .source ? .source:.destination,kind:.init(row.objectKind))
+            text.append(NSAttributedString(string:detail+"\n"+path.lines.joined(separator:"\n")+"\n\n",attributes:normal))
         }
         let scroll=NSScrollView(frame:NSRect(x:0,y:0,width:510,height:270))
         scroll.hasVerticalScroller=true; scroll.borderType = .bezelBorder
