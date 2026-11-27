@@ -1,4 +1,4 @@
-name: MacSync v0.19.5 full path screen captures
+name: MacSync v0.19.5 missing path screen captures
 on:
   push:
     branches: [verify-v0195-full-path-screens]
@@ -17,13 +17,13 @@ jobs:
         env:
           MACSYNC_UI_PREVIEW_DIR: ${{ runner.temp }}/macsync-full-path-screens
         run: |
-          swift test -Xswiftc -warnings-as-errors --filter MacSyncUIPreviewTests.testRenderFullPathScreens
-          test "$(find "$MACSYNC_UI_PREVIEW_DIR" -name 'screen-*.png' -type f | wc -l | tr -d ' ')" = 8
+          swift test -Xswiftc -warnings-as-errors --filter MacSyncUIPreviewTests.testRenderMissingPathScreens
+          test "$(find "$MACSYNC_UI_PREVIEW_DIR" -name 'screen-*.png' -type f | wc -l | tr -d ' ')" = 2
       - name: Preserve captures
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: macsync-full-path-screens
+          name: macsync-missing-path-screens
           path: ${{ runner.temp }}/macsync-full-path-screens
           if-no-files-found: warn
           retention-days: 30

@@ -69,6 +69,44 @@ final class MacSyncUIPreviewTests: XCTestCase {
         print("Synthetic UI heartbeat max: \(maxDelay) seconds")
     }
 
+    func testRenderMissingPathScreens() async throws {
+        guard let out=ProcessInfo.processInfo.environment["MACSYNC_UI_PREVIEW_DIR"],!out.isEmpty else { throw XCTSkip("Preview opt-in") }
+        let directory=URL(fileURLWithPath:out,isDirectory:true)
+        try await MainActor.run {
+            let fm=FileManager.default
+            try fm.createDirectory(at:directory,withIntermediateDirectories:true)
+            let scratch=fm.temporaryDirectory.appendingPathComponent("MacSync-preview-"+UUID().uuidString).resolvingSymlinksInPath()
+            try fm.createDirectory(at:scratch,withIntermediateDirectories:true)
+            defer {try? fm.removeItem(at:scratch)}
+            let source=scratch.appendingPathComponent("Foto_da_editare")
+            let destination=scratch.appendingPathComponent("Destinazione")
+            for root in [source,destination] { try fm.createDirectory(at:root.appendingPathComponent("Vetro - 47253/nuovo originale"),withIntermediateDirectories:true) }
+            let relative="Vetro - 47253/nuovo originale/oca pro.jpg"
+            try Data("fixture".utf8).write(to:source.appendingPathComponent(relative))
+            try Data("old".utf8).write(to:destination.appendingPathComponent(relative))
+            let db=scratch.appendingPathComponent("preview.sqlite").path
+            let inventory=try LocalInventory(path:db)
+            _=try inventory.reconcile(rootID:"photo-uploads",root:source)
+            let journal=try ChangeJournal(path:db)
+            _=try journal.enqueue(rootID:"photo-uploads",relativePath:"Vetro - 47253./oca pro.jpg",kind:.delete)
+            let runtime=MacSyncRuntime(previewOnly:true)
+            let pair=try XCTUnwrap(runtime.model.configuredPairs().first)
+            var one=IncompatibleName(rootID:pair.id,rootPath:pair.path,relativePath:"Vetro - 47253/nuovo originale.",objectKind:"directory",side:.source,reason:"Punto finale",affectedDescendants:4)
+            one.proposedNameAvailable=true
+            let mapping=try MountedFolderMapping(rootID:pair.id,source:source,target:destination)
+            let audit=try ArchiveAudit(journal:journal,mappings:[mapping]).run(mode:.deep)
+            let page=try XCTUnwrap(AuditFindingPage.load(findings:audit.findings,kind:nil,filesOnly:true,deletionCandidates:[],root:"",search:"",offset:0))
+            XCTAssertFalse(page.rows.isEmpty)
+            try Self.render(AuditResultSheet(model:runtime.model,findings:audit.findings,kind:nil,filesOnly:true,fixturePage:page).allowsHitTesting(false),name:"screen-06-audit-results",scheme:.light,directory:directory,width:1000,height:660)
+            var promptError:Error?
+            _=NSApplication.shared
+            NameRectificationPrompt.present(items:[one],decision:NamePromptDecision(),sourceRoots:[pair.id:pair.path],previewCapture:{ window in
+                do { try Self.captureAlert(window,directory:directory) } catch { promptError=error }
+            })
+            if let promptError { throw promptError }
+        }
+    }
+
     func testRenderFullPathScreens() async throws {
         guard let out=ProcessInfo.processInfo.environment["MACSYNC_UI_PREVIEW_DIR"],!out.isEmpty else { throw XCTSkip("Preview opt-in") }
         let directory=URL(fileURLWithPath:out,isDirectory:true)
@@ -135,32 +173,27 @@ final class MacSyncUIPreviewTests: XCTestCase {
 
     @MainActor
     private static func captureAlert(_ window:NSWindow,directory:URL) throws {
-        window.appearance=NSAppearance(named:.aqua)
-        window.orderFrontRegardless()
-        defer { window.orderOut(nil) }
-        let view=try XCTUnwrap(window.contentView)
-        view.layoutSubtreeIfNeeded()
         window.displayIfNeeded()
-        RunLoop.main.run(until:Date().addingTimeInterval(0.25))
-        view.layoutSubtreeIfNeeded()
-        // NSAlert uses a transparent AppKit backing surface. Flatten only
-        // the native capture onto the light window background for PNG export.
-        let captured=try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in:view.bounds))
-        view.cacheDisplay(in:view.bounds,to:captured)
-        let bitmap=try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes:nil,
-            pixelsWide:captured.pixelsWide,pixelsHigh:captured.pixelsHigh,
-            bitsPerSample:8,samplesPerPixel:4,hasAlpha:true,isPlanar:false,
-            colorSpaceName:.deviceRGB,bytesPerRow:0,bitsPerPixel:0))
-        bitmap.size=view.bounds.size
-        let context=try XCTUnwrap(NSGraphicsContext(bitmapImageRep:bitmap))
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current=context
-        NSColor.windowBackgroundColor.setFill()
-        NSBezierPath(rect:NSRect(origin:.zero,size:view.bounds.size)).fill()
-        captured.draw(in:NSRect(origin:.zero,size:view.bounds.size))
-        NSGraphicsContext.restoreGraphicsState()
-        let png=try XCTUnwrap(bitmap.representation(using:.png,properties:[:]))
-        try png.write(to:directory.appendingPathComponent("screen-03-automatic-prompt.png"),options:.atomic)
+        XCTAssertTrue(window.isVisible,"Native modal is not visible")
+        let path=directory.appendingPathComponent("screen-03-automatic-prompt.png")
+        let capture=Process()
+        capture.executableURL=URL(fileURLWithPath:"/usr/sbin/screencapture")
+        capture.arguments=["-x","-o","-l",String(window.windowNumber),path.path]
+        try capture.run()
+        capture.waitUntilExit()
+        XCTAssertEqual(capture.terminationStatus,0,"Native window capture failed")
+        let bitmap=try XCTUnwrap(NSBitmapImageRep(contentsOf:path))
+        XCTAssertGreaterThan(bitmap.pixelsWide,100)
+        XCTAssertGreaterThan(bitmap.pixelsHigh,100)
+        var bright=0, samples=0
+        for y in stride(from:0,to:bitmap.pixelsHigh,by:8) {
+            for x in stride(from:0,to:bitmap.pixelsWide,by:8) {
+                guard let c=bitmap.colorAt(x:x,y:y)?.usingColorSpace(.deviceRGB) else { continue }
+                samples+=1
+                if c.alphaComponent > 0.9 && (c.redComponent+c.greenComponent+c.blueComponent)/3 > 0.8 { bright+=1 }
+            }
+        }
+        XCTAssertGreaterThan(bright,samples/2,"Native light modal is blank or incorrectly captured")
     }
 
     func testRenderProductionComponents() async throws {

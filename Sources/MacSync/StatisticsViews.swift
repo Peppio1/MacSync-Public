@@ -956,6 +956,7 @@ struct AuditResultSheet:View {
     var filesOnly = false
     var deletionCandidates: Set<String> = []
     var fixtureSelection=false
+    var fixturePage:AuditFindingPage? = nil
     @State private var search=""
     @State private var root=""
     @State private var selected:String?
@@ -968,7 +969,12 @@ struct AuditResultSheet:View {
     @State private var loading = true
     private var request: AuditPageRequest { .init(search:search,root:root,offset:offset) }
     var body:some View {
-        VStack(alignment:.leading,spacing:8) {
+        let rows=fixturePage?.rows ?? self.rows
+        let roots=fixturePage?.roots ?? self.roots
+        let total=fixturePage?.total ?? self.total
+        let loading=fixturePage == nil && self.loading
+        let selection:Binding<String?> = fixturePage.map { page in .constant(page.rows.first?.id) } ?? $selected
+        return VStack(alignment:.leading,spacing:8) {
             HStack {Text(title ?? kind?.label ?? "Risultato verifica completa").font(.title2.bold());Spacer();Button("Chiudi"){dismiss()} }
             HStack {
                 TextField("Cerca per percorso",text:$search)
@@ -977,7 +983,7 @@ struct AuditResultSheet:View {
                     ForEach(roots,id:\.self){ Text($0).tag($0) }
                 }.frame(width:240)
             }
-            Table(rows,selection:$selected) {
+            Table(rows,selection:selection) {
                 TableColumn("Percorso",value:\.relativePath).width(min:260,ideal:400)
                 TableColumn("Coppia",value:\.rootID).width(130)
                 TableColumn("Esito"){Text($0.kind.label)}.width(180)
@@ -990,10 +996,10 @@ struct AuditResultSheet:View {
                 Button("Precedenti") { offset = max(0,offset-200) }.disabled(loading || offset == 0)
                 Button("Successivi") { offset += 200 }.disabled(loading || offset+rows.count >= total)
                 Spacer()
-                Button("Visualizza"){open(true)}.disabled(rows.first(where:{$0.id==selected})?.objectKind != "file")
+                Button("Visualizza"){open(true)}.disabled(rows.first(where:{$0.id==selection.wrappedValue})?.objectKind != "file")
 
             }
-            if let finding=rows.first(where:{$0.id==selected}) {
+            if let finding=rows.first(where:{$0.id==selection.wrappedValue}) {
                 let destination=finding.kind == .extra || finding.kind == .matching
                 let path=ArchivePathPresentation(root:destination ? finding.targetRoot:finding.sourceRoot,relative:finding.relativePath,side:destination ? .destination:.source,kind:.init(finding.objectKind))
                 ArchivePathBlock(path:path)
@@ -1003,7 +1009,7 @@ struct AuditResultSheet:View {
         }.padding(18).frame(width:1000,height:660)
             .onChange(of:search) { _ in offset = 0 }
             .onChange(of:root) { _ in offset = 0 }
-            .task(id:request) { await load(request) }
+            .task(id:request) { if fixturePage == nil { await load(request) } }
     }
     @MainActor private func load(_ request: AuditPageRequest) async {
         loading = true; selected = nil; rows = []

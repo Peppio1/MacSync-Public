@@ -56,9 +56,18 @@ enum NameRectificationPrompt {
         scroll.heightAnchor.constraint(equalToConstant:270).isActive=true
         alert.accessoryView=stack
         if let previewCapture {
+            // Capture a genuine displayed modal, not a pre-layout view tree.
             alert.layout()
-            previewCapture(alert.window)
-            alert.window.orderOut(nil)
+            alert.window.appearance=NSAppearance(named:.aqua)
+            let captureTimer=Timer(timeInterval:0.6,repeats:false) { _ in
+                MainActor.assumeIsolated {
+                    previewCapture(alert.window)
+                    NSApp.abortModal()
+                }
+            }
+            RunLoop.main.add(captureTimer,forMode:.modalPanel)
+            defer { captureTimer.invalidate();alert.window.orderOut(nil) }
+            _=alert.runModal()
             return
         }
         let timer=Timer(timeInterval:0.1,repeats:true) { _ in
