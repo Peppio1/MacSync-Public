@@ -314,6 +314,7 @@ public final class ArchiveAudit {
         let selectiveAudit=repair && (mode == .quick || mode == .intelligent) ?
             try journal.selectiveNameExceptionsInstalled() : false
         var selectiveSnapshots:[String:ChangeJournal.LineageAbsenceSnapshot]=[:]
+        var selectiveMovedRoots=Set<String>()
         if queueExtras { try journal.verifyDirectoryBindings(mappings) }
         // One indexed read of the already-approved SQLite rename plan.
         // Its relationships are NOT inferred from equal size or timestamps.
@@ -362,7 +363,12 @@ public final class ArchiveAudit {
             let targetStamp = try Self.rootStamp(mapping.target)
             let sourceBinding = (queueExtras || shadowLineage || selectiveAudit) ? try DirectoryBinding.encoded(mapping.source) : nil
             let targetBinding = (queueExtras || shadowLineage || selectiveAudit) ? try DirectoryBinding.encoded(mapping.target) : nil
-            if selectiveAudit { selectiveSnapshots[mapping.rootID]=try journal.lineageAbsenceSnapshot(rootID:mapping.rootID) }
+            if selectiveAudit {
+                selectiveSnapshots[mapping.rootID]=try journal.lineageAbsenceSnapshot(rootID:mapping.rootID)
+                if try journal.selectiveMovedExceptionsPending(rootID:mapping.rootID) {
+                    selectiveMovedRoots.insert(mapping.rootID)
+                }
+            }
             var scanStart = ProcessInfo.processInfo.systemUptime
             func scanned(_ item: TrackedItem) {
                 if state.scanningDestination { state.destination.record(item) }
@@ -385,7 +391,7 @@ public final class ArchiveAudit {
                 },onItem:{ item in
                     state.source.scanSeconds = sourcePrior + ProcessInfo.processInfo.systemUptime-scanStart
                     scanned(item)
-                }, collectSourceLineageIdentity: shadowLineage)
+                }, collectSourceLineageIdentity: shadowLineage || selectiveMovedRoots.contains(mapping.rootID))
             state.source.scanSeconds = sourcePrior + ProcessInfo.processInfo.systemUptime-scanStart
             try mapping.verify()
             state.scanningDestination = true
@@ -832,12 +838,17 @@ public final class ArchiveAudit {
                 let allMatching=pair.source.count==pair.target.count &&
                     !findings.contains(where:{$0.rootID==pair.mapping.rootID &&
                         ($0.kind != .matching || !WindowsPathSafety.validRelativePath($0.relativePath))})
+                let sourceMatching = allMatching || (selectiveMovedRoots.contains(pair.mapping.rootID) &&
+                    !findings.contains(where:{$0.rootID==pair.mapping.rootID &&
+                        (($0.kind != .matching && $0.kind != .extra) || !WindowsPathSafety.validRelativePath($0.relativePath))}))
                 var retries=0
                 while true {
                     do {
                         try journal.finishSelectiveAudit(mapping:pair.mapping,sourceBinding:src,targetBinding:dst,
                             sourceRows:Array(pair.source.values),targetRows:Array(pair.target.values),
-                            allMatching:allMatching,snapshot:selectiveSnapshots[pair.mapping.rootID],
+                            allMatching:allMatching,sourceMatching:sourceMatching,
+                            hasMoved:selectiveMovedRoots.contains(pair.mapping.rootID),
+                            snapshot:selectiveSnapshots[pair.mapping.rootID],
                             shouldContinue:{cancellation.mayCommit})
                         break
                     } catch SeedVerificationError.cancelled {

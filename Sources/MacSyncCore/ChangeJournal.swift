@@ -381,6 +381,7 @@ public final class ChangeJournal {
     /// Inventory reconciliation can replace a queued job while the copy
     /// is staging. Never publish a job which is no longer current.
     public func uploadIsCurrent(_ job: QueuedChange) throws -> Bool {
+        if let connection,try SelectiveNameExceptionStore.uploadConflictsWithRetainedOriginal(connection,root:job.rootID,path:job.relativePath) { return false }
         let stmt = try prepare("""
             SELECT COUNT(*) FROM change_queue q
             WHERE q.id=? AND q.root_id=? AND q.relative_path=?
@@ -2276,8 +2277,14 @@ public final class ChangeJournal {
         return try SelectiveNameExceptionStore.installed(connection)
     }
 
+    func selectiveMovedExceptionsPending(rootID:String)throws->Bool {
+        guard let connection else { return false }
+        return try SelectiveNameExceptionStore.hasMovedExceptions(connection,root:rootID)
+    }
+
     func finishSelectiveAudit(mapping:MountedFolderMapping,sourceBinding:String,targetBinding:String,
                               sourceRows:[TrackedItem],targetRows:[TrackedItem],allMatching:Bool,
+                              sourceMatching:Bool,hasMoved:Bool,
                               snapshot:LineageAbsenceSnapshot?,shouldContinue:()->Bool)throws {
         guard let connection,let snapshot else { return }
         try execute("BEGIN IMMEDIATE TRANSACTION;")
@@ -2287,7 +2294,7 @@ public final class ChangeJournal {
             // write a certificate if the scan/checkpoint changed.
             try SelectiveNameExceptionStore.install(connection)
             try SelectiveNameExceptionStore.invalidateCertificate(connection,root:mapping.rootID)
-            guard allMatching,try lineageAbsenceSnapshot(rootID:mapping.rootID)==snapshot,
+            guard (allMatching || (sourceMatching && hasMoved)),try lineageAbsenceSnapshot(rootID:mapping.rootID)==snapshot,
                   try queueRebuildToken()==nil,
                   try !SelectiveNameExceptionStore.rootUncertain(connection,root:mapping.rootID) else {
                 try execute("COMMIT;");return
@@ -2295,7 +2302,7 @@ public final class ChangeJournal {
             let q=try prepare("""
                 SELECT 1 WHERE EXISTS(SELECT 1 FROM directory_bindings WHERE root_id=?1 AND role='source' AND stamp=?2)
                   AND EXISTS(SELECT 1 FROM directory_bindings WHERE root_id=?1 AND role='target' AND stamp=?3)
-                  AND NOT EXISTS(SELECT 1 FROM change_queue WHERE root_id=?1 AND completed=0);
+                  AND NOT EXISTS(SELECT 1 FROM change_queue WHERE root_id=?1 AND completed=0 AND kind='upsert');
                 """)
             defer { sqlite3_finalize(q) }
             try bind(mapping.rootID,at:1,in:q);try bind(sourceBinding,at:2,in:q);try bind(targetBinding,at:3,in:q)
@@ -2306,6 +2313,22 @@ public final class ChangeJournal {
             }
             sqlite3_reset(q)
             let fs=mapping.targetVolume.fileSystem.lowercased()
+            if hasMoved,sourceMatching,["apfs","hfs","smbfs"].contains(fs) {
+                try SelectiveNameExceptionStore.resolveAuditedMoves(connection,root:mapping.rootID,
+                    source:sourceBinding,target:targetBinding,sourceRows:sourceRows,targetRows:targetRows,
+                    nativeTarget:fs != "smbfs",shouldContinue:shouldContinue)
+            }
+            // A clean-root certificate and the returned-name resolver
+            // still require the whole root to have no pending jobs.
+            let pending=try prepare("SELECT 1 FROM change_queue WHERE root_id=? AND completed=0 LIMIT 1;")
+            defer { sqlite3_finalize(pending) }
+            try bind(mapping.rootID,at:1,in:pending)
+            let remaining=sqlite3_step(pending)
+            guard remaining==SQLITE_ROW || remaining==SQLITE_DONE else { throw databaseFailure() }
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            guard allMatching,remaining==SQLITE_DONE else {
+                try execute("COMMIT;");return
+            }
             if ["apfs","hfs","smbfs"].contains(fs) {
                 try SelectiveNameExceptionStore.resolveAuditedRestorations(connection,root:mapping.rootID,
                     source:sourceBinding,target:targetBinding,sourceRows:sourceRows,targetRows:targetRows,

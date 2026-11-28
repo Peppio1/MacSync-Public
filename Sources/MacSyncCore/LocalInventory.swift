@@ -636,7 +636,7 @@ public final class LocalInventory {
             // may qualify as old paths for speculative-invalid provenance.
             var departingByIdentity:[Data:String]=[:]
             var duplicateDepartures=Set<Data>()
-            if selective {
+            if selective && !pristine && !before.isEmpty {
                 for (path,old) in before where seen[path]==nil {
                     guard shouldContinue() else { throw SeedVerificationError.cancelled }
                     if let id=old.storedLineageIdentity,

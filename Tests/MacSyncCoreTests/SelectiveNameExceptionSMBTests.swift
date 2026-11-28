@@ -115,5 +115,40 @@ final class SelectiveNameExceptionSMBTests:XCTestCase {
         XCTAssertEqual(try Data(contentsOf:raw.appendingPathComponent("keep.jpg")),Data("keep".utf8))
         XCTAssertTrue(try journal.pending().isEmpty)
         print("SELECTIVE_REAL_SMB restored=2 zero_copy=2 literal_quarantine=1 later_removed_files=1 later_removed_dirs=1")
+
+        // A second independent excursion chooses a genuinely different
+        // compatible name. Old remote data survives until copies and audit.
+        let secondFolder=source.appendingPathComponent("second"),secondBad=source.appendingPathComponent("second."),
+            corrected=source.appendingPathComponent("different")
+        try fm.createDirectory(at:secondFolder,withIntermediateDirectories:false)
+        try bytes.write(to:secondFolder.appendingPathComponent("child.jpg"))
+        try fm.setAttributes([.modificationDate:oldDate],ofItemAtPath:secondFolder.appendingPathComponent("child.jpg").path)
+        _=try inventory.reconcile(rootID:"photos",root:source,eventID:7)
+        XCTAssertEqual(try worker.runCycle(enabled:true).copied,2)
+        _=try ArchiveAudit(journal:journal,mappings:[map]).run(mode:.quick,repair:true)
+        try fm.moveItem(at:secondFolder,to:secondBad)
+        _=try inventory.reconcile(rootID:"photos",root:source,subtree:secondFolder,eventID:8)
+        _=try inventory.reconcile(rootID:"photos",root:source,subtree:secondBad,eventID:9)
+        try fm.moveItem(at:secondBad,to:corrected)
+        _=try inventory.reconcile(rootID:"photos",root:source,subtree:secondBad,eventID:10)
+        _=try inventory.reconcile(rootID:"photos",root:source,subtree:corrected,eventID:11)
+        let secondDeletes=try journal.pending().filter{$0.kind == .delete}
+        XCTAssertEqual(secondDeletes.count,2)
+        for job in secondDeletes { XCTAssertFalse(try journal.deletionIsCurrent(id:job.id,rootID:job.rootID,relativePath:job.relativePath)) }
+        XCTAssertEqual(try worker.runCycle(enabled:true).copied,2)
+        XCTAssertEqual(try Data(contentsOf:raw.appendingPathComponent("second/child.jpg")),bytes)
+        for job in secondDeletes { XCTAssertFalse(try journal.deletionIsCurrent(id:job.id,rootID:job.rootID,relativePath:job.relativePath)) }
+        let movedAudit=try ArchiveAudit(journal:journal,mappings:[map]).run(mode:.quick,repair:true)
+        XCTAssertEqual(movedAudit.bytesRead,0)
+        for job in secondDeletes { XCTAssertTrue(try journal.deletionIsCurrent(id:job.id,rootID:job.rootID,relativePath:job.relativePath)) }
+        let movedMirror=try mirror.runCycle(pageSize:1)
+        XCTAssertFalse(movedMirror.blocked,movedMirror.detail)
+        XCTAssertEqual(movedMirror.removed,1)
+        XCTAssertEqual(movedMirror.directories,1)
+        XCTAssertFalse(fm.fileExists(atPath:raw.appendingPathComponent("second").path))
+        XCTAssertEqual(try Data(contentsOf:raw.appendingPathComponent("different/child.jpg")),bytes)
+        XCTAssertEqual(try Data(contentsOf:raw.appendingPathComponent("keep.jpg")),Data("keep".utf8))
+        XCTAssertTrue(try journal.pending().isEmpty)
+        print("SELECTIVE_REAL_SMB_MOVED copies=2 old_removed=2 corrected_preserved=true")
     }
 }

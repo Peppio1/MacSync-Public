@@ -726,6 +726,9 @@ enum SelectiveNameExceptionStore {
         }
         for row in rows {
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            // A truly pristine inventory has no previous identities to
+            // resolve. Only incompatible names can create exceptions.
+            if pristine && WindowsPathSafety.validRelativePath(row.relativePath) { continue }
             let old=before[row.relativePath]
             let identity=try row.sourceLineageIdentity.map{try SourceNameLineageStore.identityBytes($0)}
             if old == nil || old?.storedLineageIdentity != identity {
@@ -922,6 +925,240 @@ enum SelectiveNameExceptionStore {
         }
     }
 
+    static func hasMovedExceptions(_ db:OpaquePointer,root:String)throws->Bool {
+        guard try installed(db) else { return false }
+        let q=try prepare(db,"SELECT 1 FROM selective_name_exception WHERE root_id=? AND state='moved' LIMIT 1;")
+        defer { sqlite3_finalize(q) }
+        try bind(root,1,q,db)
+        let rc=sqlite3_step(q)
+        guard rc==SQLITE_ROW || rc==SQLITE_DONE else { throw fail(db) }
+        return rc==SQLITE_ROW
+    }
+
+    /// The original published subtree may contain the only good copy.
+    /// A reused spelling must not overwrite it while a moved/incompatible
+    /// identity still depends on it. New, unrelated objects are not held.
+    /// Check the exact captured identity, never only size/date.
+    static func uploadConflictsWithRetainedOriginal(_ db:OpaquePointer,root:String,path:String)throws->Bool {
+        guard try installed(db) else { return false }
+        let q=try prepare(db,"""
+            SELECT e.original_path,e.id,g.folded,e.state,
+              EXISTS(SELECT 1 FROM file_inventory f WHERE f.root_id=e.root_id AND f.relative_path=e.original_path
+                AND f.lineage_observed_identity=e.identity)
+            FROM selective_name_exception e
+            JOIN selective_name_guard g ON g.exception_id=e.id AND g.path=e.original_path
+            WHERE e.root_id=?1
+              AND (g.folded=?2 OR instr(?2,g.folded||'/')=1)
+              AND EXISTS(SELECT 1 FROM selective_name_detached d WHERE d.exception_id=e.id AND d.relative_path=e.original_path)
+              AND EXISTS(SELECT 1 FROM selective_name_guard h WHERE h.exception_id=e.id AND h.path<>e.original_path);
+            """)
+        defer { sqlite3_finalize(q) }
+        try bind(root,1,q,db);try bind(fold(path),2,q,db)
+        let same=try prepare(db,"""
+            SELECT 1 FROM selective_name_detached d
+            JOIN file_inventory f ON f.root_id=?1 AND f.relative_path=d.relative_path
+              AND f.lineage_observed_identity=d.identity AND f.kind=d.kind
+            WHERE d.exception_id=?2 AND d.relative_path=?3 AND d.identity IS NOT NULL;
+            """)
+        defer { sqlite3_finalize(same) }
+        let existed=try prepare(db,"SELECT 1 FROM selective_name_detached WHERE exception_id=?1 AND relative_path=?2;")
+        defer { sqlite3_finalize(existed) }
+        var rc=sqlite3_step(q)
+        while rc==SQLITE_ROW {
+            let original=try string(q,0)
+            if WindowsPathSafety.validRelativePath(original) {
+                guard exact(path,original) || Data(path.utf8).starts(with:Data((original+"/").utf8)) else { return true }
+                sqlite3_reset(same);sqlite3_clear_bindings(same)
+                try bind(root,1,same,db)
+                guard sqlite3_bind_int64(same,2,sqlite3_column_int64(q,1))==SQLITE_OK else { throw fail(db) }
+                try bind(path,3,same,db)
+                let result=sqlite3_step(same)
+                guard result==SQLITE_ROW || result==SQLITE_DONE else { throw fail(db) }
+                if result==SQLITE_DONE {
+                    // New descendants of the demonstrably returned root
+                    // may be ordinary additions, not reuse of an old path.
+                    guard try string(q,3)=="returned",sqlite3_column_int(q,4)==1 else { return true }
+                    sqlite3_reset(existed);sqlite3_clear_bindings(existed)
+                    guard sqlite3_bind_int64(existed,1,sqlite3_column_int64(q,1))==SQLITE_OK else { throw fail(db) }
+                    try bind(path,2,existed,db)
+                    let prior=sqlite3_step(existed)
+                    guard prior==SQLITE_ROW || prior==SQLITE_DONE else { throw fail(db) }
+                    if prior==SQLITE_ROW { return true }
+                }
+            }
+            rc=sqlite3_step(q)
+        }
+        guard rc==SQLITE_DONE else { throw fail(db) }
+        return false
+    }
+
+    /// Move to a DIFFERENT compatible spelling: consume no queue jobs and
+    /// mutate no filesystem objects. The previous good copy is released only
+    /// after every captured object is still identified at the mapped new path,
+    /// its newer upload completed, and the same complete audit matches the
+    /// new tree. Keep uncertain/independently moved/replaced descendants held.
+    static func resolveAuditedMoves(_ db:OpaquePointer,root:String,source:String,target:String,
+                    sourceRows:[TrackedItem],targetRows:[TrackedItem],nativeTarget:Bool,
+                    shouldContinue:()->Bool)throws {
+        guard try installed(db),try restorationInstalled(db),sqlite3_get_autocommit(db)==0,
+              try !rootUncertain(db,root:root) else { return }
+        let q=try prepare(db,"""
+            SELECT e.id,e.original_path,e.current_path FROM selective_name_exception e
+            JOIN file_inventory f ON f.root_id=e.root_id AND f.relative_path=e.current_path
+              AND f.lineage_observed_identity=e.identity AND f.kind=e.kind
+            WHERE e.root_id=?1 AND e.source_binding=?2 AND e.target_binding=?3
+              AND e.state='moved' AND e.identity IS NOT NULL
+              AND NOT EXISTS(SELECT 1 FROM selective_name_exception other WHERE other.id<>e.id AND other.root_id=e.root_id AND other.identity=e.identity);
+            """)
+        defer { sqlite3_finalize(q) }
+        try bind(root,1,q,db);try bind(source,2,q,db);try bind(target,3,q,db)
+        var entries:[(Int64,String,String)]=[]
+        var rc=sqlite3_step(q)
+        while rc==SQLITE_ROW {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            entries.append((sqlite3_column_int64(q,0),try string(q,1),try string(q,2)))
+            rc=sqlite3_step(q)
+        }
+        guard rc==SQLITE_DONE else { throw fail(db) }
+        guard !entries.isEmpty else { return }
+        // Only exceptional roots need these indices; ordinary audits never
+        // write a new archive-wide history. Raw UTF-8 keeps literal names.
+        var live:[Data:TrackedItem]=[:],remote:[Data:TrackedItem]=[:]
+        for row in sourceRows {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            guard live.updateValue(row,forKey:Data(row.relativePath.utf8))==nil else { return }
+        }
+        for row in targetRows {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            guard remote.updateValue(row,forKey:Data(row.relativePath.utf8))==nil else { return }
+        }
+        func within(_ path:Data,_ root:Data)->Bool {
+            path==root || path.starts(with:root+Data([47]))
+        }
+        let captured=try prepare(db,"""
+            SELECT d.relative_path,d.kind,d.identity,d.file_size,d.modified_at,p.delete_job
+            FROM selective_name_detached d
+            LEFT JOIN selective_restore_proof p ON p.exception_id=d.exception_id AND p.path=d.relative_path
+            WHERE d.exception_id=?1;
+            """)
+        defer { sqlite3_finalize(captured) }
+        let completed=try prepare(db,"""
+            SELECT 1 FROM change_queue old
+            WHERE old.id=?1 AND old.root_id=?2 AND old.relative_path=?3
+              AND old.kind='delete' AND old.completed=0 AND old.origin='source_monitor'
+              AND NOT EXISTS(SELECT 1 FROM mirror_attempts m WHERE m.job_id=old.id)
+              AND NOT EXISTS(SELECT 1 FROM retired_delete_evidence r WHERE r.job_id=old.id)
+              AND EXISTS(SELECT 1 FROM change_queue fresh
+                WHERE fresh.root_id=?2 AND fresh.relative_path=?4 AND fresh.id>old.id
+                  AND fresh.kind='upsert' AND fresh.completed=1 AND fresh.origin='source_monitor'
+                  AND NOT EXISTS(SELECT 1 FROM change_queue later WHERE later.root_id=fresh.root_id
+                    AND later.relative_path=fresh.relative_path AND later.id>fresh.id));
+            """)
+        defer { sqlite3_finalize(completed) }
+        let guards=try prepare(db,"""
+            SELECT g.path,EXISTS(SELECT 1 FROM selective_retired_invalid i
+                JOIN selective_name_exception e ON e.id=i.exception_id
+                WHERE i.exception_id=g.exception_id AND i.path=g.path AND i.identity=e.identity)
+            FROM selective_name_guard g WHERE g.exception_id=?;
+            """)
+        defer { sqlite3_finalize(guards) }
+        let quarantine=try prepare(db,"INSERT OR IGNORE INTO selective_smb_quarantine(root_id,path,folded) VALUES(?,?,?);")
+        defer { sqlite3_finalize(quarantine) }
+        for (id,original,current) in entries {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            guard WindowsPathSafety.validRelativePath(original),WindowsPathSafety.validRelativePath(current),
+                  fold(original) != fold(current),
+                  !fold(original).hasPrefix(fold(current)+"/"),!fold(current).hasPrefix(fold(original)+"/") else { continue }
+            let oldKey=Data(original.utf8),newKey=Data(current.utf8)
+            guard live[newKey] != nil,remote[newKey] != nil,remote[oldKey] != nil,
+                  !live.keys.contains(where:{within($0,oldKey)}) else { continue }
+            // A second active exception can still need either subtree.
+            // Conservatively do not resolve overlapping identities.
+            let overlaps=try prepare(db,"""
+                SELECT 1 FROM selective_name_guard g
+                WHERE g.root_id=?1 AND g.exception_id<>?2 AND
+                  (g.folded=?3 OR instr(g.folded,?3||'/')=1 OR instr(?3,g.folded||'/')=1
+                   OR g.folded=?4 OR instr(g.folded,?4||'/')=1 OR instr(?4,g.folded||'/')=1) LIMIT 1;
+                """)
+            defer { sqlite3_finalize(overlaps) }
+            try bind(root,1,overlaps,db)
+            guard sqlite3_bind_int64(overlaps,2,id)==SQLITE_OK else { throw fail(db) }
+            try bind(fold(original),3,overlaps,db);try bind(fold(current),4,overlaps,db)
+            let overlap=sqlite3_step(overlaps)
+            guard overlap==SQLITE_ROW || overlap==SQLITE_DONE else { throw fail(db) }
+            guard overlap==SQLITE_DONE else { continue }
+            sqlite3_reset(captured);sqlite3_clear_bindings(captured)
+            guard sqlite3_bind_int64(captured,1,id)==SQLITE_OK else { throw fail(db) }
+            var paths=Set<Data>(),safe=true
+            var step=sqlite3_step(captured)
+            while step==SQLITE_ROW {
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                let old=try string(captured,0),kind=try string(captured,1),key=Data(old.utf8)
+                if !within(key,oldKey) || sqlite3_column_bytes(captured,2) != 33 ||
+                   sqlite3_column_type(captured,5)==SQLITE_NULL {
+                    safe=false
+                } else if let pointer=sqlite3_column_blob(captured,2),
+                          let prior=remote[key],
+                          let nextPath=String(data:newKey+Data(key.dropFirst(oldKey.count)),encoding:.utf8),
+                          let next=live[Data(nextPath.utf8)],let dst=remote[Data(nextPath.utf8)],
+                          let identity=next.sourceLineageIdentity,
+                          try identityBytesEqual(identity,Data(bytes:pointer,count:33)),
+                          prior.kind==kind,next.kind==kind,dst.kind==kind,
+                          (kind=="directory" || (kind=="file" && prior.size==sqlite3_column_int64(captured,3) &&
+                              abs(prior.modifiedAt-sqlite3_column_double(captured,4))<=2 &&
+                              next.size==dst.size && abs(next.modifiedAt-dst.modifiedAt)<=2)) {
+                    paths.insert(key)
+                    sqlite3_reset(completed);sqlite3_clear_bindings(completed)
+                    guard sqlite3_bind_int64(completed,1,sqlite3_column_int64(captured,5))==SQLITE_OK else { throw fail(db) }
+                    try bind(root,2,completed,db);try bind(old,3,completed,db);try bind(nextPath,4,completed,db)
+                    let proof=sqlite3_step(completed)
+                    guard proof==SQLITE_ROW || proof==SQLITE_DONE else { throw fail(db) }
+                    if proof != SQLITE_ROW { safe=false }
+                } else { safe=false }
+                step=sqlite3_step(captured)
+            }
+            guard step==SQLITE_DONE else { throw fail(db) }
+            // Unknown old remote descendants must never be treated as ours.
+            guard safe,paths.contains(oldKey),
+                  !remote.keys.contains(where:{within($0,oldKey) && !paths.contains($0)}) else { continue }
+            sqlite3_reset(guards);sqlite3_clear_bindings(guards)
+            guard sqlite3_bind_int64(guards,1,id)==SQLITE_OK else { throw fail(db) }
+            var literalPaths:[String]=[]
+            step=sqlite3_step(guards)
+            while step==SQLITE_ROW {
+                let path=try string(guards,0)
+                if !exact(path,original) && !exact(path,current) {
+                    let key=Data(path.utf8)
+                    if WindowsPathSafety.validRelativePath(path) ||
+                       live.keys.contains(where:{within($0,key)}) ||
+                       remote.keys.contains(where:{within($0,key)}) ||
+                       (!nativeTarget && sqlite3_column_int(guards,1) != 1) { safe=false }
+                    else if !nativeTarget { literalPaths.append(path) }
+                }
+                step=sqlite3_step(guards)
+            }
+            guard step==SQLITE_DONE else { throw fail(db) }
+            guard safe else { continue }
+            for path in literalPaths {
+                sqlite3_reset(quarantine);sqlite3_clear_bindings(quarantine)
+                try bind(root,1,quarantine,db);try bind(path,2,quarantine,db);try bind(fold(path),3,quarantine,db)
+                guard sqlite3_step(quarantine)==SQLITE_DONE else { throw fail(db) }
+            }
+            // Only release our veto; actual deletion remains governed by
+            // Mirror, exact path/identity checks and authorization.
+            for table in ["selective_retired_invalid","selective_restore_proof","selective_name_detached","selective_name_guard","selective_name_exception"] {
+                let column=table=="selective_name_exception" ? "id":"exception_id"
+                let remove=try prepare(db,"DELETE FROM "+table+" WHERE "+column+"=?;")
+                defer { sqlite3_finalize(remove) }
+                guard sqlite3_bind_int64(remove,1,id)==SQLITE_OK,sqlite3_step(remove)==SQLITE_DONE else { throw fail(db) }
+            }
+        }
+    }
+
+    private static func identityBytesEqual(_ identity:SourceNameLineage.Identity,_ bytes:Data)throws->Bool {
+        try SourceNameLineageStore.identityBytes(identity)==bytes
+    }
+
     static func resolveAuditedRestorations(_ db:OpaquePointer,root:String,
                     source:String,target:String,sourceRows:[TrackedItem],targetRows:[TrackedItem],
                     nativeTarget:Bool,shouldContinue:()->Bool)throws {
@@ -972,7 +1209,7 @@ enum SelectiveNameExceptionStore {
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             guard WindowsPathSafety.validRelativePath(current),
                   sourcePaths.contains(Data(current.utf8)),targetPaths.contains(Data(current.utf8)) else { continue }
-            if !nativeTarget {
+            if !nativeTarget && WindowsPathSafety.validRelativePath(original) {
                 guard exact(original,current) else { continue }
                 sqlite3_reset(originalProof);sqlite3_clear_bindings(originalProof)
                 guard sqlite3_bind_int64(originalProof,1,id)==SQLITE_OK else { throw fail(db) }

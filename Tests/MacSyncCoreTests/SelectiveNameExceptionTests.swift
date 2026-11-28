@@ -1,4 +1,5 @@
 import Foundation
+import CoreServices
 import SQLite3
 import XCTest
 @testable import MacSyncCore
@@ -258,6 +259,70 @@ final class SelectiveNameExceptionTests:XCTestCase {
         }
     }
 
+    func testDifferentValidNameRequiresCompletedNewCopiesAndAuditBeforeOldDelete()throws {
+        try lab { source,target,path,inventory,journal in
+            let fm=FileManager.default
+            let original=source.appendingPathComponent("phone"),bad=source.appendingPathComponent("phone."),
+                corrected=source.appendingPathComponent("corrected")
+            let map=try MountedFolderMapping(rootID:"photos",source:source,target:target)
+            try fm.moveItem(at:original,to:bad)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:original,eventID:1)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:bad,eventID:2)
+            try fm.moveItem(at:bad,to:corrected)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:bad,eventID:3)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:corrected,eventID:4)
+            let old=try journal.pending(limit:100).filter{$0.kind == .delete}
+            XCTAssertEqual(old.count,10)
+            func stillHeld()throws {
+                for job in old { XCTAssertFalse(try journal.deletionIsCurrent(id:job.id,rootID:job.rootID,relativePath:job.relativePath)) }
+            }
+            try stillHeld()
+            _=try ArchiveAudit(journal:journal,mappings:[map]).run(mode:.quick,repair:true)
+            try stillHeld()
+            let worker=try MountedFolderCopyWorker(journal:journal,log:SyncActivityLog(path:path),mappings:[map],minimumStableAge:0)
+            let result=try worker.runCycle(enabled:true)
+            XCTAssertEqual(result.copied,10)
+            XCTAssertEqual(result.failed,0)
+            try stillHeld()
+            // An unknown additional old remote object must not be deleted.
+            let unknown=target.appendingPathComponent("phone/independent.jpg")
+            try Data([99]).write(to:unknown)
+            _=try ArchiveAudit(journal:journal,mappings:[map]).run(mode:.quick,repair:true)
+            try stillHeld()
+            XCTAssertEqual(try Data(contentsOf:unknown),Data([99]))
+            try fm.removeItem(at:unknown)
+            let report=try ArchiveAudit(journal:journal,mappings:[map]).run(mode:.intelligent,repair:true)
+            XCTAssertEqual(report.bytesRead,0)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception;"),0)
+            for job in old { XCTAssertTrue(try journal.deletionIsCurrent(id:job.id,rootID:job.rootID,relativePath:job.relativePath)) }
+            XCTAssertEqual(try journal.pending(limit:100).map(\.id).sorted(),old.map(\.id).sorted())
+            for k in 0..<8 {
+                XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent("phone/sub/photo-\(k).jpg")),Data([UInt8(k)]))
+                XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent("corrected/sub/photo-\(k).jpg")),Data([UInt8(k)]))
+            }
+        }
+    }
+
+    func testReusedOriginalCannotOverwriteRetainedServerCopy()throws {
+        try lab { source,target,path,inventory,journal in
+            let fm=FileManager.default
+            let original=source.appendingPathComponent("phone"),bad=source.appendingPathComponent("phone.")
+            try fm.moveItem(at:original,to:bad)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:original,eventID:1)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:bad,eventID:2)
+            try fm.createDirectory(at:original.appendingPathComponent("sub"),withIntermediateDirectories:true)
+            try Data([99]).write(to:original.appendingPathComponent("sub/photo-0.jpg"))
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:original,eventID:3)
+            let job=try XCTUnwrap(try journal.pending(limit:100).first{$0.relativePath=="phone/sub/photo-0.jpg" && $0.kind == .upsert})
+            XCTAssertFalse(try journal.uploadIsCurrent(job))
+            let map=try MountedFolderMapping(rootID:"photos",source:source,target:target)
+            let worker=try MountedFolderCopyWorker(journal:journal,log:SyncActivityLog(path:path),mappings:[map],minimumStableAge:0)
+            _=try worker.runCycle(enabled:true)
+            XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent("phone/sub/photo-0.jpg")),Data([0]))
+            XCTAssertTrue(try journal.pending(limit:100).contains{$0.id==job.id})
+        }
+    }
+
     func testCleanBaselineRestorationAvoidsCopiesAndLeavesQuickQueueUntouched()throws {
         try lab { source,target,path,inventory,journal in
             let fm=FileManager.default
@@ -388,6 +453,22 @@ final class SelectiveNameExceptionTests:XCTestCase {
             XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_invalid_upload;"),0)
             XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_retired_invalid;"),1)
             XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent("phone/sub/photo-0.jpg")),Data([0]))
+        }
+    }
+
+    func testMonitorCoalescesDuplicateDirectoryParentsWithinOneCallback()throws {
+        try lab { source,_,_,_,_ in
+            let roots=[MonitorRoot(id:"photos",url:source)]
+            let flags=FSEventStreamEventFlags(kFSEventStreamEventFlagItemRenamed | kFSEventStreamEventFlagItemIsDir)
+            let events=[
+                SourceEvent(path:source.appendingPathComponent("phone").path,flags:flags,eventID:11),
+                SourceEvent(path:source.appendingPathComponent("phone.").path,flags:flags,eventID:12)
+            ]
+            let scans=LocalMonitorService.eventScans(events,roots:roots,selective:true)
+            XCTAssertEqual(scans.count,1)
+            XCTAssertEqual(scans.first?.scope.path,source.path)
+            XCTAssertEqual(scans.first?.eventID,12)
+            XCTAssertEqual(LocalMonitorService.eventScans(events,roots:roots,selective:false).count,2)
         }
     }
 

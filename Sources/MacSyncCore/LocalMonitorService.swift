@@ -272,6 +272,35 @@ public final class LocalMonitorService: @unchecked Sendable {
         return match(parent.appendingPathComponent(lexical.lastPathComponent))
     }
 
+    struct EventScan {
+        let root:MonitorRoot
+        let scope:URL
+        let eventID:UInt64
+        let index:Int
+    }
+
+    static func eventScans(_ events:[SourceEvent],roots:[MonitorRoot],selective:Bool)->[EventScan] {
+        var scans:[EventScan]=[]
+        var latest:[Data:EventScan]=[:]
+        for (index,event) in events.enumerated() {
+            if event.isHistoryMarkerOnly { continue }
+            guard let (root,url)=eventURL(event.path,roots:roots) else { continue }
+            let parent=url.deletingLastPathComponent()
+            let scope=selective && event.isDirectoryRename && url.path != root.url.path &&
+                (parent.path==root.url.path || parent.path.hasPrefix(root.url.path+"/")) ? parent:url
+            let scan=EventScan(root:root,scope:scope,eventID:event.eventID,index:index)
+            if selective {
+                // Both directory rename endpoints often describe the same
+                // parent. Reconcile it once, at the last event position.
+                // This is a per-callback optimization, never a debounce
+                // across callbacks or a skipped safety-gate transition.
+                latest[Data((root.id+"\0"+scope.path).utf8)]=scan
+            } else { scans.append(scan) }
+        }
+        if selective { return latest.values.sorted{$0.index<$1.index} }
+        return scans
+    }
+
     private func process(events: [SourceEvent], request: SeedVerificationCancellation, generation: UUID) {
         guard let inventory, !request.isCancelled else { return }
         safetyGate.beginReconciliation(generation:generation)
@@ -302,32 +331,10 @@ public final class LocalMonitorService: @unchecked Sendable {
                 report("Eventi persi: inventario locale ricontrollato", active: true)
                 return
             }
-            for event in events {
+            for scan in Self.eventScans(events,roots:roots,selective:selective) {
                 guard !request.isCancelled else { throw SeedVerificationError.cancelled }
-                if event.isHistoryMarkerOnly { continue }
-                guard let (root,url) = Self.eventURL(event.path,roots:roots) else { continue }
-                let result: ReconciliationResult
-                if event.requiresFullReconciliation {
-                    // If the source root disappeared, reconcile throws before
-                    // any DB change. Do NOT treat missing source as deletions.
-                    result = try inventory.reconcile(
-                        rootID: root.id, root: root.url, eventID: event.eventID, shouldContinue:{ !request.isCancelled }
-                    )
-                } else {
-                    // In selective mode a directory rename is best observed
-                    // at its parent: old and new spellings in the same scan,
-                    // one root-most guard instead of orphan child events.
-                    // Never widen beyond the pinned local root.
-                    let parent=url.deletingLastPathComponent()
-                    let scope=selective && event.isDirectoryRename && url.path != root.url.path &&
-                        (parent.path==root.url.path || parent.path.hasPrefix(root.url.path+"/")) ? parent:url
-                    result = try inventory.reconcile(
-                        rootID: root.id,
-                        root: root.url,
-                        subtree: scope,
-                        eventID: event.eventID, shouldContinue:{ !request.isCancelled }
-                    )
-                }
+                let result = try inventory.reconcile(rootID:scan.root.id,root:scan.root.url,
+                    subtree:scan.scope,eventID:scan.eventID,shouldContinue:{ !request.isCancelled })
                 totalChanges += result.queuedUpserts + result.queuedDeletes
             }
             guard !request.isCancelled else { throw SeedVerificationError.cancelled }
