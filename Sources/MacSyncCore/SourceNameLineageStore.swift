@@ -323,6 +323,7 @@ enum SourceNameLineageStore {
     }
 
     static func protected(_ db: OpaquePointer,root: String,path: String) throws -> Bool {
+        if try SelectiveNameExceptionStore.protects(db,root:root,path:path) { return true }
         guard try protectionInstalled(db) else { return false }
         let q=try prepare(db,"""
             SELECT 1 FROM source_lineage_hold h JOIN source_lineage_mapping m ON m.id=h.mapping_id

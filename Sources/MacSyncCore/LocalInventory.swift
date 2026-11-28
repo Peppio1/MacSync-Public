@@ -301,6 +301,8 @@ public final class LocalInventory {
     // Same opt-in policy for monitor, audit and copy writers.
     var experimentalSourceNameLineage = SourceLineageRuntimePolicy.enabled
     var experimentalLineageQueueProtection = SourceLineageRuntimePolicy.enabled
+    // Explicit laboratory instance only; no environment/UI activation.
+    var experimentalSelectiveNameExceptions = false
     var experimentalInventoryLineageLayout = ProcessInfo.processInfo.environment["MACSYNC_INTERNAL_INVENTORY_LINEAGE"] == "1"
 
     public init(path: String) throws {
@@ -558,8 +560,13 @@ public final class LocalInventory {
         var profiledItems=0
         defer { timing.finish(items:profiledItems,committed:committed) }
         let scanStarted=Date()
+        guard let selectiveDB=db else { throw failure() }
+        let selective = experimentalSelectiveNameExceptions ? true : try SelectiveNameExceptionStore.installed(selectiveDB)
+        guard !selective || !experimentalSourceNameLineage else {
+            throw SourceNameLineageStore.Failure.invalid
+        }
         let rows = try timing.measure("scan"){try LocalScanner.scan(root: root, subtree: subtree, ignoreDSStore:ignoreDSStore, shouldContinue: shouldContinue, onItem: onItem,
-            collectSourceLineageIdentity: experimentalSourceNameLineage)}
+            collectSourceLineageIdentity: experimentalSourceNameLineage || selective)}
         profiledItems=rows.count
         guard shouldContinue() else { throw SeedVerificationError.cancelled }
         let fullScan = target.path == root.path
@@ -587,6 +594,7 @@ public final class LocalInventory {
             if experimentalSourceNameLineage && experimentalInventoryLineageLayout {
                 try timing.measure("install_layout"){try SourceNameLineageStore.installIntegratedLayout(layoutDB)}
             }
+            if selective { try SelectiveNameExceptionStore.install(layoutDB) }
             let integrated = try SourceNameLineageStore.integratedLayoutInstalled(layoutDB)
             let before = try timing.measure("inventory_read"){try readEntries(rootID: rootID, scope: fullScan ? nil : scope,includeLineageIdentity:integrated)}
             // FSEvents jobs and restart-recovery scans must never masquerade as
@@ -611,6 +619,12 @@ public final class LocalInventory {
             let jobOrigin: QueuedChangeOrigin = .sourceMonitor
             let affected = before
             let seen = Dictionary(uniqueKeysWithValues: rows.map { ($0.relativePath, $0) })
+            if selective {
+                try timing.measure("selective_observe") {
+                    try SelectiveNameExceptionStore.observe(layoutDB,root:rootID,source:binding,
+                        before:before,rows:rows,pristine:pristine,ignoreDSStore:ignoreDSStore,shouldContinue:shouldContinue)
+                }
+            }
             var upserts = 0
             var deletes = 0
             // Same persisted comparison and enqueue policy as before. Reuse

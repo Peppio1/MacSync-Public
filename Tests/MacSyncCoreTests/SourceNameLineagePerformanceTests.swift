@@ -14,6 +14,7 @@ final class SourceNameLineagePerformanceTests: XCTestCase {
         let source=base.appendingPathComponent("source"),target=base.appendingPathComponent("target")
         let folderCount=1000,filesPerFolder=10
         let integrated = ProcessInfo.processInfo.environment["MACSYNC_INTERNAL_INVENTORY_LINEAGE"] == "1"
+        let selective = ProcessInfo.processInfo.environment["MACSYNC_SELECTIVE_LAB"] == "1"
         let fixed=Date(timeIntervalSince1970:1_700_000_000)
         let bytes=Data(repeating:0x42,count:64)
         for root in [source,target] {
@@ -36,9 +37,10 @@ final class SourceNameLineagePerformanceTests: XCTestCase {
         baseline.experimentalLineageQueueProtection=false
         ja.experimentalSourceNameLineage=false
         candidate.experimentalInventoryLineageLayout=integrated
-        candidate.experimentalSourceNameLineage=true
-        candidate.experimentalLineageQueueProtection=true
-        jb.experimentalSourceNameLineage=true
+        candidate.experimentalSelectiveNameExceptions=selective
+        candidate.experimentalSourceNameLineage = !selective
+        candidate.experimentalLineageQueueProtection = !selective
+        jb.experimentalSourceNameLineage = !selective
         func timed<T>(_ body:() throws -> T) rethrows -> (T,Double) {
             let start=ProcessInfo.processInfo.systemUptime
             let result=try body()
@@ -109,7 +111,19 @@ final class SourceNameLineagePerformanceTests: XCTestCase {
             return sqlite3_column_int64(stmt,0)
         }
         let bytesA=try logicalBytes(a),bytesB=try logicalBytes(b)
+        if selective {
+            var handle:OpaquePointer?
+            XCTAssertEqual(sqlite3_open_v2(b.path,&handle,SQLITE_OPEN_READONLY,nil),SQLITE_OK)
+            let db=try XCTUnwrap(handle)
+            defer { sqlite3_close(db) }
+            XCTAssertFalse(try SelectiveNameExceptionStore.hasExceptions(db))
+            var q:OpaquePointer?
+            XCTAssertEqual(sqlite3_prepare_v2(db,"SELECT COUNT(*) FROM source_lineage_records;",-1,&q,nil),SQLITE_OK)
+            defer { sqlite3_finalize(q) }
+            XCTAssertEqual(sqlite3_step(q),SQLITE_ROW)
+            XCTAssertEqual(sqlite3_column_int64(q,0),0)
+        }
         XCTAssertLessThan(bytesB-bytesA,8*1024*1024)
-        print("LINEAGE_REPRESENTATIVE integrated=\(integrated) files=10000 directories=1000 initial_baseline=\(seedA) initial_candidate=\(seedB) quick_first_baseline=\(firstA.seconds) quick_first_candidate=\(firstB.seconds) quick_repeat_baseline=\(repeatA.seconds) quick_repeat_candidate=\(repeatB.seconds) daily_jobs=\(countB) daily_baseline=\(dailyA) daily_candidate=\(dailyB) baseline_bytes=\(bytesA) candidate_bytes=\(bytesB) target_content_bytes_read=0")
+        print("LINEAGE_REPRESENTATIVE selective=\(selective) integrated=\(integrated) files=10000 directories=1000 initial_baseline=\(seedA) initial_candidate=\(seedB) quick_first_baseline=\(firstA.seconds) quick_first_candidate=\(firstB.seconds) quick_repeat_baseline=\(repeatA.seconds) quick_repeat_candidate=\(repeatB.seconds) daily_jobs=\(countB) daily_baseline=\(dailyA) daily_candidate=\(dailyB) baseline_bytes=\(bytesA) candidate_bytes=\(bytesB) target_content_bytes_read=0")
     }
 }
