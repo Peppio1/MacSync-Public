@@ -317,7 +317,7 @@ enum SelectiveNameExceptionStore {
 
     // Only the very first source-monitor upload of a new, unpublishable
     // spelling can receive this provenance. Not proof of remote absence.
-    static func canMarkSpeculative(_ db:OpaquePointer,root:String,source:String,row:TrackedItem)throws->Bool {
+    static func canMarkSpeculative(_ db:OpaquePointer,root:String,source:String,row:TrackedItem,departingPath:String?=nil)throws->Bool {
         guard sqlite3_get_autocommit(db)==0 else { throw SourceNameLineageStore.Failure.transactionRequired }
         guard !WindowsPathSafety.validRelativePath(row.relativePath),
               let identity=row.sourceLineageIdentity else { return false }
@@ -336,7 +336,15 @@ enum SelectiveNameExceptionStore {
                       AND (d.relative_path=e.original_path OR instr(d.relative_path,e.original_path||'/')=1)
                       AND ?3=e.current_path||substr(d.relative_path,length(e.original_path)+1)))
               AND NOT EXISTS(SELECT 1 FROM change_queue c WHERE c.root_id=?1 AND c.relative_path=?3)
-              AND NOT EXISTS(SELECT 1 FROM file_inventory f WHERE f.root_id=?1 AND f.lineage_observed_identity=?4)
+              AND NOT EXISTS(SELECT 1 FROM file_inventory f WHERE f.root_id=?1 AND f.lineage_observed_identity=?4
+                  AND (?6 IS NULL OR f.relative_path<>?6))
+              AND (?6 IS NULL OR EXISTS(SELECT 1 FROM selective_name_detached d
+                JOIN selective_name_exception e ON e.id=d.exception_id
+                WHERE e.root_id=?1 AND e.source_binding=?2 AND e.target_binding=t.stamp
+                  AND d.identity=?4 AND d.relative_path=?6 AND e.state='incompatible'
+                  AND e.current_path IS NOT NULL
+                  AND (d.relative_path=e.original_path OR instr(d.relative_path,e.original_path||'/')=1)
+                  AND ?3=e.current_path||substr(d.relative_path,length(e.original_path)+1)))
               AND NOT EXISTS(SELECT 1 FROM publication_intents p WHERE p.root_id=?1 AND p.relative_path=?3)
               AND NOT EXISTS(SELECT 1 FROM transfer_recovery r WHERE r.root_id=?1 AND r.relative_path=?3)
               AND NOT EXISTS(SELECT 1 FROM upload_retry r WHERE r.root_id=?1 AND r.scope='root');
@@ -345,6 +353,8 @@ enum SelectiveNameExceptionStore {
         try bind(root,1,q,db);try bind(source,2,q,db);try bind(row.relativePath,3,q,db)
         try bind(try SourceNameLineageStore.identityBytes(identity),4,q,db)
         guard sqlite3_bind_double(q,5,birth)==SQLITE_OK else { throw fail(db) }
+        if let departingPath { try bind(departingPath,6,q,db) }
+        else { guard sqlite3_bind_null(q,6)==SQLITE_OK else { throw fail(db) } }
         let rc=sqlite3_step(q)
         guard rc==SQLITE_ROW || rc==SQLITE_DONE else { throw fail(db) }
         return rc==SQLITE_ROW

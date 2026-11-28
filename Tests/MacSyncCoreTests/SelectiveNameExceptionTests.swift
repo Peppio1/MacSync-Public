@@ -329,6 +329,7 @@ final class SelectiveNameExceptionTests:XCTestCase {
             let ready=expectation(description:"Monitor ready")
             ready.assertForOverFulfill=false
             let monitor=LocalMonitorService { update in
+                print("SELECTIVE_MONITOR active=\(update.monitoring) pending=\(update.pendingChanges) message=\(update.message)")
                 if update.monitoring { ready.fulfill() }
             }
             monitor.start(roots:[MonitorRoot(id:"photos",url:source)],databasePath:path)
@@ -339,21 +340,67 @@ final class SelectiveNameExceptionTests:XCTestCase {
                 wait(for:[stopped],timeout:12)
             }
             wait(for:[ready],timeout:15)
+            XCTAssertTrue(monitor.safetyGate.isReady)
+            // As in the standalone watcher test, allow the stream to start
+            // delivering its initial historical marker before mutation.
+            Thread.sleep(forTimeInterval:0.3)
             func eventually(_ query:String,_ expected:Int64)throws {
                 let deadline=Date().addingTimeInterval(15)
                 repeat {
                     if (try? scalar(path,query))==expected { return }
                     Thread.sleep(forTimeInterval:0.1)
                 } while Date()<deadline
+                let entries=try SyncActivityLog(path:path).recent(limit:20)
+                for entry in entries {
+                    print("SELECTIVE_MONITOR_LOG action=\(entry.action) message=\(entry.message)")
+                }
+                print("SELECTIVE_MONITOR_TIMEOUT ready=\(monitor.safetyGate.isReady) query=\(query)")
                 XCTAssertEqual(try scalar(path,query),expected)
             }
             let original=source.appendingPathComponent("phone"),bad=source.appendingPathComponent("phone.")
             try FileManager.default.moveItem(at:original,to:bad)
+            try eventually("SELECT COUNT(*) FROM file_inventory WHERE root_id='photos' AND relative_path='phone.';",1)
             try eventually("SELECT COUNT(*) FROM selective_name_exception WHERE current_path='phone.';",1)
             XCTAssertGreaterThan(try scalar(path,"SELECT COUNT(*) FROM selective_name_guard;"),0)
             try FileManager.default.moveItem(at:bad,to:original)
+            try eventually("SELECT COUNT(*) FROM file_inventory WHERE root_id='photos' AND relative_path='phone';",1)
             try eventually("SELECT COUNT(*) FROM selective_name_exception WHERE original_path='phone' AND state='returned';",1)
+            XCTAssertTrue(monitor.safetyGate.isReady)
             XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent("phone/sub/photo-0.jpg")),Data([0]))
+        }
+    }
+
+    func testSingleParentScanRetiresOnlyProvenInvalidJobs()throws {
+        try lab { source,target,path,inventory,journal in
+            let fm=FileManager.default
+            let root=source.appendingPathComponent("phone"),bad=source.appendingPathComponent("phone.")
+            try fm.moveItem(at:root,to:bad)
+            _=try inventory.reconcile(rootID:"photos",root:source,eventID:1)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception WHERE original_path='phone' AND current_path='phone.';"),1)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_invalid_upload;"),10)
+            for job in try journal.pending(limit:100) where job.kind == .delete {
+                XCTAssertFalse(try journal.deletionIsCurrent(id:job.id,rootID:job.rootID,relativePath:job.relativePath))
+            }
+            try fm.moveItem(at:bad,to:root)
+            _=try inventory.reconcile(rootID:"photos",root:source,eventID:2)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception WHERE original_path='phone' AND state='returned';"),1)
+            XCTAssertFalse(try journal.pending(limit:100).contains{$0.relativePath.hasPrefix("phone.")})
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_invalid_upload;"),0)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_retired_invalid;"),1)
+            XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent("phone/sub/photo-0.jpg")),Data([0]))
+        }
+    }
+
+    func testMonitorPathKeepsRenamedAwayLeafThroughParentAlias()throws {
+        try lab { source,_,_,_,_ in
+            let alias=source.deletingLastPathComponent().appendingPathComponent("source-link")
+            try FileManager.default.createSymbolicLink(at:alias,withDestinationURL:source)
+            let roots=[MonitorRoot(id:"photos",url:source)]
+            let missing=alias.appendingPathComponent("missing.").path
+            let match=try XCTUnwrap(LocalMonitorService.eventURL(missing,roots:roots))
+            XCTAssertEqual(match.0.id,"photos")
+            XCTAssertEqual(match.1.path,source.appendingPathComponent("missing.").path)
+            XCTAssertNil(LocalMonitorService.eventURL(source.path+"-outside/file",roots:roots))
         }
     }
 

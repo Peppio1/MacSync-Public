@@ -253,12 +253,38 @@ public final class LocalMonitorService: @unchecked Sendable {
         return roots
     }
 
+    /// FSEvents may spell a path through a system alias (e.g. /var
+    /// instead of /private/var), including a renamed-away leaf.
+    /// Never resolve the leaf itself: its exact spelling is significant.
+    static func eventURL(_ path:String,roots:[MonitorRoot])->(MonitorRoot,URL)? {
+        guard path.hasPrefix("/") else { return nil }
+        let lexical=URL(fileURLWithPath:path).standardizedFileURL
+        func match(_ url:URL)->(MonitorRoot,URL)? {
+            for root in roots {
+                if url.path==root.url.path || url.path.hasPrefix(root.url.path+"/") {
+                    return (root,url)
+                }
+            }
+            return nil
+        }
+        if let direct=match(lexical) { return direct }
+        let parent=lexical.deletingLastPathComponent().resolvingSymlinksInPath()
+        return match(parent.appendingPathComponent(lexical.lastPathComponent))
+    }
+
     private func process(events: [SourceEvent], request: SeedVerificationCancellation, generation: UUID) {
         guard let inventory, !request.isCancelled else { return }
         safetyGate.beginReconciliation(generation:generation)
         var totalChanges = 0
         do {
-            if recoveryRequired || events.contains(where: { $0.streamHistoryLost || $0.requiresFullReconciliation }) {
+            let selective=try inventory.selectiveNameExceptionsActive()
+            // Unknown file-event spelling must not be silently ignored in
+            // selective mode. Reconcile local roots instead; normal FSEvents
+            // events remain targeted. HistoryDone is a stream marker.
+            let uncertainPath=selective && events.contains {
+                !$0.isHistoryMarkerOnly && Self.eventURL($0.path,roots:roots)==nil
+            }
+            if recoveryRequired || uncertainPath || events.contains(where: { $0.streamHistoryLost || $0.requiresFullReconciliation }) {
                 // A dropped event stream may have missed modifications under
                 // ANY watched root, not merely under the reported event path.
                 var scan = ArchiveAuditProgress(); scan.phase = "Riconciliazione inventario locale"
@@ -278,9 +304,8 @@ public final class LocalMonitorService: @unchecked Sendable {
             }
             for event in events {
                 guard !request.isCancelled else { throw SeedVerificationError.cancelled }
-                guard let root = roots.first(where: {
-                    event.path == $0.url.path || event.path.hasPrefix($0.url.path + "/")
-                }) else { continue }
+                if event.isHistoryMarkerOnly { continue }
+                guard let (root,url) = Self.eventURL(event.path,roots:roots) else { continue }
                 let result: ReconciliationResult
                 if event.requiresFullReconciliation {
                     // If the source root disappeared, reconcile throws before
@@ -289,10 +314,17 @@ public final class LocalMonitorService: @unchecked Sendable {
                         rootID: root.id, root: root.url, eventID: event.eventID, shouldContinue:{ !request.isCancelled }
                     )
                 } else {
+                    // In selective mode a directory rename is best observed
+                    // at its parent: old and new spellings in the same scan,
+                    // one root-most guard instead of orphan child events.
+                    // Never widen beyond the pinned local root.
+                    let parent=url.deletingLastPathComponent()
+                    let scope=selective && event.isDirectoryRename && url.path != root.url.path &&
+                        (parent.path==root.url.path || parent.path.hasPrefix(root.url.path+"/")) ? parent:url
                     result = try inventory.reconcile(
                         rootID: root.id,
                         root: root.url,
-                        subtree: URL(fileURLWithPath: event.path),
+                        subtree: scope,
                         eventID: event.eventID, shouldContinue:{ !request.isCancelled }
                     )
                 }

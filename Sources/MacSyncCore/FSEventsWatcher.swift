@@ -6,6 +6,15 @@ public struct SourceEvent: Sendable {
     public let flags: FSEventStreamEventFlags
     public let eventID: FSEventStreamEventId
 
+    var isDirectoryRename:Bool {
+        flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemRenamed) != 0 &&
+        flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir) != 0
+    }
+
+    var isHistoryMarkerOnly:Bool {
+        flags == FSEventStreamEventFlags(kFSEventStreamEventFlagHistoryDone)
+    }
+
     /// These flags indicate global stream loss, so ALL watched roots must be
     /// rescanned, not only the path carried by the individual event.
     public var streamHistoryLost: Bool {

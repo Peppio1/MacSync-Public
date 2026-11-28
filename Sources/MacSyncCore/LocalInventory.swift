@@ -523,6 +523,11 @@ public final class LocalInventory {
         return result
     }
 
+    func selectiveNameExceptionsActive()throws->Bool {
+        guard let db else { throw failure() }
+        return experimentalSelectiveNameExceptions ? true : try SelectiveNameExceptionStore.installed(db)
+    }
+
     public func pendingCount() throws -> Int {
         let statement = try prepare("SELECT COUNT(*) FROM change_queue WHERE completed=0;")
         defer { sqlite3_finalize(statement) }
@@ -625,6 +630,21 @@ public final class LocalInventory {
                         before:before,rows:rows,pristine:pristine,ignoreDSStore:ignoreDSStore,shouldContinue:shouldContinue)
                 }
             }
+            // A directory rename can be received as one parent reconciliation.
+            // While recording new names the old inventory rows still exist.
+            // Only exact, uniquely departing identities from this same scan
+            // may qualify as old paths for speculative-invalid provenance.
+            var departingByIdentity:[Data:String]=[:]
+            var duplicateDepartures=Set<Data>()
+            if selective {
+                for (path,old) in before where seen[path]==nil {
+                    guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                    if let id=old.storedLineageIdentity,
+                       departingByIdentity.updateValue(path,forKey:id) != nil {
+                        duplicateDepartures.insert(id)
+                    }
+                }
+            }
             var upserts = 0
             var deletes = 0
             // Same persisted comparison and enqueue policy as before. Reuse
@@ -653,7 +673,8 @@ public final class LocalInventory {
                     !WindowsPathSafety.validRelativePath(row.relativePath)
                 let markSpeculative:Bool
                 if speculative {
-                    markSpeculative=try SelectiveNameExceptionStore.canMarkSpeculative(layoutDB,root:rootID,source:binding,row:row)
+                    let departing=identity.flatMap{duplicateDepartures.contains($0) ? nil : departingByIdentity[$0]}
+                    markSpeculative=try SelectiveNameExceptionStore.canMarkSpeculative(layoutDB,root:rootID,source:binding,row:row,departingPath:departing)
                 } else { markSpeculative=false }
                 if changed || identityChanged {
                     try timing.measure("inventory_write"){
