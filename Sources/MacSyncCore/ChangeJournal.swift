@@ -1455,10 +1455,14 @@ public final class ChangeJournal {
                 """)
             defer { sqlite3_finalize(eligibility) }
             var batch: SourceNameLineageStore.Batch?
-            let counts = Dictionary(grouping:items.compactMap(\.sourceLineageIdentity),by:{$0})
+            var counts: [SourceNameLineage.Identity: Int] = [:]
             for item in items {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
-                guard let identity = item.sourceLineageIdentity, counts[identity]?.count == 1,
+                if let identity = item.sourceLineageIdentity { counts[identity, default: 0] += 1 }
+            }
+            for item in items {
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                guard let identity = item.sourceLineageIdentity, counts[identity] == 1,
                       let fingerprint = item.verificationFingerprint,
                       WindowsPathSafety.validRelativePath(item.relativePath),
                       !protection.protects(rootID:mapping.rootID,path:item.relativePath) else { continue }

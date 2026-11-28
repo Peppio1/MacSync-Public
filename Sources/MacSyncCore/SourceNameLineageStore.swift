@@ -379,6 +379,9 @@ enum SourceNameLineageStore {
         private let upsert: OpaquePointer
         private let protectionAvailable: Bool
         private var holdQuery: OpaquePointer?
+        private var holdExistsQuery: OpaquePointer?
+        private let decoder = JSONDecoder()
+        private let encoder = JSONEncoder()
 
         fileprivate init(_ db: OpaquePointer, key: Key, namespace: Int64) throws {
             self.db = db
@@ -397,7 +400,8 @@ enum SourceNameLineageStore {
                     VALUES(?,?,?,?,?,?,?)
                     ON CONFLICT(mapping_id,identity) DO UPDATE SET
                         current_path=excluded.current_path,revision=excluded.revision,
-                        evidence=excluded.evidence,uncertain=excluded.uncertain,recognized_paths=excluded.recognized_paths;
+                        evidence=excluded.evidence,uncertain=excluded.uncertain,recognized_paths=excluded.recognized_paths
+                    WHERE source_lineage_index.revision=?8;
                     """)
             } catch {
                 sqlite3_finalize(q)
@@ -409,6 +413,7 @@ enum SourceNameLineageStore {
             sqlite3_finalize(query)
             sqlite3_finalize(upsert)
             if let holdQuery { sqlite3_finalize(holdQuery) }
+            if let holdExistsQuery { sqlite3_finalize(holdExistsQuery) }
         }
 
         private func verify(_ key: Key) throws {
@@ -445,7 +450,7 @@ enum SourceNameLineageStore {
                 let length = Int(sqlite3_column_bytes(query, 4))
                 guard length > 0, length <= maximumRecordBytes,
                       let bytes = sqlite3_column_blob(query, 4) else { throw Failure.invalid }
-                paths = try JSONDecoder().decode([String].self, from: Data(bytes: bytes, count: length))
+                paths = try decoder.decode([String].self, from: Data(bytes: bytes, count: length))
             }
             let pathBytes=Data(bytes:path,count:Int(sqlite3_column_bytes(query,0)))
             guard !pathBytes.contains(0),let exactPath=String(data:pathBytes,encoding:.utf8) else { throw Failure.invalid }
@@ -513,7 +518,17 @@ enum SourceNameLineageStore {
         }
 
         func hasHold(_ record:SourceNameLineage.Record) throws -> Bool {
-            try !heldPaths(record).isEmpty
+            guard protectionAvailable else { return false }
+            if holdExistsQuery == nil {
+                holdExistsQuery = try prepare(db,"SELECT 1 FROM source_lineage_hold WHERE mapping_id=? AND identity=? LIMIT 1;")
+            }
+            guard let q = holdExistsQuery else { throw Failure.invalid }
+            reset(q)
+            defer { reset(q) }
+            try bindIdentity(Key(record),q)
+            let rc = sqlite3_step(q)
+            guard rc == SQLITE_ROW || rc == SQLITE_DONE else { throw failure(db) }
+            return rc == SQLITE_ROW
         }
 
         // Release only after the exact corrected path is confirmed. Check
@@ -542,8 +557,16 @@ enum SourceNameLineageStore {
             guard sqlite3_get_autocommit(db) == 0 else { throw Failure.transactionRequired }
             try validate(record)
             let key = Key(record)
-            let existing = try read(key: key)
-            guard existing?.revision == expectedRevision else { throw Failure.stale }
+            // New records use the conditional INSERT below: a conflicting
+            // existing positive revision cannot match the zero sentinel.
+            // Existing records still undergo full decoding and validation.
+            let existing: Versioned?
+            if let expectedRevision {
+                existing = try read(key: key)
+                guard existing?.revision == expectedRevision else { throw Failure.stale }
+            } else {
+                existing = nil
+            }
             if let existing, existing.record.evidence == record.evidence,
                existing.record.uncertainPublication == record.uncertainPublication,
                existing.record.currentPath.utf8.elementsEqual(record.currentPath.utf8),
@@ -559,13 +582,15 @@ enum SourceNameLineageStore {
             let evidence: Int32 = record.evidence == .unknown ? 0 : (record.evidence == .neverPublished ? 1 : 2)
             guard sqlite3_bind_int64(upsert, 4, next.partialValue) == SQLITE_OK,
                   sqlite3_bind_int(upsert, 5, evidence) == SQLITE_OK,
-                  sqlite3_bind_int(upsert, 6, record.uncertainPublication ? 1 : 0) == SQLITE_OK else { throw failure(db) }
+                  sqlite3_bind_int(upsert, 6, record.uncertainPublication ? 1 : 0) == SQLITE_OK,
+                  sqlite3_bind_int64(upsert, 8, expectedRevision ?? 0) == SQLITE_OK else { throw failure(db) }
             if record.recognizedPaths.isEmpty {
                 guard sqlite3_bind_null(upsert, 7) == SQLITE_OK else { throw failure(db) }
             } else {
-                try bindBlob(JSONEncoder().encode(record.recognizedPaths), 7, upsert, db)
+                try bindBlob(encoder.encode(record.recognizedPaths), 7, upsert, db)
             }
             guard sqlite3_step(upsert) == SQLITE_DONE else { throw failure(db) }
+            guard sqlite3_changes(db) == 1 else { throw Failure.stale }
             return Versioned(record: record, revision: next.partialValue)
         }
     }

@@ -95,6 +95,29 @@ final class SourceNameLineageStoreTests: XCTestCase {
             XCTAssertEqual(try SourceNameLineageStore.read(b, key: key)?.record.uncertainPublication, true)
         }
     }
+    func testConditionalInsertCannotReplaceExistingIdentity() throws {
+        try fixture { path, initial in
+            let db = try open(path)
+            defer { sqlite3_close(db) }
+            try SourceNameLineageStore.installProtection(db)
+            try sql(db, "BEGIN IMMEDIATE;")
+            let batch = try XCTUnwrap(try SourceNameLineageStore.batch(db,key:.init(initial),create:true))
+            let first = try batch.write(record:initial,expectedRevision:nil)
+            XCTAssertFalse(try batch.hasHold(initial))
+            try batch.protectRename(initial)
+            XCTAssertTrue(try batch.hasHold(initial))
+            var changed = initial
+            changed.publicationStarted()
+            XCTAssertThrowsError(try batch.write(record:changed,expectedRevision:nil)) {
+                XCTAssertEqual($0 as? SourceNameLineageStore.Failure,.stale)
+            }
+            XCTAssertEqual(try batch.read(key:.init(initial)),first)
+            XCTAssertTrue(try batch.hasHold(initial))
+            try sql(db, "COMMIT;")
+            XCTAssertEqual(try SourceNameLineageStore.read(db,key:.init(initial)),first)
+        }
+    }
+
     func testBindingIsolationNoOpAndTransactionRequirement() throws {
         try fixture { path, initial in
             let db = try open(path)
