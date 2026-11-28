@@ -238,6 +238,55 @@ final class NameRectificationTests:XCTestCase {
         XCTAssertEqual(result.failed, 0)
     }
 
+    func testRepeated1200NameBatchesPreserveDataAndReopen() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let source = base.appendingPathComponent("source"), target = base.appendingPathComponent("target")
+        for root in [source,target] { try fm.createDirectory(at:root,withIntermediateDirectories:true) }
+        defer { try? fm.removeItem(at:base) }
+        let db = base.appendingPathComponent("state.sqlite").path
+        let map = try MountedFolderMapping(rootID:"demo",source:source,target:target)
+        let initialInventory = try LocalInventory(path:db)
+        _ = try initialInventory.reconcile(rootID:"demo",root:source,origin:.initialInventory)
+        try ChangeJournal(path:db).verifyDirectoryBindings([map],allowNewTarget:true)
+        let count = 1200
+        for round in 0..<2 {
+            let inventory = try LocalInventory(path:db)
+            let journal = try ChangeJournal(path:db)
+            inventory.experimentalSourceNameLineage = true
+            inventory.experimentalLineageQueueProtection = true
+            journal.experimentalSourceNameLineage = true
+            let batchFolder = source.appendingPathComponent("round-\(round)")
+            for index in 0..<count {
+                let folder = batchFolder.appendingPathComponent("group-\(index / 40)")
+                if index % 40 == 0 { try fm.createDirectory(at:folder,withIntermediateDirectories:true) }
+                try Data([UInt8(index % 251),UInt8(round)]).write(to:folder.appendingPathComponent("photo-\(index)?.jpg"))
+            }
+            _ = try inventory.reconcile(rootID:"demo",root:source,eventID:UInt64(round*2+1))
+            let rows = try inventory.incompatibleNames(rootID:"demo",sourcePath:source.path)
+            XCTAssertEqual(rows.count,count)
+            let start = ProcessInfo.processInfo.systemUptime
+            let result = try NameRectification.executeLocal(items:rows,roots:["demo":source.path],
+                journal:journal,log:SyncActivityLog(path:db))
+            XCTAssertEqual(result.renamed,count)
+            XCTAssertEqual(result.failed,0)
+            XCTAssertEqual(result.skipped,0)
+            XCTAssertFalse(try journal.hasPendingNameRectification())
+            _ = try inventory.reconcile(rootID:"demo",root:source,eventID:UInt64(round*2+2))
+            XCTAssertTrue(try inventory.incompatibleNames(rootID:"demo",sourcePath:source.path).isEmpty)
+            for previous in 0...round {
+                for index in 0..<count {
+                    let folder = source.appendingPathComponent("round-\(previous)/group-\(index / 40)")
+                    XCTAssertEqual(try Data(contentsOf:folder.appendingPathComponent("photo-\(index)-.jpg")),
+                        Data([UInt8(index % 251),UInt8(previous)]))
+                    XCTAssertFalse(fm.fileExists(atPath:folder.appendingPathComponent("photo-\(index)?.jpg").path))
+                }
+            }
+            XCTAssertTrue(try fm.contentsOfDirectory(atPath:target.path).isEmpty)
+            print("LINEAGE_REPEAT_RECTIFICATION round=\(round+1) count=\(count) elapsed=\(ProcessInfo.processInfo.systemUptime-start)")
+        }
+    }
+
     func testLocalNameRectificationBenchmark100() throws {
         try benchmarkLocalNameBatch(100)
     }

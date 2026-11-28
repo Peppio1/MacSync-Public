@@ -780,16 +780,37 @@ public final class ArchiveAudit {
             // mapping-level stamp is rechecked; no remote file is reread.
             for pair in pairs {
                 guard let items = shadowMatches[pair.mapping.rootID], !items.isEmpty else { continue }
-                try check()
-                guard cancellation.awaitCommitWindow() else { throw SeedVerificationError.cancelled }
-                guard let sourceBinding = pair.sourceBinding, let targetBinding = pair.targetBinding,
-                      try DirectoryBinding.encoded(pair.mapping.source) == sourceBinding,
-                      try DirectoryBinding.encoded(pair.mapping.target) == targetBinding else {
-                    throw MountedCopyError.volumeChanged
+                var lineageRetries = 0
+                while true {
+                    try check()
+                    guard cancellation.awaitCommitWindow(onWaiting:{
+                        state.phase="Attesa completamento inventario locale"; report(force:true)
+                    }) else { throw SeedVerificationError.cancelled }
+                    guard let sourceBinding = pair.sourceBinding, let targetBinding = pair.targetBinding,
+                          try DirectoryBinding.encoded(pair.mapping.source) == sourceBinding,
+                          try DirectoryBinding.encoded(pair.mapping.target) == targetBinding else {
+                        throw MountedCopyError.volumeChanged
+                    }
+                    do {
+                        try journal.observeUnqueuedAuditLineage(items, mapping: pair.mapping,
+                            sourceBinding: sourceBinding, targetBinding: targetBinding,
+                            cutoff: shadowCutoff, shouldContinue: { cancellation.mayCommit },
+                            onProgress:{ done,total in
+                                state.phase="Salvataggio storico rinomine · \(done)/\(total)"
+                                report(force:done == 0)
+                            })
+                        break
+                    } catch SeedVerificationError.cancelled {
+                        // The journal rolled back before returning. Wait outside
+                        // SQLite and reuse the remote snapshot, with fresh local
+                        // eligibility, bindings and fingerprint checks.
+                        guard !cancellation.isCancelled, lineageRetries < 3 else {
+                            throw SeedVerificationError.cancelled
+                        }
+                        lineageRetries += 1
+                        state.phase="Attesa sicurezza storico rinomine"; report(force:true)
+                    }
                 }
-                try journal.observeUnqueuedAuditLineage(items, mapping: pair.mapping,
-                    sourceBinding: sourceBinding, targetBinding: targetBinding,
-                    cutoff: shadowCutoff, shouldContinue: { cancellation.mayCommit })
             }
         }
         state.phase="Salvataggio operazioni nel database · completato"; report(force:true)

@@ -104,8 +104,14 @@ final class SourceNameLineageStoreTests: XCTestCase {
             let batch = try XCTUnwrap(try SourceNameLineageStore.batch(db,key:.init(initial),create:true))
             let first = try batch.write(record:initial,expectedRevision:nil)
             XCTAssertFalse(try batch.hasHold(initial))
+            let before = try batch.readForAudit(key:.init(initial))
+            XCTAssertEqual(before.0,first)
+            XCTAssertFalse(before.1)
             try batch.protectRename(initial)
             XCTAssertTrue(try batch.hasHold(initial))
+            let after = try batch.readForAudit(key:.init(initial))
+            XCTAssertEqual(after.0,first)
+            XCTAssertTrue(after.1)
             var changed = initial
             changed.publicationStarted()
             XCTAssertThrowsError(try batch.write(record:changed,expectedRevision:nil)) {

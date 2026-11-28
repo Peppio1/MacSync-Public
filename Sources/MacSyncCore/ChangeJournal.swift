@@ -1418,7 +1418,8 @@ public final class ChangeJournal {
     /// No target filesystem access. Newer/pending events take precedence.
     func observeUnqueuedAuditLineage(_ items: [TrackedItem], mapping: MountedFolderMapping,
                                       sourceBinding: String, targetBinding: String,
-                                      cutoff: Int64, shouldContinue: () -> Bool) throws {
+                                      cutoff: Int64, shouldContinue: () -> Bool,
+                                      onProgress: (Int,Int) -> Void = {_,_ in}) throws {
         guard experimentalSourceNameLineage, !items.isEmpty, let connection else { return }
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
@@ -1454,13 +1455,15 @@ public final class ChangeJournal {
                     WHERE u.root_id=?1 AND (u.scope='root' OR EXISTS(SELECT 1 FROM change_queue q WHERE q.id=u.job_id AND q.relative_path=?2)));
                 """)
             defer { sqlite3_finalize(eligibility) }
+            onProgress(0,items.count)
             var batch: SourceNameLineageStore.Batch?
             var counts: [SourceNameLineage.Identity: Int] = [:]
             for item in items {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 if let identity = item.sourceLineageIdentity { counts[identity, default: 0] += 1 }
             }
-            for item in items {
+            for (index,item) in items.enumerated() {
+                if index > 0 && index % 256 == 0 { onProgress(index,items.count) }
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 guard let identity = item.sourceLineageIdentity, counts[identity] == 1,
                       let fingerprint = item.verificationFingerprint,
@@ -1471,14 +1474,14 @@ public final class ChangeJournal {
                 let key = SourceNameLineageStore.Key(initial)
                 if batch == nil { batch = try SourceNameLineageStore.batch(connection,key:key,create:true) }
                 guard let batch else { throw databaseFailure() }
-                let prior = try batch.read(key:key)
+                let (prior,hasHold) = try batch.readForAudit(key:key)
                 if let prior {
                     guard prior.record.currentPath.utf8.elementsEqual(item.relativePath.utf8),
                           !prior.record.uncertainPublication else { continue }
                     // Ordinary unchanged recognized entries need no writes or
                     // fresh stat. This is historical evidence, not permission.
                     if prior.record.recognizedPaths.contains(where:{$0.utf8.elementsEqual(item.relativePath.utf8)}),
-                       try !batch.hasHold(prior.record) { continue }
+                       !hasHold { continue }
                 }
                 sqlite3_reset(eligibility); sqlite3_clear_bindings(eligibility)
                 try bind(mapping.rootID,at:1,in:eligibility)

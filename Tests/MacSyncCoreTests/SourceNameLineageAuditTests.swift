@@ -65,6 +65,59 @@ final class SourceNameLineageAuditTests: XCTestCase {
         print("LINEAGE_UNQUEUED baseline=\(baseline.seconds) shadow=\(shadow.seconds) target_bytes_read=\(shadow.bytesRead)")
     }
 
+    func testLineageCommitRetriesOnTransientMonitorGateAndHonorsStop() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        defer { try? fm.removeItem(at:base) }
+        let source = base.appendingPathComponent("source"), target = base.appendingPathComponent("target")
+        let fixed = Date(timeIntervalSince1970:1_700_000_000)
+        for root in [source,target] {
+            try fm.createDirectory(at:root,withIntermediateDirectories:true)
+            try Data([1]).write(to:root.appendingPathComponent("photo.jpg"))
+            try fm.setAttributes([.modificationDate:fixed],ofItemAtPath:root.appendingPathComponent("photo.jpg").path)
+        }
+        let path = base.appendingPathComponent("state.sqlite").path
+        let journal = try ChangeJournal(path:path)
+        let inventory = try LocalInventory(path:path)
+        _ = try inventory.reconcile(rootID:"photos",root:source,origin:.initialInventory)
+        let map = try MountedFolderMapping(rootID:"photos",source:source,target:target)
+        try journal.verifyDirectoryBindings([map],allowNewTarget:true)
+        journal.experimentalSourceNameLineage = true
+        let audit = try ArchiveAudit(journal:journal,mappings:[map])
+        let gate = MonitorSafetyGate()
+        let generation = gate.invalidate()
+        gate.setReady(true,generation:generation)
+        let token = try XCTUnwrap(gate.beginAudit())
+        let cancellation = SeedVerificationCancellation(shouldContinue:{gate.auditBlockReason(token) == nil},
+            commitAllowed:{gate.auditCommitAllowed(token)})
+        var attempts = 0
+        let report = try audit.run(mode:.quick,repair:true,cancellation:cancellation,progress:{ p in
+            guard p.phase == "Salvataggio storico rinomine · 0/1" else { return }
+            attempts += 1
+            if attempts == 1 {
+                gate.beginReconciliation(generation:generation)
+                DispatchQueue.global(qos:.utility).asyncAfter(deadline:.now()+0.08) {
+                    gate.setReady(true,generation:generation)
+                }
+            }
+        })
+        XCTAssertEqual(attempts,2)
+        XCTAssertEqual(report.bytesRead,0)
+        XCTAssertTrue(try journal.pending().isEmpty)
+        let stop = SeedVerificationCancellation()
+        var stopped = false
+        XCTAssertThrowsError(try audit.run(mode:.quick,repair:true,cancellation:stop,progress:{ p in
+            if p.phase == "Salvataggio storico rinomine · 0/1" {
+                stopped = true
+                stop.cancel()
+            }
+        })) { error in
+            XCTAssertEqual(error as? SeedVerificationError,.cancelled)
+        }
+        XCTAssertTrue(stopped)
+        XCTAssertTrue(try journal.pending().isEmpty)
+    }
+
     func testRealAcceptedQuickMatchesOnlyAndAtomicCancellation() throws {
         let fm = FileManager.default
         let base = fm.temporaryDirectory.appendingPathComponent("MacSync-lineage-audit-" + UUID().uuidString)

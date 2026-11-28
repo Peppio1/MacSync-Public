@@ -380,6 +380,7 @@ enum SourceNameLineageStore {
         private let protectionAvailable: Bool
         private var holdQuery: OpaquePointer?
         private var holdExistsQuery: OpaquePointer?
+        private var auditQuery: OpaquePointer?
         private let decoder = JSONDecoder()
         private let encoder = JSONEncoder()
 
@@ -414,6 +415,7 @@ enum SourceNameLineageStore {
             sqlite3_finalize(upsert)
             if let holdQuery { sqlite3_finalize(holdQuery) }
             if let holdExistsQuery { sqlite3_finalize(holdExistsQuery) }
+            if let auditQuery { sqlite3_finalize(auditQuery) }
         }
 
         private func verify(_ key: Key) throws {
@@ -428,11 +430,32 @@ enum SourceNameLineageStore {
         }
 
         func read(key: Key) throws -> Versioned? {
+            try readRow(key:key,statement:query,includeHold:false).0
+        }
+
+        // A single indexed lookup for ordinary audit observations. Keep the
+        // full record validation; only avoid a second lookup for hold status.
+        func readForAudit(key: Key) throws -> (Versioned?,Bool) {
+            guard protectionAvailable else { return (try read(key:key),false) }
+            if auditQuery == nil {
+                auditQuery = try prepare(db, """
+                    SELECT i.current_path,i.revision,i.evidence,i.uncertain,i.recognized_paths,
+                           EXISTS(SELECT 1 FROM source_lineage_hold h
+                                  WHERE h.mapping_id=i.mapping_id AND h.identity=i.identity)
+                    FROM source_lineage_index i WHERE i.mapping_id=? AND i.identity=?;
+                    """)
+            }
+            guard let auditQuery else { throw Failure.invalid }
+            return try readRow(key:key,statement:auditQuery,includeHold:true)
+        }
+
+        private func readRow(key:Key,statement:OpaquePointer,includeHold:Bool) throws -> (Versioned?,Bool) {
+            let query = statement
             reset(query)
             defer { reset(query) }
             try bindIdentity(key, query)
             let rc = sqlite3_step(query)
-            if rc == SQLITE_DONE { return nil }
+            if rc == SQLITE_DONE { return (nil,false) }
             guard rc == SQLITE_ROW else { throw failure(db) }
             let revision = sqlite3_column_int64(query, 1)
             let uncertain = sqlite3_column_int(query, 3)
@@ -459,7 +482,7 @@ enum SourceNameLineageStore {
                 path: exactPath, evidence: evidence,
                 recognizedPaths: paths, uncertainPublication: uncertain == 1)
             try validate(record)
-            return Versioned(record: record, revision: revision)
+            return (Versioned(record: record, revision: revision),includeHold && sqlite3_column_int(query,5) != 0)
         }
 
         func rememberInvalidObservation(_ record: SourceNameLineage.Record) throws {
