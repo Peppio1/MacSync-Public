@@ -832,10 +832,24 @@ public final class ArchiveAudit {
                 let allMatching=pair.source.count==pair.target.count &&
                     !findings.contains(where:{$0.rootID==pair.mapping.rootID &&
                         ($0.kind != .matching || !WindowsPathSafety.validRelativePath($0.relativePath))})
-                try journal.finishSelectiveAudit(mapping:pair.mapping,sourceBinding:src,targetBinding:dst,
-                    sourceRows:Array(pair.source.values),targetRows:Array(pair.target.values),
-                    allMatching:allMatching,snapshot:selectiveSnapshots[pair.mapping.rootID],
-                    shouldContinue:{cancellation.mayCommit})
+                var retries=0
+                while true {
+                    do {
+                        try journal.finishSelectiveAudit(mapping:pair.mapping,sourceBinding:src,targetBinding:dst,
+                            sourceRows:Array(pair.source.values),targetRows:Array(pair.target.values),
+                            allMatching:allMatching,snapshot:selectiveSnapshots[pair.mapping.rootID],
+                            shouldContinue:{cancellation.mayCommit})
+                        break
+                    } catch SeedVerificationError.cancelled {
+                        guard !cancellation.isCancelled,retries<3,
+                              cancellation.awaitCommitWindow(onWaiting:{
+                                  state.phase="Attesa sicurezza eccezioni";report(force:true)
+                              }) else { throw SeedVerificationError.cancelled }
+                        retries+=1
+                        guard try DirectoryBinding.encoded(pair.mapping.source)==src,
+                              try DirectoryBinding.encoded(pair.mapping.target)==dst else { throw MountedCopyError.volumeChanged }
+                    }
+                }
             }
         }
         state.phase="Salvataggio operazioni nel database · completato"; report(force:true)

@@ -324,6 +324,85 @@ final class SelectiveNameExceptionTests:XCTestCase {
         }
     }
 
+    func testPersistedSelectiveModeWithNativeFSEventsAndRestart()throws {
+        try lab { source,target,path,_,_ in
+            let ready=expectation(description:"Monitor ready")
+            ready.assertForOverFulfill=false
+            let monitor=LocalMonitorService { update in
+                if update.monitoring { ready.fulfill() }
+            }
+            monitor.start(roots:[MonitorRoot(id:"photos",url:source)],databasePath:path)
+            defer {
+                monitor.stop()
+                let stopped=expectation(description:"Monitor stopped")
+                monitor.afterStopped{stopped.fulfill()}
+                wait(for:[stopped],timeout:12)
+            }
+            wait(for:[ready],timeout:15)
+            func eventually(_ query:String,_ expected:Int64)throws {
+                let deadline=Date().addingTimeInterval(15)
+                repeat {
+                    if (try? scalar(path,query))==expected { return }
+                    Thread.sleep(forTimeInterval:0.1)
+                } while Date()<deadline
+                XCTAssertEqual(try scalar(path,query),expected)
+            }
+            let original=source.appendingPathComponent("phone"),bad=source.appendingPathComponent("phone.")
+            try FileManager.default.moveItem(at:original,to:bad)
+            try eventually("SELECT COUNT(*) FROM selective_name_exception WHERE current_path='phone.';",1)
+            XCTAssertGreaterThan(try scalar(path,"SELECT COUNT(*) FROM selective_name_guard;"),0)
+            try FileManager.default.moveItem(at:bad,to:original)
+            try eventually("SELECT COUNT(*) FROM selective_name_exception WHERE original_path='phone' AND state='returned';",1)
+            XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent("phone/sub/photo-0.jpg")),Data([0]))
+        }
+    }
+
+    func testIntelligentAuditDoesNotConsumeNewerSourceJob()throws {
+        try lab { source,target,_,inventory,journal in
+            let file=source.appendingPathComponent("phone/sub/photo-0.jpg")
+            try Data([44]).write(to:file)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:file,eventID:1)
+            let before=try journal.pending()
+            let map=try MountedFolderMapping(rootID:"photos",source:source,target:target)
+            _=try ArchiveAudit(journal:journal,mappings:[map]).run(mode:.intelligent,repair:true)
+            XCTAssertTrue(try journal.pending().contains{$0.id==before.first?.id})
+            XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent("phone/sub/photo-0.jpg")),Data([0]))
+        }
+    }
+
+    func testRepeated1200ManualCorrectionsPreserveNewFiles()throws {
+        guard ProcessInfo.processInfo.environment["MACSYNC_SELECTIVE_BULK"]=="1" else { throw XCTSkip("Bulk selective lab opt-in") }
+        try lab { source,_,path,inventory,journal in
+            let fm=FileManager.default
+            for batch in 0..<2 {
+                let root=source.appendingPathComponent("batch-\(batch)")
+                try fm.createDirectory(at:root,withIntermediateDirectories:false)
+                // Ensure the batch root is known before creating new
+                // incompatible file identities; only these may be retired.
+                _=try inventory.reconcile(rootID:"photos",root:source,subtree:root,eventID:UInt64(batch*3+1))
+                Thread.sleep(forTimeInterval:0.03)
+                let start=ProcessInfo.processInfo.systemUptime
+                for index in 0..<1200 {
+                    try Data("batch-\(batch)-\(index)".utf8).write(to:root.appendingPathComponent("photo-\(index).jpg."))
+                }
+                _=try inventory.reconcile(rootID:"photos",root:source,subtree:root,eventID:UInt64(batch*3+2))
+                for index in 0..<1200 {
+                    try fm.moveItem(at:root.appendingPathComponent("photo-\(index).jpg."),to:root.appendingPathComponent("photo-\(index).jpg"))
+                }
+                _=try inventory.reconcile(rootID:"photos",root:source,subtree:root,eventID:UInt64(batch*3+3))
+                XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM change_queue WHERE completed=0 AND relative_path LIKE 'batch-\(batch)/%' AND kind='upsert';"),1200)
+                XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM change_queue WHERE completed=0 AND relative_path LIKE 'batch-\(batch)/%' AND kind='delete';"),0)
+                for index in 0..<1200 {
+                    XCTAssertEqual(try Data(contentsOf:root.appendingPathComponent("photo-\(index).jpg")),Data("batch-\(batch)-\(index)".utf8))
+                }
+                print("SELECTIVE_BULK batch=\(batch+1) names=1200 seconds=\(ProcessInfo.processInfo.systemUptime-start)")
+            }
+            let reopened=try ChangeJournal(path:path)
+            XCTAssertEqual(try reopened.pending(limit:10000).filter{$0.kind == .upsert && $0.relativePath.hasPrefix("batch-")}.count,2402)
+            XCTAssertEqual(try journal.pending(limit:10000).filter{$0.kind == .delete}.count,0)
+        }
+    }
+
     func testNewInvalidAndRollbackRetainEvidenceWithoutAssumingRemoteAbsence()throws {
         try lab { source,_,path,inventory,journal in
             let fm=FileManager.default

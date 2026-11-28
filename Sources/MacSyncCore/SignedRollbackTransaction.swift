@@ -66,7 +66,7 @@ public enum SignedRollbackTransaction {
         guard try scalar(db,"SELECT COUNT(*) FROM change_queue WHERE kind NOT IN ('upsert','delete') OR origin NOT IN ('initial_inventory','source_monitor','archive_audit','destination_rebind','legacy_unknown');")==0 else {
             throw ApplicationRollback.Failure("Operazioni in coda di formato non compatibile.")
         }
-        if !allowProtectedDeletions,try SelectiveNameExceptionStore.hasExceptions(db) {
+        if !allowProtectedDeletions,try SelectiveNameExceptionStore.hasRollbackProtection(db) {
             throw ApplicationRollback.Failure("Eccezioni di rinomina ancora protette.")
         }
         if !allowProtectedDeletions,try SourceNameLineageStore.protectionInstalled(db) {

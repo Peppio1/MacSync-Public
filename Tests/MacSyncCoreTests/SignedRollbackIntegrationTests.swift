@@ -42,10 +42,29 @@ final class SignedRollbackIntegrationTests:XCTestCase {
         let coordinator=UpdateRecoveryCoordinator(root:state,allowsLocation:{$0.path==app.path})
         let db=coordinator.database
         try Data("photo".utf8).write(to:source.appendingPathComponent("photo.jpg"))
-        _ = try LocalInventory(path:db.path).reconcile(rootID:"photos",root:source)
+        let selective=ProcessInfo.processInfo.environment["MACSYNC_SELECTIVE_SIGNED_ROLLBACK"]=="1"
+        let inventory=try LocalInventory(path:db.path)
+        if selective {
+            inventory.experimentalSourceNameLineage=false
+            inventory.experimentalLineageQueueProtection=false
+            inventory.experimentalSelectiveNameExceptions=true
+        }
         let journal=try ChangeJournal(path:db.path)
+        _=try inventory.reconcile(rootID:"photos",root:source)
+        if selective {
+            let target=state.appendingPathComponent("target")
+            try fm.createDirectory(at:target,withIntermediateDirectories:false)
+            let map=try MountedFolderMapping(rootID:"photos",source:source,target:target)
+            try journal.verifyDirectoryBindings([map],allowNewTarget:true)
+            try Data("protected".utf8).write(to:source.appendingPathComponent("held.jpg"))
+            _=try inventory.reconcile(rootID:"photos",root:source,eventID:1)
+            try fm.moveItem(at:source.appendingPathComponent("held.jpg"),to:source.appendingPathComponent("held.jpg."))
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:source.appendingPathComponent("held.jpg"),eventID:2)
+            XCTAssertTrue(try journal.pending().contains{$0.relativePath=="held.jpg" && $0.kind == .delete})
+        }
         _ = try journal.enqueue(rootID:"photos",relativePath:"photo.jpg",kind:.upsert,origin:.sourceMonitor)
         let before=try journal.pending()
+        let expected=selective ? before.filter{$0.kind != .delete}:before
         defaults.set(true,forKey:"MacSync.autoCopiesEnabled.v2")
         defaults.set("fixture-consent",forKey:"MacSync.mirrorAuthorization.v2")
         defaults.set("preserve",forKey:"MacSync.fixture")
@@ -74,7 +93,13 @@ final class SignedRollbackIntegrationTests:XCTestCase {
                 defaults:defaults,allowsLocation:{$0.path==app.path})
             try package.validateApplication(app)
             try ApplicationRollback.validateBundle(snapshot.appendingPathComponent("MacSync.app"),version:installed)
-            XCTAssertEqual(try ChangeJournal(path:db.path).pending(),before)
+            XCTAssertEqual(try ChangeJournal(path:db.path).pending(),expected)
+            if selective {
+                // A verified backup retains original queue and protected
+                // evidence. The predecessor has no new guard schema.
+                XCTAssertEqual(try ChangeJournal(path:savedDB.path,readOnly:true).pending(),before)
+                XCTAssertNoThrow(try SignedRollbackTransaction.validateCompatibility(database:db))
+            }
             XCTAssertEqual(try ApplicationRollback.databaseDigest(savedDB,scratch:state),savedDigest)
             XCTAssertFalse(defaults.bool(forKey:"MacSync.autoCopiesEnabled.v2"))
             XCTAssertNil(defaults.object(forKey:"MacSync.mirrorAuthorization.v2"))

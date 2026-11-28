@@ -110,6 +110,16 @@ enum SelectiveNameExceptionStore {
                 delete_job INTEGER UNIQUE,restore_job INTEGER UNIQUE,
                 PRIMARY KEY(exception_id,path)
             ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS selective_retired_invalid(
+                exception_id INTEGER NOT NULL,path TEXT NOT NULL,identity BLOB NOT NULL,
+                PRIMARY KEY(exception_id,path)
+            ) WITHOUT ROWID;
+            -- A literal name may be hidden by SMB. This quarantine is not
+            -- an active rename exception and cannot veto valid paths.
+            CREATE TABLE IF NOT EXISTS selective_smb_quarantine(
+                root_id TEXT NOT NULL,path TEXT NOT NULL,folded TEXT NOT NULL,
+                PRIMARY KEY(root_id,path)
+            ) WITHOUT ROWID;
             """)
     }
 
@@ -385,6 +395,20 @@ enum SelectiveNameExceptionStore {
         let next=sqlite3_step(q)
         if next==SQLITE_ROW { return false }
         guard next==SQLITE_DONE else { throw fail(db) }
+        // Remember only the root spelling of an exception whose exact
+        // speculative job was retired. This is local-only provenance,
+        // never evidence that a legacy server-side object does not exist.
+        let receipt=try prepare(db,"""
+            INSERT OR IGNORE INTO selective_retired_invalid(exception_id,path,identity)
+            SELECT e.id,g.path,e.identity FROM selective_name_exception e
+            JOIN selective_name_guard g ON g.exception_id=e.id AND g.root_id=e.root_id
+            JOIN directory_bindings t ON t.root_id=e.root_id AND t.role='target' AND t.stamp=e.target_binding
+            WHERE e.root_id=?1 AND e.source_binding=?2 AND g.path=?3 AND e.identity=?4;
+            """)
+        defer { sqlite3_finalize(receipt) }
+        try bind(root,1,receipt,db);try bind(source,2,receipt,db)
+        try bind(old.relativePath,3,receipt,db);try bind(identity,4,receipt,db)
+        guard sqlite3_step(receipt)==SQLITE_DONE else { throw fail(db) }
         for sql in ["DELETE FROM blocked_name_jobs WHERE job_id=?;",
                     "DELETE FROM selective_invalid_upload WHERE job_id=?;",
                     "DELETE FROM change_queue WHERE id=? AND completed=0 AND kind='upsert' AND origin='source_monitor';"] {
@@ -411,7 +435,67 @@ enum SelectiveNameExceptionStore {
         try bind(root,1,q,db);try bind(path,2,q,db);try bind(fold(path),3,q,db)
         let rc=sqlite3_step(q)
         guard rc==SQLITE_ROW || rc==SQLITE_DONE else { throw fail(db) }
+        if rc==SQLITE_ROW { return true }
+        // Never allow an exceptional literal deletion on the strength of
+        // a resolved local rename. Valid paths still use the ordinary
+        // mirror identity, collision, nonrecursive and authorization gates.
+        guard !WindowsPathSafety.validRelativePath(path),try quarantineInstalled(db) else { return false }
+        let held=try prepare(db,"""
+            SELECT 1 FROM selective_smb_quarantine WHERE root_id=?1 AND
+              (path=?2 OR instr(path,?2||'/')=1 OR instr(?2,path||'/')=1
+               OR folded=?3 OR instr(folded,?3||'/')=1 OR instr(?3,folded||'/')=1)
+            LIMIT 1;
+            """)
+        defer { sqlite3_finalize(held) }
+        try bind(root,1,held,db);try bind(path,2,held,db);try bind(fold(path),3,held,db)
+        let result=sqlite3_step(held)
+        guard result==SQLITE_ROW || result==SQLITE_DONE else { throw fail(db) }
+        return result==SQLITE_ROW
+    }
+
+    private static func quarantineInstalled(_ db:OpaquePointer)throws->Bool {
+        let q=try prepare(db,"SELECT 1 FROM sqlite_master WHERE type='table' AND name='selective_smb_quarantine';")
+        defer { sqlite3_finalize(q) }
+        let rc=sqlite3_step(q)
+        guard rc==SQLITE_ROW || rc==SQLITE_DONE else { throw fail(db) }
         return rc==SQLITE_ROW
+    }
+
+    static func hasRollbackProtection(_ db:OpaquePointer)throws->Bool {
+        if try hasExceptions(db) { return true }
+        guard try quarantineInstalled(db) else { return false }
+        let q=try prepare(db,"SELECT 1 FROM selective_smb_quarantine LIMIT 1;")
+        defer { sqlite3_finalize(q) }
+        let rc=sqlite3_step(q)
+        guard rc==SQLITE_ROW || rc==SQLITE_DONE else { throw fail(db) }
+        return rc==SQLITE_ROW
+    }
+
+    /// Verified same-object SMB remount only; invoked inside the existing
+    /// atomic directory binding migration. A certificate is not portable.
+    static func rebindVerifiedTarget(_ db:OpaquePointer,root:String,old:String,new:String)throws {
+        guard try installed(db) else { return }
+        guard sqlite3_get_autocommit(db)==0 else { throw SourceNameLineageStore.Failure.transactionRequired }
+        try install(db)
+        let conflict=try prepare(db,"SELECT 1 FROM selective_name_exception WHERE root_id=?1 AND target_binding=?2 LIMIT 1;")
+        defer { sqlite3_finalize(conflict) }
+        try bind(root,1,conflict,db);try bind(new,2,conflict,db)
+        let rc=sqlite3_step(conflict)
+        if rc==SQLITE_ROW { throw SourceNameLineageStore.Failure.invalid }
+        guard rc==SQLITE_DONE else { throw fail(db) }
+        for table in ["selective_name_exception","selective_invalid_upload"] {
+            let update=try prepare(db,"UPDATE "+table+" SET target_binding=?1 WHERE root_id=?2 AND target_binding=?3;")
+            defer { sqlite3_finalize(update) }
+            try bind(new,1,update,db);try bind(root,2,update,db);try bind(old,3,update,db)
+            guard sqlite3_step(update)==SQLITE_DONE else { throw fail(db) }
+        }
+        // Do not carry zero-copy eligibility across remount; keep all
+        // existing deletion vetoes, and reestablish current proof by audit.
+        let remove=try prepare(db,"DELETE FROM selective_restore_proof WHERE exception_id IN (SELECT id FROM selective_name_exception WHERE root_id=?);")
+        defer { sqlite3_finalize(remove) }
+        try bind(root,1,remove,db)
+        guard sqlite3_step(remove)==SQLITE_DONE else { throw fail(db) }
+        try invalidateCertificate(db,root:root)
     }
 
     private struct Entry {
@@ -819,7 +903,7 @@ enum SelectiveNameExceptionStore {
             guard absent,count>0 else { continue }
             // Remove ONLY this exception's veto. Normal mirror rules,
             // copy-first, current job validation and other guards still apply.
-            for table in ["selective_restore_proof","selective_name_detached","selective_name_guard","selective_name_exception"] {
+            for table in ["selective_retired_invalid","selective_restore_proof","selective_name_detached","selective_name_guard","selective_name_exception"] {
                 let column=table=="selective_name_exception" ? "id":"exception_id"
                 let remove=try prepare(db,"DELETE FROM "+table+" WHERE "+column+"=?;")
                 defer { sqlite3_finalize(remove) }
@@ -828,13 +912,15 @@ enum SelectiveNameExceptionStore {
         }
     }
 
-    static func resolveAuditedNativeRestorations(_ db:OpaquePointer,root:String,
+    static func resolveAuditedRestorations(_ db:OpaquePointer,root:String,
                     source:String,target:String,sourceRows:[TrackedItem],targetRows:[TrackedItem],
-                    shouldContinue:()->Bool)throws {
+                    nativeTarget:Bool,shouldContinue:()->Bool)throws {
         guard try installed(db),try restorationInstalled(db),sqlite3_get_autocommit(db)==0,
               try !rootUncertain(db,root:root) else { return }
-        // Caller proved a fully matching, current audit, no pending jobs and
-        // a native target. Require exact root identity in live inventory.
+        // Caller proved a fully matching, current audit, no pending jobs
+        // and same bindings. Require exact root identity in live inventory.
+        // On SMB, only a returned original with recorded local-only
+        // excursions may release its valid path; literal names quarantine.
         let q=try prepare(db,"""
             SELECT e.id,e.original_path,e.current_path FROM selective_name_exception e
             JOIN file_inventory f ON f.root_id=e.root_id AND f.relative_path=e.current_path
@@ -856,17 +942,39 @@ enum SelectiveNameExceptionStore {
         guard !entries.isEmpty else { return }
         let sourcePaths=Set(sourceRows.map{Data($0.relativePath.utf8)})
         let targetPaths=Set(targetRows.map{Data($0.relativePath.utf8)})
-        let guards=try prepare(db,"SELECT path FROM selective_name_guard WHERE exception_id=?;")
+        let guards=try prepare(db,"""
+            SELECT g.path,EXISTS(SELECT 1 FROM selective_retired_invalid i
+                JOIN selective_name_exception e ON e.id=i.exception_id
+                WHERE i.exception_id=g.exception_id AND i.path=g.path AND i.identity=e.identity)
+            FROM selective_name_guard g WHERE g.exception_id=?;
+            """)
         defer { sqlite3_finalize(guards) }
+        let originalProof=try prepare(db,"""
+            SELECT 1 FROM selective_restore_proof p
+            JOIN selective_name_exception e ON e.id=p.exception_id
+            JOIN change_queue c ON c.id=p.restore_job AND c.root_id=e.root_id AND c.relative_path=p.path
+            WHERE p.exception_id=?1 AND p.path=e.original_path AND c.completed=1 AND c.kind='upsert';
+            """)
+        defer { sqlite3_finalize(originalProof) }
+        let quarantine=try prepare(db,"INSERT OR IGNORE INTO selective_smb_quarantine(root_id,path,folded) VALUES(?,?,?);")
+        defer { sqlite3_finalize(quarantine) }
         for (id,original,current) in entries {
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             guard WindowsPathSafety.validRelativePath(current),
                   sourcePaths.contains(Data(current.utf8)),targetPaths.contains(Data(current.utf8)) else { continue }
-            // Native complete enumeration reveals literal spellings. Do not
-            // use this release path on SMB, where a legacy name may be hidden.
+            if !nativeTarget {
+                guard exact(original,current) else { continue }
+                sqlite3_reset(originalProof);sqlite3_clear_bindings(originalProof)
+                guard sqlite3_bind_int64(originalProof,1,id)==SQLITE_OK else { throw fail(db) }
+                let proof=sqlite3_step(originalProof)
+                guard proof==SQLITE_ROW || proof==SQLITE_DONE else { throw fail(db) }
+                guard proof==SQLITE_ROW else { continue }
+                sqlite3_reset(originalProof)
+            }
             sqlite3_reset(guards);sqlite3_clear_bindings(guards)
             guard sqlite3_bind_int64(guards,1,id)==SQLITE_OK else { throw fail(db) }
             var safe=true
+            var literalPaths:[String]=[]
             var step=sqlite3_step(guards)
             while step==SQLITE_ROW {
                 let path=try string(guards,0)
@@ -875,15 +983,26 @@ enum SelectiveNameExceptionStore {
                     if sourcePaths.contains(key) || targetPaths.contains(key) ||
                        sourcePaths.contains(where:{$0.starts(with:prefix)}) ||
                        targetPaths.contains(where:{$0.starts(with:prefix)}) { safe=false }
+                    if !nativeTarget {
+                        if WindowsPathSafety.validRelativePath(path) || sqlite3_column_int(guards,1) != 1 {
+                            safe=false
+                        } else { literalPaths.append(path) }
+                    }
                 }
                 step=sqlite3_step(guards)
             }
             guard step==SQLITE_DONE else { throw fail(db) }
             guard safe else { continue }
-            // A name reuse or overlapping unresolved exception must not
-            // lose its independent veto. Only remove this exact record.
-            _ = original
-            for table in ["selective_restore_proof","selective_name_detached","selective_name_guard","selective_name_exception"] {
+            // A hidden literal target name is NOT proved absent by SMB.
+            // Retain a separate veto for literal incompatible deletion,
+            // without blocking the verified compatible original forever.
+            for path in literalPaths {
+                sqlite3_reset(quarantine);sqlite3_clear_bindings(quarantine)
+                try bind(root,1,quarantine,db);try bind(path,2,quarantine,db);try bind(fold(path),3,quarantine,db)
+                guard sqlite3_step(quarantine)==SQLITE_DONE else { throw fail(db) }
+            }
+            // Independent exceptions retain their own vetoes.
+            for table in ["selective_retired_invalid","selective_restore_proof","selective_name_detached","selective_name_guard","selective_name_exception"] {
                 let column=table=="selective_name_exception" ? "id":"exception_id"
                 let remove=try prepare(db,"DELETE FROM "+table+" WHERE "+column+"=?;")
                 defer { sqlite3_finalize(remove) }
@@ -908,7 +1027,8 @@ enum SelectiveNameExceptionStore {
     static func prepareRollback(_ db:OpaquePointer,allowProtectedDeletions:Bool)throws {
         guard try installed(db) else { return }
         guard sqlite3_get_autocommit(db)==0 else { throw SourceNameLineageStore.Failure.transactionRequired }
-        if try hasExceptions(db) {
+        try installRestorationProof(db)
+        if try hasRollbackProtection(db) {
             guard allowProtectedDeletions else { throw ApplicationRollback.Failure("Eccezioni di rinomina ancora protette.") }
             try exec(db,"""
                 CREATE TABLE IF NOT EXISTS rollback_protected_deletions(
@@ -921,7 +1041,8 @@ enum SelectiveNameExceptionStore {
                        (julianday('now')-2440587.5)*86400.0
                 FROM change_queue q WHERE q.kind='delete'
                   AND (q.completed=0 OR EXISTS(SELECT 1 FROM retired_delete_evidence e WHERE e.job_id=q.id))
-                  AND EXISTS(SELECT 1 FROM selective_name_exception e WHERE e.root_id=q.root_id);
+                  AND (EXISTS(SELECT 1 FROM selective_name_exception e WHERE e.root_id=q.root_id)
+                       OR EXISTS(SELECT 1 FROM selective_smb_quarantine h WHERE h.root_id=q.root_id));
                 DELETE FROM retired_delete_evidence WHERE job_id IN (SELECT job_id FROM rollback_protected_deletions);
                 DELETE FROM blocked_name_jobs WHERE job_id IN (SELECT job_id FROM rollback_protected_deletions);
                 DELETE FROM change_queue WHERE id IN (SELECT job_id FROM rollback_protected_deletions);
@@ -929,6 +1050,6 @@ enum SelectiveNameExceptionStore {
                    VALUES(1,'Rollback: eccezioni rinomina conservate nel backup; cancellazioni sospese per verifica.');
                 """)
         }
-        try exec(db,"DROP TABLE IF EXISTS selective_clean_baseline; DROP TABLE IF EXISTS selective_restore_proof; DROP TABLE IF EXISTS selective_invalid_upload; DROP TABLE selective_name_detached; DROP TABLE selective_name_guard; DROP TABLE selective_name_exception; DROP INDEX idx_selective_live_identity;")
+        try exec(db,"DROP TABLE IF EXISTS selective_smb_quarantine; DROP TABLE IF EXISTS selective_retired_invalid; DROP TABLE IF EXISTS selective_clean_baseline; DROP TABLE IF EXISTS selective_restore_proof; DROP TABLE IF EXISTS selective_invalid_upload; DROP TABLE selective_name_detached; DROP TABLE selective_name_guard; DROP TABLE selective_name_exception; DROP INDEX idx_selective_live_identity;")
     }
 }

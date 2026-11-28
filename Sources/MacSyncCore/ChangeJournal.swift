@@ -991,6 +991,8 @@ public final class ChangeJournal {
                     if let connection {
                         try SourceNameLineageStore.rebindVerifiedTarget(connection,root:map.rootID,
                             old:String(decoding:data,as:UTF8.self),new:encoded)
+                        try SelectiveNameExceptionStore.rebindVerifiedTarget(connection,root:map.rootID,
+                            old:String(decoding:data,as:UTF8.self),new:encoded)
                     }
                 }
             }
@@ -2303,11 +2305,11 @@ public final class ChangeJournal {
                 try execute("COMMIT;");return
             }
             sqlite3_reset(q)
-            // Native target only: SMB enumeration is not literal proof
-            // for hidden incompatible legacy spellings.
-            if ["apfs","hfs"].contains(mapping.targetVolume.fileSystem.lowercased()) {
-                try SelectiveNameExceptionStore.resolveAuditedNativeRestorations(connection,root:mapping.rootID,
-                    source:sourceBinding,target:targetBinding,sourceRows:sourceRows,targetRows:targetRows,shouldContinue:shouldContinue)
+            let fs=mapping.targetVolume.fileSystem.lowercased()
+            if ["apfs","hfs","smbfs"].contains(fs) {
+                try SelectiveNameExceptionStore.resolveAuditedRestorations(connection,root:mapping.rootID,
+                    source:sourceBinding,target:targetBinding,sourceRows:sourceRows,targetRows:targetRows,
+                    nativeTarget:fs != "smbfs",shouldContinue:shouldContinue)
             }
             try SelectiveNameExceptionStore.certifyCleanBaseline(connection,root:mapping.rootID,
                 source:sourceBinding,target:targetBinding,snapshot:snapshot)

@@ -12,13 +12,15 @@ permissions:
 jobs:
   verify:
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
       - name: Validate selective capture and existing storage regressions
-        run: swift test -Xswiftc -warnings-as-errors --filter 'SelectiveNameExceptionTests|SourceNameLineageIntegratedLayoutTests|SourceNameLineageStoreTests|SourceNameLineageQueueTests|LocalInventoryTests|MirrorDeletionTests|ApplicationRollbackTests'
+        env:
+          MACSYNC_SELECTIVE_BULK: '1'
+        run: swift test -Xswiftc -warnings-as-errors --filter 'SelectiveNameExceptionTests|SourceNameLineageIntegratedLayoutTests|SourceNameLineageStoreTests|SourceNameLineageQueueTests|SourceNameLineageAuditTests|SourceNameLineageTransferTests|LocalInventoryTests|MirrorDeletionTests|ApplicationRollbackTests|FSEventsWatcherTests|SignedUpdatePolicyTests'
       - name: Same-runner baseline and three layouts
         env:
           MACSYNC_LINEAGE_PERFORMANCE: '1'
@@ -32,3 +34,27 @@ jobs:
           MACSYNC_INTERNAL_INVENTORY_LINEAGE=0 MACSYNC_SELECTIVE_LAB=0 swift test -Xswiftc -warnings-as-errors --filter SourceNameLineagePerformanceTests
       - name: Compile app and rollback helper
         run: swift build -Xswiftc -warnings-as-errors
+
+      - name: Verify published predecessor rollback with selective database
+        env:
+          MACSYNC_V0195_ROLLBACK_LAB: '1'
+          MACSYNC_SELECTIVE_SIGNED_ROLLBACK: '1'
+        run: swift test -Xswiftc -warnings-as-errors --filter SignedRollbackIntegrationTests
+      - name: Prepare pinned Rclone helper
+        run: |
+          bash Packaging/prepare-rclone.sh "$RUNNER_TEMP/macsync-rclone"
+          echo "MACSYNC_TEST_RCLONE=$RUNNER_TEMP/macsync-rclone/rclone" >> "$GITHUB_ENV"
+      - name: Install disposable loopback Samba
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
+        run: brew install samba
+      - name: Mount genuine SMB filesystem
+        run: bash scripts/ci/prepare-local-samba.sh
+      - name: Validate selective restoration and existing SMB protections
+        env:
+          MACSYNC_V0192_REQUIRE_SMB: '1'
+        run: swift test -Xswiftc -warnings-as-errors --filter 'SelectiveNameExceptionSMBTests|SourceNameLineageSMBTests|SMBV0192DeletionValidationTests'
+      - name: Cleanup disposable share
+        if: always()
+        run: bash scripts/ci/cleanup-local-samba.sh
