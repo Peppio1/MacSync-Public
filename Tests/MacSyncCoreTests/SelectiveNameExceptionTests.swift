@@ -74,6 +74,13 @@ final class SelectiveNameExceptionTests:XCTestCase {
             _=try reopened.reconcile(rootID:"photos",root:source,subtree:next,eventID:3)
             _=try reopened.reconcile(rootID:"photos",root:source,subtree:bad,eventID:4)
             XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception WHERE original_path='phone' AND current_path='phone ';"),1)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception;"),1)
+            // Repeat late and duplicate old-path observations. They may not
+            // fork a root exception or discard the most recent association.
+            _=try reopened.reconcile(rootID:"photos",root:source,subtree:bad,eventID:4)
+            _=try reopened.reconcile(rootID:"photos",root:source,subtree:original,eventID:4)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception;"),1)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception WHERE current_path='phone ';"),1)
             // Content edits and ordinary queue semantics remain authoritative.
             try Data([88,99]).write(to:next.appendingPathComponent("sub/photo-0.jpg"))
             _=try reopened.reconcile(rootID:"photos",root:source,subtree:next,eventID:5)
@@ -81,6 +88,20 @@ final class SelectiveNameExceptionTests:XCTestCase {
             _=try reopened.reconcile(rootID:"photos",root:source,subtree:next,eventID:6)
             _=try reopened.reconcile(rootID:"photos",root:source,subtree:original,eventID:7)
             XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception WHERE original_path='phone' AND state='returned';"),1)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception;"),1)
+            XCTAssertFalse(try journal.pending(limit:100).contains{$0.relativePath=="phone" && $0.kind == .delete})
+            var handle:OpaquePointer?
+            XCTAssertEqual(sqlite3_open_v2(path,&handle,SQLITE_OPEN_READONLY,nil),SQLITE_OK)
+            let db=try XCTUnwrap(handle)
+            defer { sqlite3_close(db) }
+            XCTAssertEqual(sqlite3_exec(db,"BEGIN;",nil,nil,nil),SQLITE_OK)
+            let summary=try XCTUnwrap(try SelectiveNameExceptionStore.restorationSummary(db,root:"photos",originalPath:"phone"))
+            XCTAssertEqual(summary.capturedFiles,8)
+            XCTAssertEqual(summary.unchangedMetadata,7)
+            XCTAssertEqual(summary.changedOrReplaced,1)
+            XCTAssertEqual(summary.absent,0)
+            XCTAssertEqual(summary.newFiles,0)
+            XCTAssertEqual(sqlite3_exec(db,"COMMIT;",nil,nil,nil),SQLITE_OK)
             XCTAssertTrue(try journal.pending(limit:100).contains{$0.relativePath=="phone/sub/photo-0.jpg" && $0.kind == .upsert})
             XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent("phone/sub/photo-0.jpg")),Data([0]))
             // Capture/veto only: never retire a hold or discard jobs on a
@@ -108,6 +129,79 @@ final class SelectiveNameExceptionTests:XCTestCase {
             XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception WHERE original_path='phone' AND current_path='phone?';"),1)
             XCTAssertTrue(try journal.pending(limit:100).contains{$0.relativePath=="phone/replacement.jpg" && $0.kind == .upsert})
             XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent("phone/sub/photo-0.jpg")),Data([0]))
+        }
+    }
+
+    func testConsecutiveNewFirstMovesAndReusedIntermediateSpelling()throws {
+        try lab { source,target,path,inventory,journal in
+            let fm=FileManager.default
+            let original=source.appendingPathComponent("phone")
+            let one=source.appendingPathComponent("phone.")
+            let two=source.appendingPathComponent("phone ")
+            let three=source.appendingPathComponent("phone?")
+            let moves=[(original,one),(one,two),(two,three)]
+            for (index,move) in moves.enumerated() {
+                try fm.moveItem(at:move.0,to:move.1)
+                _=try inventory.reconcile(rootID:"photos",root:source,subtree:move.1,eventID:UInt64(index*2+1))
+                _=try inventory.reconcile(rootID:"photos",root:source,subtree:move.0,eventID:UInt64(index*2+2))
+                XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception;"),1)
+                XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_detached;"),10)
+                for job in try journal.pending(limit:100) where job.kind == .delete {
+                    XCTAssertFalse(try journal.deletionIsCurrent(id:job.id,rootID:job.rootID,relativePath:job.relativePath))
+                }
+            }
+            try fm.createDirectory(at:one,withIntermediateDirectories:false)
+            try Data([99]).write(to:one.appendingPathComponent("other.jpg"))
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:one,eventID:7)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception;"),2)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception WHERE original_path='phone' AND current_path='phone?';"),1)
+            try fm.moveItem(at:three,to:original)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:original,eventID:8)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:three,eventID:9)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception WHERE original_path='phone' AND current_path='phone' AND state='returned';"),1)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception WHERE original_path='phone.' AND current_path='phone.';"),1)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception;"),2)
+            for k in 0..<8 {
+                XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent("phone/sub/photo-\(k).jpg")),Data([UInt8(k)]))
+            }
+        }
+    }
+
+    func testRestorationComparisonPreservesChangedRemovedAndAddedFiles()throws {
+        try lab { source,target,path,inventory,journal in
+            let fm=FileManager.default
+            let original=source.appendingPathComponent("phone"),bad=source.appendingPathComponent("phone.")
+            try fm.moveItem(at:original,to:bad)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:original,eventID:1)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:bad,eventID:2)
+            let sub=bad.appendingPathComponent("sub")
+            try Data([101,102]).write(to:sub.appendingPathComponent("photo-0.jpg"))
+            try fm.removeItem(at:sub.appendingPathComponent("photo-1.jpg"))
+            try Data([103]).write(to:sub.appendingPathComponent("new.jpg"))
+            try Data([104]).write(to:sub.appendingPathComponent("photo-2.jpg"),options:.atomic)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:bad,eventID:3)
+            try fm.moveItem(at:bad,to:original)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:bad,eventID:4)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:original,eventID:5)
+            var handle:OpaquePointer?
+            XCTAssertEqual(sqlite3_open_v2(path,&handle,SQLITE_OPEN_READONLY,nil),SQLITE_OK)
+            let db=try XCTUnwrap(handle)
+            defer { sqlite3_close(db) }
+            XCTAssertEqual(sqlite3_exec(db,"BEGIN;",nil,nil,nil),SQLITE_OK)
+            let summary=try XCTUnwrap(try SelectiveNameExceptionStore.restorationSummary(db,root:"photos",originalPath:"phone"))
+            XCTAssertEqual(summary.capturedFiles,8)
+            XCTAssertEqual(summary.unchangedMetadata,5)
+            XCTAssertEqual(summary.changedOrReplaced,2)
+            XCTAssertEqual(summary.absent,1)
+            XCTAssertEqual(summary.newFiles,1)
+            XCTAssertEqual(sqlite3_exec(db,"COMMIT;",nil,nil,nil),SQLITE_OK)
+            let jobs=try journal.pending(limit:100)
+            for name in ["photo-0.jpg","photo-2.jpg","new.jpg"] {
+                XCTAssertTrue(jobs.contains{$0.relativePath=="phone/sub/"+name && $0.kind == .upsert})
+            }
+            let deletion=try XCTUnwrap(jobs.first{$0.relativePath=="phone/sub/photo-1.jpg" && $0.kind == .delete})
+            XCTAssertFalse(try journal.deletionIsCurrent(id:deletion.id,rootID:"photos",relativePath:deletion.relativePath))
+            XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent("phone/sub/photo-1.jpg")),Data([1]))
         }
     }
 

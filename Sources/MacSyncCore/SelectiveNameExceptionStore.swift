@@ -134,9 +134,12 @@ enum SelectiveNameExceptionStore {
                     WHERE root_id=?1 AND source_binding=?2 AND target_binding=?3 AND identity=?4;
                     """)
                 byPath=try stmt("""
-                    SELECT id,original_path,current_path,kind FROM selective_name_exception
-                    WHERE root_id=?1 AND source_binding=?2 AND target_binding=?3
-                      AND (original_path=?5 OR current_path=?5) AND identity IS ?4;
+                    SELECT e.id,e.original_path,e.current_path,e.kind FROM selective_name_exception e
+                    WHERE e.root_id=?1 AND e.source_binding=?2 AND e.target_binding=?3
+                      AND e.identity IS ?4
+                      AND (e.original_path=?5 OR e.current_path=?5 OR EXISTS(
+                        SELECT 1 FROM selective_name_guard g WHERE g.exception_id=e.id
+                         AND g.root_id=e.root_id AND g.path=?5));
                     """)
                 liveIdentity=try stmt("""
                     SELECT relative_path,kind FROM file_inventory
@@ -235,17 +238,24 @@ enum SelectiveNameExceptionStore {
             }
             return Entry(id:id,original:path,current:current,kind:kind)
         }
-        func missing(path:String,identity:Data?,kind:String)throws->Entry {
+        func missing(path:String,identity:Data?,kind:String)throws->[Entry] {
             let exactMatches=try exactEntries(identity,path:path)
-            if exactMatches.count==1,let entry=exactMatches.first {
-                // New-path event may already have arrived. Do not lose that
-                // observation when the older spelling finally disappears.
-                if let current=entry.current,exact(current,path) {
-                    try update(entry,current:nil,state:"missing")
+            if !exactMatches.isEmpty {
+                // A late disappearance of ANY previously guarded spelling
+                // cannot reset the newer observation or fork the identity.
+                // Match exact path AND full identity in the same binding.
+                for entry in exactMatches {
+                    try protect(entry.id,path)
+                    let disappearingCurrent=entry.current.map{exact($0,path)} == true
+                    if exactMatches.count>1 {
+                        try update(entry,current:disappearingCurrent ? nil:entry.current,state:"ambiguous")
+                    } else if disappearingCurrent {
+                        try update(entry,current:nil,state:"missing")
+                    }
                 }
-                return entry
+                return exactMatches
             }
-            return try create(path:path,identity:identity,kind:kind,current:nil,state:exactMatches.isEmpty ? "missing":"ambiguous",capture:true)
+            return [try create(path:path,identity:identity,kind:kind,current:nil,state:"missing",capture:true)]
         }
         func observed(path:String,identity:Data?,kind:String,compatible:Bool,lookForMove:Bool)throws->Bool {
             if let identity,lookForMove {
@@ -261,18 +271,22 @@ enum SelectiveNameExceptionStore {
                 let old=try livePaths(identity).filter{!exact($0.0,path)}
                 if !old.isEmpty {
                     for (previous,previousKind) in old {
-                        let entry=try missing(path:previous,identity:identity,kind:previousKind)
-                        try update(entry,current:path,state:old.count>1 ? "ambiguous":(compatible ? "moved":"incompatible"))
+                        let entries=try missing(path:previous,identity:identity,kind:previousKind)
+                        for entry in entries {
+                            try update(entry,current:path,state:old.count>1 || entries.count>1 ? "ambiguous":(compatible ? "moved":"incompatible"))
+                        }
                     }
                     return true
                 }
             }
             if !compatible {
                 let entries=try exactEntries(identity,path:path)
-                if entries.count==1,let entry=entries.first {
-                    try update(entry,current:path,state:"incompatible")
+                if entries.isEmpty {
+                    _=try create(path:path,identity:identity,kind:kind,current:path,state:"incompatible",capture:false)
                 } else {
-                    _=try create(path:path,identity:identity,kind:kind,current:path,state:entries.isEmpty ? "incompatible":"ambiguous",capture:false)
+                    for entry in entries {
+                        try update(entry,current:path,state:entries.count==1 ? "incompatible":"ambiguous")
+                    }
                 }
                 return true
             }
@@ -339,6 +353,80 @@ enum SelectiveNameExceptionStore {
                 coveredNew.insert(Data(row.relativePath.utf8))
             }
         }
+    }
+
+    /// Local comparison of a restored subtree with the captured pre-rename
+    /// inventory. NOT a publication proof: the destination may have been
+    /// seeded manually or have pending writes. Do not retire a job/guard
+    /// using this summary alone. No filesystem or remote read.
+    struct RestorationSummary: Equatable, Sendable {
+        let capturedFiles:Int
+        let unchangedMetadata:Int
+        let changedOrReplaced:Int
+        let absent:Int
+        let newFiles:Int
+    }
+    static func restorationSummary(_ db:OpaquePointer,root:String,originalPath:String)throws->RestorationSummary? {
+        guard try installed(db) else { return nil }
+        let q=try prepare(db,"""
+            SELECT e.id,e.kind FROM selective_name_exception e
+            JOIN directory_bindings s ON s.root_id=e.root_id AND s.role='source' AND s.stamp=e.source_binding
+            JOIN directory_bindings t ON t.root_id=e.root_id AND t.role='target' AND t.stamp=e.target_binding
+            JOIN file_inventory f ON f.root_id=e.root_id AND f.relative_path=e.original_path
+              AND f.lineage_observed_identity=e.identity AND f.kind=e.kind
+            WHERE e.root_id=?1 AND e.original_path=?2 AND e.state='returned'
+              AND e.current_path=e.original_path AND e.identity IS NOT NULL
+              AND NOT EXISTS(SELECT 1 FROM selective_name_exception other
+                WHERE other.root_id=e.root_id AND other.source_binding=e.source_binding
+                  AND other.target_binding=e.target_binding AND other.identity=e.identity AND other.id<>e.id);
+            """)
+        defer { sqlite3_finalize(q) }
+        try bind(root,1,q,db);try bind(originalPath,2,q,db)
+        let rc=sqlite3_step(q)
+        if rc==SQLITE_DONE { return nil }
+        guard rc==SQLITE_ROW else { throw fail(db) }
+        let id=sqlite3_column_int64(q,0),kind=try string(q,1)
+        let next=sqlite3_step(q)
+        if next==SQLITE_ROW { return nil }
+        guard next==SQLITE_DONE else { throw fail(db) }
+        // Read a single consistent SQLite snapshot. Callers must enclose
+        // this method in their read/write transaction if used for decisions.
+        let compare=try prepare(db,"""
+            SELECT COUNT(*),
+              COALESCE(SUM(CASE WHEN f.relative_path IS NOT NULL AND f.kind='file'
+                AND d.identity IS NOT NULL AND f.lineage_observed_identity=d.identity
+                AND d.change_stamp IS NOT NULL AND f.change_stamp=d.change_stamp
+                AND f.file_size=d.file_size AND f.modified_at=d.modified_at THEN 1 ELSE 0 END),0),
+              COALESCE(SUM(CASE WHEN f.relative_path IS NULL THEN 1 ELSE 0 END),0)
+            FROM selective_name_detached d LEFT JOIN file_inventory f
+              ON f.root_id=?2 AND f.relative_path=d.relative_path
+            WHERE d.exception_id=?1 AND d.kind='file';
+            """)
+        defer { sqlite3_finalize(compare) }
+        guard sqlite3_bind_int64(compare,1,id)==SQLITE_OK else { throw fail(db) }
+        try bind(root,2,compare,db)
+        guard sqlite3_step(compare)==SQLITE_ROW else { throw fail(db) }
+        let captured=Int(sqlite3_column_int64(compare,0))
+        let unchanged=Int(sqlite3_column_int64(compare,1))
+        let absent=Int(sqlite3_column_int64(compare,2))
+        guard sqlite3_step(compare)==SQLITE_DONE else { throw fail(db) }
+        let additions=try prepare(db,"""
+            SELECT COUNT(*) FROM file_inventory f
+            WHERE f.root_id=?2 AND f.kind='file'
+              AND (f.relative_path=?3 OR (?4=1 AND f.relative_path>=?5 AND f.relative_path<?6))
+              AND NOT EXISTS(SELECT 1 FROM selective_name_detached d
+                WHERE d.exception_id=?1 AND d.relative_path=f.relative_path AND d.kind='file');
+            """)
+        defer { sqlite3_finalize(additions) }
+        guard sqlite3_bind_int64(additions,1,id)==SQLITE_OK,
+              sqlite3_bind_int(additions,4,kind=="directory" ? 1:0)==SQLITE_OK else { throw fail(db) }
+        try bind(root,2,additions,db);try bind(originalPath,3,additions,db)
+        try bind(originalPath+"/",5,additions,db);try bind(originalPath+"0",6,additions,db)
+        guard sqlite3_step(additions)==SQLITE_ROW else { throw fail(db) }
+        let newFiles=Int(sqlite3_column_int64(additions,0))
+        guard sqlite3_step(additions)==SQLITE_DONE else { throw fail(db) }
+        return RestorationSummary(capturedFiles:captured,unchangedMetadata:unchanged,
+            changedOrReplaced:captured-unchanged-absent,absent:absent,newFiles:newFiles)
     }
 
     static func hasExceptions(_ db:OpaquePointer)throws->Bool {
