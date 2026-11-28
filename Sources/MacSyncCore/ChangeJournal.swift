@@ -1517,8 +1517,21 @@ public final class ChangeJournal {
                           SeedFileFingerprint(fileStat:live) == fingerprint}) else { continue }
                 var record = prior?.record ?? initial
                 record.recognize(path:item.relativePath)
-                _ = try timing.measure("record_write"){try batch.write(record:record,expectedRevision:prior?.revision)}
-                try timing.measure("release_check"){try batch.releaseConfirmed(record)}
+                // The audit transaction owns the writer lock. Reuse its
+                // immediately preceding validated observation only for first
+                // recognition. All exceptional paths use the general writer.
+                _ = try timing.measure("record_write") {
+                    if !hasHold && (prior == nil || (prior?.record.evidence == .unknown &&
+                       prior?.record.recognizedPaths.isEmpty == true)) {
+                        return try batch.writeAuditRecognition(record:record)
+                    }
+                    return try batch.write(record:record,expectedRevision:prior?.revision)
+                }
+                // A missing record may have an orphan durable hold, so the
+                // absence of a record is NOT proof that there are no holds.
+                if hasHold || prior == nil {
+                    try timing.measure("release_check"){try batch.releaseConfirmed(record)}
+                }
             }
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             try timing.measure("commit"){try execute("COMMIT;")}

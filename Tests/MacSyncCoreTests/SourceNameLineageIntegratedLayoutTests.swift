@@ -17,6 +17,64 @@ final class SourceNameLineageIntegratedLayoutTests: XCTestCase {
         return sqlite3_column_int64(q,0)
     }
 
+    func testCompactAuditRecognitionRetainsNewerRevisionAndOrphanHold() throws {
+        let fm=FileManager.default
+        let base=fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        defer { try? fm.removeItem(at:base) }
+        let source=base.appendingPathComponent("source"),target=base.appendingPathComponent("target")
+        for root in [source,target] { try fm.createDirectory(at:root,withIntermediateDirectories:true) }
+        let url=source.appendingPathComponent("photo.jpg")
+        try Data([1]).write(to:url)
+        let path=base.appendingPathComponent("state.sqlite").path
+        let inventory=try LocalInventory(path:path),journal=try ChangeJournal(path:path)
+        inventory.experimentalInventoryLineageLayout=true
+        inventory.experimentalSourceNameLineage=true
+        inventory.experimentalLineageQueueProtection=true
+        _=try inventory.reconcile(rootID:"photos",root:source,origin:.initialInventory)
+        let map=try MountedFolderMapping(rootID:"photos",source:source,target:target)
+        try journal.verifyDirectoryBindings([map],allowNewTarget:true)
+        _=try inventory.reconcile(rootID:"photos",root:source)
+        let item=try XCTUnwrap(try LocalScanner.scan(root:source,collectSourceLineageIdentity:true).first)
+        let identity=try XCTUnwrap(item.sourceLineageIdentity)
+        let a=try DirectoryBinding.encoded(source),b=try DirectoryBinding.encoded(target)
+        var record=SourceNameLineage.Record(identity:identity,rootID:"photos",sourceBinding:a,targetBinding:b,path:item.relativePath)
+        let key=SourceNameLineageStore.Key(record)
+        var handle:OpaquePointer?
+        XCTAssertEqual(sqlite3_open(path,&handle),SQLITE_OK)
+        let db=try XCTUnwrap(handle)
+        defer { sqlite3_close(db) }
+        func sql(_ statement:String)throws {
+            guard sqlite3_exec(db,statement,nil,nil,nil)==SQLITE_OK else {
+                throw JournalError.database(String(cString:sqlite3_errmsg(db)))
+            }
+        }
+        try sql("BEGIN IMMEDIATE;")
+        let observer=try XCTUnwrap(try SourceNameLineageStore.batch(db,key:key,create:false))
+        let prior=try XCTUnwrap(try observer.readForAudit(key:key).0)
+        XCTAssertTrue(prior.compact)
+        XCTAssertEqual(prior.record.evidence,.unknown)
+        var uncertain=record
+        uncertain.publicationStarted()
+        let newer=try SourceNameLineageStore.write(db,record:uncertain,expectedRevision:prior.revision)
+        record.recognize(path:item.relativePath)
+        XCTAssertThrowsError(try observer.writeAuditRecognition(record:record))
+        XCTAssertEqual(try SourceNameLineageStore.read(db,key:key),newer)
+        try sql("ROLLBACK;")
+        // A hold can outlive a record. The audit must still inspect it,
+        // never infer that a missing record means a missing protection.
+        try sql("BEGIN IMMEDIATE;")
+        let fresh=try XCTUnwrap(try SourceNameLineageStore.batch(db,key:key,create:false))
+        try fresh.protectRename(record)
+        try sql("UPDATE file_inventory SET lineage_mapping_id=NULL,lineage_revision=NULL,lineage_evidence=NULL;")
+        XCTAssertNil(try fresh.readForAudit(key:key).0)
+        XCTAssertTrue(try fresh.hasHold(record))
+        let recognized=try fresh.writeAuditRecognition(record:record)
+        XCTAssertTrue(recognized.compact)
+        try fresh.releaseConfirmed(record)
+        XCTAssertFalse(try fresh.hasHold(record))
+        try sql("COMMIT;")
+    }
+
     func testCompactIdentityDetachReopenReplacementAndRollback() throws {
         let fm=FileManager.default
         let base=fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()

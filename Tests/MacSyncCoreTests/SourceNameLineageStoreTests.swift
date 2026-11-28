@@ -124,6 +124,40 @@ final class SourceNameLineageStoreTests: XCTestCase {
         }
     }
 
+    func testAuditRecognitionCannotOverwriteChangedOrMissingRevision() throws {
+        try fixture { path, initial in
+            let db=try open(path)
+            defer { sqlite3_close(db) }
+            try SourceNameLineageStore.installProtection(db)
+            let key=SourceNameLineageStore.Key(initial)
+            let unknown=SourceNameLineage.Record(identity:initial.identity,rootID:initial.rootID,
+                sourceBinding:initial.sourceBinding,targetBinding:initial.targetBinding,path:initial.currentPath)
+            try sql(db,"BEGIN IMMEDIATE;")
+            let observer=try XCTUnwrap(try SourceNameLineageStore.batch(db,key:key,create:true))
+            XCTAssertNil(try observer.readForAudit(key:key).0)
+            let saved=try SourceNameLineageStore.write(db,record:unknown,expectedRevision:nil)
+            XCTAssertThrowsError(try observer.writeAuditRecognition(record:initial))
+            XCTAssertEqual(try observer.readForAudit(key:key).0,saved)
+            var uncertain=unknown
+            uncertain.publicationStarted()
+            let changed=try SourceNameLineageStore.write(db,record:uncertain,expectedRevision:saved.revision)
+            XCTAssertThrowsError(try observer.writeAuditRecognition(record:initial))
+            XCTAssertEqual(try SourceNameLineageStore.read(db,key:key),changed)
+            try sql(db,"ROLLBACK;")
+            try sql(db,"BEGIN IMMEDIATE;")
+            let next=try XCTUnwrap(try SourceNameLineageStore.batch(db,key:key,create:true))
+            let first=try next.write(record:unknown,expectedRevision:nil)
+            XCTAssertEqual(try next.readForAudit(key:key).0,first)
+            try sql(db,"DELETE FROM source_lineage_index;")
+            XCTAssertThrowsError(try next.writeAuditRecognition(record:initial))
+            XCTAssertNil(try SourceNameLineageStore.read(db,key:key))
+            XCTAssertNil(try next.readForAudit(key:key).0)
+            XCTAssertEqual(try next.writeAuditRecognition(record:initial).revision,1)
+            XCTAssertThrowsError(try next.writeAuditRecognition(record:initial))
+            try sql(db,"COMMIT;")
+        }
+    }
+
     func testBindingIsolationNoOpAndTransactionRequirement() throws {
         try fixture { path, initial in
             let db = try open(path)

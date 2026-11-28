@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import Darwin
 
 /// Compact candidate storage, caller-owned connection and transaction.
 /// The old JSON prototype was never operational; use new tables rather than
@@ -189,6 +190,18 @@ enum SourceNameLineageStore {
         result.append(id.kind == "file" ? 1 : 2)
         return result
     }
+    // Byte equality, not Swift's Unicode canonical equivalence. Fast
+    // contiguous comparison for the repeatedly bound JSON root stamps.
+    private static func exactUTF8(_ a:String,_ b:String)->Bool {
+        a.utf8.withContiguousStorageIfAvailable { lhs in
+            b.utf8.withContiguousStorageIfAvailable { rhs in
+                guard lhs.count==rhs.count else { return false }
+                if lhs.isEmpty { return true }
+                guard let p=lhs.baseAddress,let q=rhs.baseAddress else { return false }
+                return memcmp(p,q,lhs.count)==0
+            } ?? a.utf8.elementsEqual(b.utf8)
+        } ?? a.utf8.elementsEqual(b.utf8)
+    }
     private static func validate(_ record: SourceNameLineage.Record) throws {
         let path = record.currentPath
         let parts = path.split(separator: "/", omittingEmptySubsequences: false)
@@ -198,7 +211,7 @@ enum SourceNameLineageStore {
               record.evidence != .neverPublished ||
                 (record.recognizedPaths.isEmpty && !record.uncertainPublication),
               record.evidence != .recognized || !record.recognizedPaths.isEmpty,
-              Set(record.recognizedPaths.map { Data($0.utf8) }).count == record.recognizedPaths.count else {
+              (record.recognizedPaths.count <= 1 || Set(record.recognizedPaths.map { Data($0.utf8) }).count == record.recognizedPaths.count) else {
             throw Failure.invalid
         }
     }
@@ -478,10 +491,15 @@ enum SourceNameLineageStore {
         private var holdExistsQuery: OpaquePointer?
         private var auditQuery: OpaquePointer?
         private var compactQuery: OpaquePointer?
+        private var compactPresenceQuery: OpaquePointer?
         private var eraseSparse: OpaquePointer?
         private var eraseCompact: OpaquePointer?
         let integrated: Bool
         private let records: String
+        private var encodedIdentity: (SourceNameLineage.Identity,Data)?
+        // Single-use observation for the immediately following audit write.
+        // Never retained across another lookup or a general batch write.
+        private var auditObservation: (Key,Versioned?)?
         var timing: SourceLineageTiming?
         private let decoder = JSONDecoder()
         private let encoder = JSONEncoder()
@@ -505,7 +523,9 @@ enum SourceNameLineageStore {
             do {
                 upsert = try prepare(db, """
                     INSERT INTO source_lineage_index(mapping_id,identity,current_path,revision,evidence,uncertain,recognized_paths)
-                    VALUES(?,?,?,?,?,?,?)
+                    SELECT ?1,?2,?3,?4,?5,?6,?7
+                    WHERE ?8=0 OR EXISTS(SELECT 1 FROM source_lineage_index
+                        WHERE mapping_id=?1 AND identity=?2 AND revision=?8)
                     ON CONFLICT(mapping_id,identity) DO UPDATE SET
                         current_path=excluded.current_path,revision=excluded.revision,
                         evidence=excluded.evidence,uncertain=excluded.uncertain,recognized_paths=excluded.recognized_paths
@@ -524,29 +544,39 @@ enum SourceNameLineageStore {
             if let holdExistsQuery { sqlite3_finalize(holdExistsQuery) }
             if let auditQuery { sqlite3_finalize(auditQuery) }
             if let compactQuery { sqlite3_finalize(compactQuery) }
+            if let compactPresenceQuery { sqlite3_finalize(compactPresenceQuery) }
             if let eraseSparse { sqlite3_finalize(eraseSparse) }
             if let eraseCompact { sqlite3_finalize(eraseCompact) }
         }
 
         private func verify(_ key: Key) throws {
-            guard key.rootID.utf8.elementsEqual(rootID.utf8),
-                  key.sourceBinding.utf8.elementsEqual(sourceBinding.utf8),
-                  key.targetBinding.utf8.elementsEqual(targetBinding.utf8) else { throw Failure.invalid }
+            guard exactUTF8(key.rootID,rootID),exactUTF8(key.sourceBinding,sourceBinding),
+                  exactUTF8(key.targetBinding,targetBinding) else { throw Failure.invalid }
         }
         private func bindIdentity(_ key: Key, _ stmt: OpaquePointer) throws {
             try verify(key)
             guard sqlite3_bind_int64(stmt, 1, namespace) == SQLITE_OK else { throw failure(db) }
-            try bindBlob(identityBytes(key.identity), 2, stmt, db)
+            if encodedIdentity?.0 != key.identity {
+                encodedIdentity=(key.identity,try identityBytes(key.identity))
+            }
+            guard let bytes=encodedIdentity?.1 else { throw Failure.invalid }
+            try bindBlob(bytes, 2, stmt, db)
         }
 
         func read(key: Key) throws -> Versioned? {
-            try readRow(key:key,statement:query,includeHold:false).0
+            auditObservation=nil
+            return try readRow(key:key,statement:query,includeHold:false).0
         }
 
         // A single indexed lookup for ordinary audit observations. Keep the
         // full record validation; only avoid a second lookup for hold status.
         func readForAudit(key: Key) throws -> (Versioned?,Bool) {
-            guard protectionAvailable else { return (try read(key:key),false) }
+            auditObservation=nil
+            guard protectionAvailable else {
+                let prior=try read(key:key)
+                if sqlite3_get_autocommit(db)==0 { auditObservation=(key,prior) }
+                return (prior,false)
+            }
             if auditQuery == nil {
                 let compactColumn = integrated ? "i.compact" : "0"
                 auditQuery = try prepare(db, """
@@ -557,7 +587,9 @@ enum SourceNameLineageStore {
                     """)
             }
             guard let auditQuery else { throw Failure.invalid }
-            return try readRow(key:key,statement:auditQuery,includeHold:true)
+            let result=try readRow(key:key,statement:auditQuery,includeHold:true)
+            if sqlite3_get_autocommit(db)==0 { auditObservation=(key,result.0) }
+            return result
         }
 
         private func measured<T>(_ phase:String,_ body:() throws -> T) rethrows -> T {
@@ -688,10 +720,10 @@ enum SourceNameLineageStore {
         // Release only after the exact corrected path is confirmed. Check
         // provisional unknown-history paths too, not only recognized names.
         func releaseConfirmed(_ record: SourceNameLineage.Record) throws {
-            guard !record.uncertainPublication, WindowsPathSafety.validRelativePath(record.currentPath),
-                  record.recognizedPaths.contains(where:{$0.utf8.elementsEqual(record.currentPath.utf8)}) else { return }
+            guard !record.uncertainPublication else { return }
             let paths=try heldPaths(record)
-            guard !paths.isEmpty else { return }
+            guard !paths.isEmpty,WindowsPathSafety.validRelativePath(record.currentPath),
+                  record.recognizedPaths.contains(where:{exactUTF8($0,record.currentPath)}) else { return }
             func fold(_ value:String)->String {
                 value.split(separator:"/",omittingEmptySubsequences:false)
                     .map{WindowsPathSafety.comparisonFold(String($0))}.joined(separator:"/")
@@ -709,17 +741,23 @@ enum SourceNameLineageStore {
         // Only observations independently matched to a live inventory row
         // can occupy its compact slot. Unknown history remains unknown.
         // Invalid, uncertain, detached and multi-path records stay sparse.
-        private func compactRecord(_ record:SourceNameLineage.Record,revision:Int64) throws -> Bool {
+        private func compactRecord(_ record:SourceNameLineage.Record,revision:Int64,existing:Versioned?) throws -> Bool {
+            // Recognized single paths were validated by writeValidated.
             guard integrated,!record.uncertainPublication,
-                  WindowsPathSafety.validRelativePath(record.currentPath),
-                  (record.evidence == .unknown && record.recognizedPaths.isEmpty) ||
+                  (record.evidence == .unknown && record.recognizedPaths.isEmpty &&
+                   WindowsPathSafety.validRelativePath(record.currentPath)) ||
                   (record.evidence == .recognized && record.recognizedPaths.count==1 &&
-                   record.recognizedPaths[0].utf8.elementsEqual(record.currentPath.utf8)) else { return false }
+                   exactUTF8(record.recognizedPaths[0],record.currentPath)) else { return false }
             if compactQuery==nil {
                 compactQuery=try prepare(db,"""
                     UPDATE file_inventory SET lineage_mapping_id=?1,lineage_revision=?4,lineage_evidence=?5
                     WHERE root_id=?6 AND relative_path=?3 AND lineage_observed_identity=?2
-                      AND (lineage_mapping_id IS NULL OR lineage_mapping_id=?1);
+                      AND ((?7=0 AND lineage_mapping_id IS NULL)
+                        OR (lineage_mapping_id=?1 AND lineage_revision=?7))
+                      AND ((?8=0 AND NOT EXISTS(SELECT 1 FROM source_lineage_index
+                                WHERE mapping_id=?1 AND identity=?2))
+                        OR (?8>0 AND EXISTS(SELECT 1 FROM source_lineage_index
+                                WHERE mapping_id=?1 AND identity=?2 AND revision=?8)));
                     """)
             }
             guard let q=compactQuery else { throw Failure.invalid }
@@ -729,36 +767,70 @@ enum SourceNameLineageStore {
             try bind(record.currentPath,3,q,db);try bind(rootID,6,q,db)
             guard sqlite3_bind_int64(q,4,revision)==SQLITE_OK,
                   sqlite3_bind_int(q,5,record.evidence == .recognized ? 2 : 0)==SQLITE_OK,
+                  sqlite3_bind_int64(q,7,existing?.compact==true ? (existing?.revision ?? 0) : 0)==SQLITE_OK,
+                  sqlite3_bind_int64(q,8,existing?.compact==false ? (existing?.revision ?? 0) : 0)==SQLITE_OK,
                   sqlite3_step(q)==SQLITE_DONE else { throw failure(db) }
             guard sqlite3_changes(db)==1 else { return false }
+            guard let existing,!existing.compact else { return true }
             if eraseSparse==nil {
-                eraseSparse=try prepare(db,"DELETE FROM source_lineage_index WHERE mapping_id=? AND identity=?;")
+                eraseSparse=try prepare(db,"DELETE FROM source_lineage_index WHERE mapping_id=? AND identity=? AND revision=?;")
             }
             guard let erase=eraseSparse else { throw Failure.invalid }
             reset(erase)
             defer { reset(erase) }
             try bindIdentity(Key(record),erase)
-            guard measured("store_sparse_erase",{sqlite3_step(erase)})==SQLITE_DONE else { throw failure(db) }
+            guard sqlite3_bind_int64(erase,3,existing.revision)==SQLITE_OK,
+                  measured("store_sparse_erase",{sqlite3_step(erase)})==SQLITE_DONE,
+                  sqlite3_changes(db)==1 else { throw Failure.stale }
             return true
         }
 
-        private func clearCompact(_ record:SourceNameLineage.Record) throws {
+        private func clearCompact(_ record:SourceNameLineage.Record,revision:Int64) throws {
             if eraseCompact==nil {
                 eraseCompact=try prepare(db,"""
                     UPDATE file_inventory SET lineage_mapping_id=NULL,lineage_revision=NULL,lineage_evidence=NULL
-                    WHERE lineage_mapping_id=? AND lineage_observed_identity=?;
+                    WHERE lineage_mapping_id=? AND lineage_observed_identity=? AND lineage_revision=?;
                     """)
             }
             guard let q=eraseCompact else { throw Failure.invalid }
             reset(q)
             defer { reset(q) }
             try bindIdentity(Key(record),q)
-            guard sqlite3_step(q)==SQLITE_DONE,sqlite3_changes(db)==1 else { throw Failure.stale }
+            guard sqlite3_bind_int64(q,3,revision)==SQLITE_OK,
+                  sqlite3_step(q)==SQLITE_DONE,sqlite3_changes(db)==1 else { throw Failure.stale }
+        }
+
+        // Used exclusively for the immediately following historical audit
+        // recognition within its BEGIN IMMEDIATE transaction. SQL writes
+        // still compare revisions. The general writer retains its reread.
+        @discardableResult
+        func writeAuditRecognition(record:SourceNameLineage.Record) throws -> Versioned {
+            guard sqlite3_get_autocommit(db)==0 else { throw Failure.transactionRequired }
+            let key=Key(record)
+            guard let (observed,prior)=auditObservation,
+                  observed.identity==key.identity,
+                  exactUTF8(observed.rootID,key.rootID),
+                  exactUTF8(observed.sourceBinding,key.sourceBinding),
+                  exactUTF8(observed.targetBinding,key.targetBinding) else { throw Failure.stale }
+            auditObservation=nil
+            // Only first recognition (not a rename, publication or change
+            // of historic paths) can take the shortcut.
+            guard record.evidence == .recognized,!record.uncertainPublication,
+                  record.recognizedPaths.count==1,
+                  exactUTF8(record.recognizedPaths[0],record.currentPath),
+                  prior == nil || (prior?.record.evidence == .unknown &&
+                      prior?.record.uncertainPublication == false &&
+                      prior?.record.recognizedPaths.isEmpty == true &&
+                      prior.map{exactUTF8($0.record.currentPath,record.currentPath)} == true)
+            else { throw Failure.invalid }
+            try validate(record)
+            return try writeValidated(record:record,expectedRevision:prior?.revision,existing:prior)
         }
 
         @discardableResult
         func write(record: SourceNameLineage.Record, expectedRevision: Int64?) throws -> Versioned {
             guard sqlite3_get_autocommit(db) == 0 else { throw Failure.transactionRequired }
+            auditObservation=nil
             try validate(record)
             let key = Key(record)
             // New records use the conditional INSERT below: a conflicting
@@ -771,21 +843,42 @@ enum SourceNameLineageStore {
             } else {
                 existing = nil
             }
+            return try writeValidated(record:record,expectedRevision:expectedRevision,existing:existing)
+        }
+
+        private func writeValidated(record:SourceNameLineage.Record,expectedRevision:Int64?,existing:Versioned?) throws -> Versioned {
+            let key=Key(record)
             if let existing, existing.record.evidence == record.evidence,
                existing.record.uncertainPublication == record.uncertainPublication,
                existing.record.currentPath.utf8.elementsEqual(record.currentPath.utf8),
                existing.record.recognizedPaths.map({ Data($0.utf8) }) == record.recognizedPaths.map({ Data($0.utf8) }) {
-                if integrated,!existing.compact,try compactRecord(record,revision:existing.revision) {
+                if integrated,!existing.compact,try compactRecord(record,revision:existing.revision,existing:existing) {
                     return Versioned(record:record,revision:existing.revision,compact:true)
                 }
                 return existing
             }
             let next = (expectedRevision ?? 0).addingReportingOverflow(1)
             guard !next.overflow, next.partialValue > 0 else { throw Failure.invalid }
-            if try measured("store_compact",{try compactRecord(record,revision:next.partialValue)}) {
+            if try measured("store_compact",{try compactRecord(record,revision:next.partialValue,existing:existing)}) {
                 return Versioned(record:record,revision:next.partialValue,compact:true)
             }
-            if existing?.compact==true { try clearCompact(record) }
+            if let existing,existing.compact {
+                try clearCompact(record,revision:existing.revision)
+            }
+            // An absent/sparse observation must not overwrite an existing
+            // compact identity even if a caller held an obsolete token.
+            if integrated,existing?.compact != true {
+                if compactPresenceQuery==nil {
+                    compactPresenceQuery=try prepare(db,"SELECT 1 FROM file_inventory WHERE lineage_mapping_id=? AND lineage_observed_identity=?;")
+                }
+                guard let presence=compactPresenceQuery else { throw Failure.invalid }
+                reset(presence)
+                defer { reset(presence) }
+                try bindIdentity(key,presence)
+                let rc=sqlite3_step(presence)
+                if rc==SQLITE_ROW { throw Failure.stale }
+                guard rc==SQLITE_DONE else { throw failure(db) }
+            }
             reset(upsert)
             defer { reset(upsert) }
             try bindIdentity(key, upsert)
@@ -794,7 +887,7 @@ enum SourceNameLineageStore {
             guard sqlite3_bind_int64(upsert, 4, next.partialValue) == SQLITE_OK,
                   sqlite3_bind_int(upsert, 5, evidence) == SQLITE_OK,
                   sqlite3_bind_int(upsert, 6, record.uncertainPublication ? 1 : 0) == SQLITE_OK,
-                  sqlite3_bind_int64(upsert, 8, expectedRevision ?? 0) == SQLITE_OK else { throw failure(db) }
+                  sqlite3_bind_int64(upsert, 8, existing?.compact==true ? 0 : (expectedRevision ?? 0)) == SQLITE_OK else { throw failure(db) }
             if record.recognizedPaths.isEmpty {
                 guard sqlite3_bind_null(upsert, 7) == SQLITE_OK else { throw failure(db) }
             } else {

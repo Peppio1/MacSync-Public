@@ -613,44 +613,41 @@ public final class LocalInventory {
             let seen = Dictionary(uniqueKeysWithValues: rows.map { ($0.relativePath, $0) })
             var upserts = 0
             var deletes = 0
+            // Same persisted comparison and enqueue policy as before. Reuse
+            // one prepared statement and persist the full identity alongside
+            // ordinary metadata, including identity-only replacements.
+            let inventoryWrite=try prepare(integrated ? """
+                INSERT INTO file_inventory(root_id,relative_path,kind,file_size,modified_at,change_stamp,lineage_observed_identity)
+                VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(root_id,relative_path) DO UPDATE SET
+                  kind=excluded.kind,file_size=excluded.file_size,modified_at=excluded.modified_at,
+                  change_stamp=excluded.change_stamp,lineage_observed_identity=excluded.lineage_observed_identity;
+                """ : """
+                INSERT INTO file_inventory(root_id,relative_path,kind,file_size,modified_at,change_stamp)
+                VALUES(?,?,?,?,?,?)
+                ON CONFLICT(root_id,relative_path) DO UPDATE SET
+                  kind=excluded.kind,file_size=excluded.file_size,modified_at=excluded.modified_at,change_stamp=excluded.change_stamp;
+                """)
+            defer { sqlite3_finalize(inventoryWrite) }
             for row in rows {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
-                if before[row.relativePath] != row {
-                    try timing.measure("inventory_write"){try store(rootID: rootID, item: row)}
-                    // Upgrade legacy metadata without re-uploading the entire archive.
-                    let old = before[row.relativePath]
-                    if !pristine && (old == nil || old?.changeStamp != nil || old?.kind != row.kind || old?.size != row.size || old?.modifiedAt != row.modifiedAt) {
-                        try enqueue(rootID: rootID, relativePath: row.relativePath, kind: .upsert, origin: jobOrigin)
-                        upserts += 1
+                let old=before[row.relativePath]
+                let changed=old != row
+                let identity:Data? = integrated ? try row.sourceLineageIdentity.map{try SourceNameLineageStore.identityBytes($0)} : nil
+                let identityChanged=integrated && identity != old?.storedLineageIdentity
+                if changed || identityChanged {
+                    try timing.measure("inventory_write"){
+                        try store(rootID:rootID,item:row,statement:inventoryWrite,
+                                  integrated:integrated,identity:identity)
                     }
                 }
-            }
-
-            // The compact record's full identity is obtained from the same
-            // scanner stat, never inferred from an inode or path alone.
-            // Changed metadata detaches the old record via a trigger; even a
-            // replacement with equal ordinary metadata changes the identity.
-            if integrated {
-                try timing.measure("identity_update") {
-                let update = try prepare("""
-                    UPDATE file_inventory SET lineage_observed_identity=?
-                    WHERE root_id=? AND relative_path=?;
-                    """)
-                defer { sqlite3_finalize(update) }
-                for row in rows {
-                    guard shouldContinue() else { throw SeedVerificationError.cancelled }
-                    let identity = try row.sourceLineageIdentity.map { try SourceNameLineageStore.identityBytes($0) }
-                    guard identity != before[row.relativePath]?.storedLineageIdentity else { continue }
-                    sqlite3_reset(update);sqlite3_clear_bindings(update)
-                    if let identity {
-                        let transient=unsafeBitCast(-1,to:sqlite3_destructor_type.self)
-                        guard identity.withUnsafeBytes({sqlite3_bind_blob(update,1,$0.baseAddress,Int32($0.count),transient)})==SQLITE_OK else { throw failure() }
-                    } else {
-                        guard sqlite3_bind_null(update,1)==SQLITE_OK else { throw failure() }
-                    }
-                    try bind(rootID,at:2,statement:update);try bind(row.relativePath,at:3,statement:update)
-                    guard sqlite3_step(update)==SQLITE_DONE,sqlite3_changes(layoutDB)==1 else { throw failure() }
-                }
+                // An identity-only change is not a new queue decision; the
+                // existing comparison semantics and detach trigger remain.
+                if changed && !pristine &&
+                    (old == nil || old?.changeStamp != nil || old?.kind != row.kind ||
+                     old?.size != row.size || old?.modifiedAt != row.modifiedAt) {
+                    try enqueue(rootID:rootID,relativePath:row.relativePath,kind:.upsert,origin:jobOrigin)
+                    upserts += 1
                 }
             }
 
@@ -1057,22 +1054,26 @@ public final class LocalInventory {
         return items
     }
 
-    private func store(rootID: String, item: TrackedItem) throws {
-        let statement = try prepare("""
-            INSERT INTO file_inventory(root_id,relative_path,kind,file_size,modified_at,change_stamp)
-            VALUES(?,?,?,?,?,?)
-            ON CONFLICT(root_id,relative_path) DO UPDATE SET
-              kind=excluded.kind,file_size=excluded.file_size,modified_at=excluded.modified_at,change_stamp=excluded.change_stamp;
-            """)
-        defer { sqlite3_finalize(statement) }
-        try bind(rootID, at: 1, statement: statement)
-        try bind(item.relativePath, at: 2, statement: statement)
-        try bind(item.kind, at: 3, statement: statement)
-        if let stamp = item.changeStamp { try bind(stamp,at:6,statement:statement) }
-        else { guard sqlite3_bind_null(statement,6) == SQLITE_OK else { throw failure() } }
-        guard sqlite3_bind_int64(statement, 4, item.size) == SQLITE_OK,
-              sqlite3_bind_double(statement, 5, item.modifiedAt) == SQLITE_OK,
-              sqlite3_step(statement) == SQLITE_DONE else { throw failure() }
+    private func store(rootID:String,item:TrackedItem,statement:OpaquePointer,
+                       integrated:Bool,identity:Data?) throws {
+        sqlite3_reset(statement);sqlite3_clear_bindings(statement)
+        defer { sqlite3_reset(statement);sqlite3_clear_bindings(statement) }
+        try bind(rootID,at:1,statement:statement)
+        try bind(item.relativePath,at:2,statement:statement)
+        try bind(item.kind,at:3,statement:statement)
+        if let stamp=item.changeStamp { try bind(stamp,at:6,statement:statement) }
+        else { guard sqlite3_bind_null(statement,6)==SQLITE_OK else { throw failure() } }
+        if integrated {
+            if let identity {
+                let transient=unsafeBitCast(-1,to:sqlite3_destructor_type.self)
+                guard identity.withUnsafeBytes({sqlite3_bind_blob(statement,7,$0.baseAddress,Int32($0.count),transient)})==SQLITE_OK else { throw failure() }
+            } else {
+                guard sqlite3_bind_null(statement,7)==SQLITE_OK else { throw failure() }
+            }
+        }
+        guard sqlite3_bind_int64(statement,4,item.size)==SQLITE_OK,
+              sqlite3_bind_double(statement,5,item.modifiedAt)==SQLITE_OK,
+              sqlite3_step(statement)==SQLITE_DONE else { throw failure() }
     }
 
     private func remove(rootID: String, relativePath: String) throws {
