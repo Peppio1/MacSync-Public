@@ -2261,6 +2261,9 @@ public final class ChangeJournal {
                 try execute("COMMIT;"); return
             }
             try SourceNameLineageStore.resolveMissing(connection,root:rootID,rows:rows,shouldContinue:shouldContinue)
+            if try queueRebuildToken() == nil {
+                try SelectiveNameExceptionStore.resolveSimpleDisappearances(connection,root:rootID,rows:rows,shouldContinue:shouldContinue)
+            }
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             try execute("COMMIT;")
         } catch { try? execute("ROLLBACK;"); throw error }

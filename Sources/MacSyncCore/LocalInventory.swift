@@ -649,6 +649,12 @@ public final class LocalInventory {
                 let changed=old != row
                 let identity:Data? = integrated ? try row.sourceLineageIdentity.map{try SourceNameLineageStore.identityBytes($0)} : nil
                 let identityChanged=integrated && identity != old?.storedLineageIdentity
+                let speculative = selective && old == nil && origin == .sourceMonitor && eventID != nil &&
+                    !WindowsPathSafety.validRelativePath(row.relativePath)
+                let markSpeculative:Bool
+                if speculative {
+                    markSpeculative=try SelectiveNameExceptionStore.canMarkSpeculative(layoutDB,root:rootID,source:binding,row:row)
+                } else { markSpeculative=false }
                 if changed || identityChanged {
                     try timing.measure("inventory_write"){
                         try store(rootID:rootID,item:row,statement:inventoryWrite,
@@ -660,7 +666,10 @@ public final class LocalInventory {
                 if changed && !pristine &&
                     (old == nil || old?.changeStamp != nil || old?.kind != row.kind ||
                      old?.size != row.size || old?.modifiedAt != row.modifiedAt) {
-                    try enqueue(rootID:rootID,relativePath:row.relativePath,kind:.upsert,origin:jobOrigin)
+                    let job=try enqueue(rootID:rootID,relativePath:row.relativePath,kind:.upsert,origin:jobOrigin)
+                    if markSpeculative {
+                        try SelectiveNameExceptionStore.markSpeculative(layoutDB,root:rootID,source:binding,row:row,job:job)
+                    }
                     upserts += 1
                 }
             }
@@ -730,6 +739,7 @@ public final class LocalInventory {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 try remove(rootID: rootID, relativePath: path)
                 if FileExclusionPolicy.excludes(path,enabled:ignoreDSStore) { continue }
+                if selective,try SelectiveNameExceptionStore.retireSpeculative(layoutDB,root:rootID,source:binding,old:oldItem) { continue }
                 if let targetBinding=lineageTarget,let db {
                     try SourceNameLineageStore.holdMissing(db,root:rootID,source:binding,target:targetBinding,path:path)
                     let retired=try SourceNameLineageStore.retireSpeculativeInvalidUpload(db,root:rootID,

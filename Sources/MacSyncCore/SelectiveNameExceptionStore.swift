@@ -52,7 +52,10 @@ enum SelectiveNameExceptionStore {
     }
     static func install(_ db:OpaquePointer)throws {
         guard sqlite3_get_autocommit(db)==0 else { throw SourceNameLineageStore.Failure.transactionRequired }
-        if try installed(db) { return }
+        if try installed(db) {
+            try installSpeculativeJobs(db)
+            return
+        }
         try SourceNameLineageStore.installIntegratedLayout(db)
         // Do not mix the two experimental stores or reinterpret prior
         // publication evidence. Start on a fresh lab profile.
@@ -82,6 +85,102 @@ enum SelectiveNameExceptionStore {
                 PRIMARY KEY(exception_id,relative_path)
             ) WITHOUT ROWID;
             """)
+        try installSpeculativeJobs(db)
+    }
+
+    private static func installSpeculativeJobs(_ db:OpaquePointer)throws {
+        try exec(db,"""
+            CREATE TABLE IF NOT EXISTS selective_invalid_upload(
+                job_id INTEGER PRIMARY KEY,root_id TEXT NOT NULL,source_binding TEXT NOT NULL,
+                target_binding TEXT NOT NULL,path TEXT NOT NULL,
+                identity BLOB NOT NULL CHECK(length(identity)=33)
+            );
+            """)
+    }
+
+    // Only the very first source-monitor upload of a new, unpublishable
+    // spelling can receive this provenance. Not proof of remote absence.
+    static func canMarkSpeculative(_ db:OpaquePointer,root:String,source:String,row:TrackedItem)throws->Bool {
+        guard sqlite3_get_autocommit(db)==0 else { throw SourceNameLineageStore.Failure.transactionRequired }
+        guard !WindowsPathSafety.validRelativePath(row.relativePath),
+              let identity=row.sourceLineageIdentity else { return false }
+        let birth=Double(identity.birthSeconds)+Double(identity.birthNanos)/1_000_000_000
+        let q=try prepare(db,"""
+            SELECT 1 FROM watched_roots w
+            JOIN directory_bindings s ON s.root_id=w.root_id AND s.role='source' AND s.stamp=?2
+            JOIN directory_bindings t ON t.root_id=w.root_id AND t.role='target' AND length(t.stamp)>0
+            WHERE w.root_id=?1 AND w.last_scan_at<?5
+              AND NOT EXISTS(SELECT 1 FROM change_queue c WHERE c.root_id=?1 AND c.relative_path=?3)
+              AND NOT EXISTS(SELECT 1 FROM file_inventory f WHERE f.root_id=?1 AND f.lineage_observed_identity=?4)
+              AND NOT EXISTS(SELECT 1 FROM selective_name_detached d JOIN selective_name_exception e ON e.id=d.exception_id
+                WHERE e.root_id=?1 AND d.identity=?4)
+              AND NOT EXISTS(SELECT 1 FROM publication_intents p WHERE p.root_id=?1 AND p.relative_path=?3)
+              AND NOT EXISTS(SELECT 1 FROM transfer_recovery r WHERE r.root_id=?1 AND r.relative_path=?3)
+              AND NOT EXISTS(SELECT 1 FROM upload_retry r WHERE r.root_id=?1 AND r.scope='root');
+            """)
+        defer { sqlite3_finalize(q) }
+        try bind(root,1,q,db);try bind(source,2,q,db);try bind(row.relativePath,3,q,db)
+        try bind(try SourceNameLineageStore.identityBytes(identity),4,q,db)
+        guard sqlite3_bind_double(q,5,birth)==SQLITE_OK else { throw fail(db) }
+        let rc=sqlite3_step(q)
+        guard rc==SQLITE_ROW || rc==SQLITE_DONE else { throw fail(db) }
+        return rc==SQLITE_ROW
+    }
+
+    static func markSpeculative(_ db:OpaquePointer,root:String,source:String,row:TrackedItem,job:Int64)throws {
+        guard sqlite3_get_autocommit(db)==0,let identity=row.sourceLineageIdentity else { throw SourceNameLineageStore.Failure.invalid }
+        let q=try prepare(db,"""
+            INSERT INTO selective_invalid_upload(job_id,root_id,source_binding,target_binding,path,identity)
+            SELECT ?1,?2,?3,t.stamp,?4,?5 FROM directory_bindings t
+            WHERE t.root_id=?2 AND t.role='target';
+            """)
+        defer { sqlite3_finalize(q) }
+        guard sqlite3_bind_int64(q,1,job)==SQLITE_OK else { throw fail(db) }
+        try bind(root,2,q,db);try bind(source,3,q,db);try bind(row.relativePath,4,q,db)
+        try bind(try SourceNameLineageStore.identityBytes(identity),5,q,db)
+        guard sqlite3_step(q)==SQLITE_DONE,sqlite3_changes(db)==1 else { throw fail(db) }
+    }
+
+    /// Retire the exact speculative UPSERT, not an existing DELETE. A
+    /// possible legacy target object remains protected and independently
+    /// discoverable by archive maintenance. Never infer remote absence.
+    static func retireSpeculative(_ db:OpaquePointer,root:String,source:String,old:TrackedItem)throws->Bool {
+        guard sqlite3_get_autocommit(db)==0 else { throw SourceNameLineageStore.Failure.transactionRequired }
+        guard !WindowsPathSafety.validRelativePath(old.relativePath),
+              let identity=old.storedLineageIdentity else { return false }
+        let q=try prepare(db,"""
+            SELECT c.id FROM selective_invalid_upload x
+            JOIN directory_bindings t ON t.root_id=x.root_id AND t.role='target' AND t.stamp=x.target_binding
+            JOIN change_queue c ON c.id=x.job_id AND c.root_id=x.root_id AND c.relative_path=x.path
+            WHERE x.root_id=?1 AND x.source_binding=?2 AND x.path=?3 AND x.identity=?4
+              AND c.completed=0 AND c.kind='upsert' AND c.origin='source_monitor'
+              AND NOT EXISTS(SELECT 1 FROM change_queue other WHERE other.root_id=?1 AND other.relative_path=?3 AND other.id<>c.id)
+              AND NOT EXISTS(SELECT 1 FROM publication_intents p WHERE p.root_id=?1 AND p.relative_path=?3)
+              AND NOT EXISTS(SELECT 1 FROM transfer_recovery r WHERE r.root_id=?1 AND r.relative_path=?3)
+              AND NOT EXISTS(SELECT 1 FROM upload_retry r WHERE r.root_id=?1 AND (r.scope='root' OR r.job_id=c.id))
+              AND NOT EXISTS(SELECT 1 FROM retired_publication_evidence r WHERE r.job_id=c.id)
+              AND NOT EXISTS(SELECT 1 FROM retired_delete_evidence r WHERE r.job_id=c.id)
+              AND NOT EXISTS(SELECT 1 FROM name_rectification_monitor_links r WHERE r.job_id=c.id)
+              AND NOT EXISTS(SELECT 1 FROM mirror_attempts r WHERE r.job_id=c.id);
+            """)
+        defer { sqlite3_finalize(q) }
+        try bind(root,1,q,db);try bind(source,2,q,db);try bind(old.relativePath,3,q,db);try bind(identity,4,q,db)
+        let rc=sqlite3_step(q)
+        if rc==SQLITE_DONE { return false }
+        guard rc==SQLITE_ROW else { throw fail(db) }
+        let job=sqlite3_column_int64(q,0)
+        let next=sqlite3_step(q)
+        if next==SQLITE_ROW { return false }
+        guard next==SQLITE_DONE else { throw fail(db) }
+        for sql in ["DELETE FROM blocked_name_jobs WHERE job_id=?;",
+                    "DELETE FROM selective_invalid_upload WHERE job_id=?;",
+                    "DELETE FROM change_queue WHERE id=? AND completed=0 AND kind='upsert' AND origin='source_monitor';"] {
+            let remove=try prepare(db,sql)
+            defer { sqlite3_finalize(remove) }
+            guard sqlite3_bind_int64(remove,1,job)==SQLITE_OK,sqlite3_step(remove)==SQLITE_DONE else { throw fail(db) }
+        }
+        guard sqlite3_changes(db)==1 else { throw SourceNameLineageStore.Failure.stale }
+        return true
     }
 
     /// Byte-exact and Windows-equivalent ancestry veto. This table is checked
@@ -429,6 +528,91 @@ enum SelectiveNameExceptionStore {
             changedOrReplaced:captured-unchanged-absent,absent:absent,newFiles:newFiles)
     }
 
+    /// Release only a simple, compatible disappearance after the existing
+    /// complete local mirror scan and its durable sequence/event checkpoint.
+    /// No alias, replacement, independent descendant move, unknown identity
+    /// or unresolved publication can count as proof of absence.
+    static func resolveSimpleDisappearances(_ db:OpaquePointer,root:String,rows:[TrackedItem],
+                                           shouldContinue:()->Bool)throws {
+        guard try installed(db) else { return }
+        guard sqlite3_get_autocommit(db)==0 else { throw SourceNameLineageStore.Failure.transactionRequired }
+        let q=try prepare(db,"""
+            SELECT e.id,e.original_path FROM selective_name_exception e
+            JOIN directory_bindings s ON s.root_id=e.root_id AND s.role='source' AND s.stamp=e.source_binding
+            JOIN directory_bindings t ON t.root_id=e.root_id AND t.role='target' AND t.stamp=e.target_binding
+            WHERE e.root_id=?1 AND e.state='missing' AND e.current_path IS NULL AND e.identity IS NOT NULL
+              AND (SELECT COUNT(*) FROM selective_name_guard g WHERE g.exception_id=e.id)=1
+              AND EXISTS(SELECT 1 FROM selective_name_detached d WHERE d.exception_id=e.id AND d.relative_path=e.original_path AND d.identity=e.identity)
+              AND NOT EXISTS(SELECT 1 FROM selective_name_detached d WHERE d.exception_id=e.id AND d.identity IS NULL)
+              AND NOT EXISTS(SELECT 1 FROM file_inventory f WHERE f.root_id=e.root_id
+                  AND (f.relative_path=e.original_path OR instr(f.relative_path,e.original_path||'/')=1))
+              AND NOT EXISTS(SELECT 1 FROM selective_name_exception other WHERE other.id<>e.id AND other.root_id=e.root_id AND other.identity=e.identity)
+              AND NOT EXISTS(SELECT 1 FROM publication_intents p WHERE p.root_id=e.root_id)
+              AND NOT EXISTS(SELECT 1 FROM transfer_recovery r WHERE r.root_id=e.root_id)
+              AND NOT EXISTS(SELECT 1 FROM upload_retry r WHERE r.root_id=e.root_id)
+              AND NOT EXISTS(SELECT 1 FROM retired_publication_evidence r JOIN change_queue c ON c.id=r.job_id WHERE c.root_id=e.root_id)
+              AND NOT EXISTS(SELECT 1 FROM change_queue c WHERE c.root_id=e.root_id AND c.completed=0 AND c.kind='upsert'
+                  AND (c.relative_path=e.original_path OR instr(c.relative_path,e.original_path||'/')=1 OR instr(e.original_path,c.relative_path||'/')=1));
+            """)
+        defer { sqlite3_finalize(q) }
+        try bind(root,1,q,db)
+        var candidates:[(Int64,String)]=[]
+        var rc=sqlite3_step(q)
+        while rc==SQLITE_ROW {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            let path=try string(q,1)
+            if WindowsPathSafety.validRelativePath(path) { candidates.append((sqlite3_column_int64(q,0),path)) }
+            rc=sqlite3_step(q)
+        }
+        guard rc==SQLITE_DONE else { throw fail(db) }
+        guard !candidates.isEmpty else { return }
+        // Only a complete, unambiguous scan can exclude an identity. Compare
+        // device+inode even for hard links and reused inodes; conservative.
+        var live=Set<Data>()
+        var livePaths=Set<String>()
+        for row in rows {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            guard row.kind != "symlink",let f=row.verificationFingerprint else { return }
+            var key=Data(capacity:16)
+            for value in [f.device,f.inode] {
+                var word=value.bigEndian
+                withUnsafeBytes(of:&word){key.append(contentsOf:$0)}
+            }
+            live.insert(key)
+            livePaths.insert(fold(row.relativePath))
+        }
+        let detached=try prepare(db,"SELECT identity FROM selective_name_detached WHERE exception_id=?;")
+        defer { sqlite3_finalize(detached) }
+        for (id,path) in candidates {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            let folded=fold(path)
+            // A live spelling/descendant alias means the disappearance is
+            // not unambiguous, even if its inode differs.
+            if livePaths.contains(where:{$0==folded || $0.hasPrefix(folded+"/")}) { continue }
+            sqlite3_reset(detached);sqlite3_clear_bindings(detached)
+            guard sqlite3_bind_int64(detached,1,id)==SQLITE_OK else { throw fail(db) }
+            var absent=true, count=0
+            var step=sqlite3_step(detached)
+            while step==SQLITE_ROW {
+                guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                guard sqlite3_column_bytes(detached,0)==33,let p=sqlite3_column_blob(detached,0) else { throw SourceNameLineageStore.Failure.invalid }
+                count+=1
+                if live.contains(Data(bytes:p,count:16)) { absent=false }
+                step=sqlite3_step(detached)
+            }
+            guard step==SQLITE_DONE else { throw fail(db) }
+            guard absent,count>0 else { continue }
+            // Remove ONLY this exception's veto. Normal mirror rules,
+            // copy-first, current job validation and other guards still apply.
+            for table in ["selective_name_detached","selective_name_guard","selective_name_exception"] {
+                let column=table=="selective_name_exception" ? "id":"exception_id"
+                let remove=try prepare(db,"DELETE FROM "+table+" WHERE "+column+"=?;")
+                defer { sqlite3_finalize(remove) }
+                guard sqlite3_bind_int64(remove,1,id)==SQLITE_OK,sqlite3_step(remove)==SQLITE_DONE else { throw fail(db) }
+            }
+        }
+    }
+
     static func hasExceptions(_ db:OpaquePointer)throws->Bool {
         guard try installed(db) else { return false }
         let q=try prepare(db,"SELECT 1 FROM selective_name_exception LIMIT 1;")
@@ -466,6 +650,6 @@ enum SelectiveNameExceptionStore {
                    VALUES(1,'Rollback: eccezioni rinomina conservate nel backup; cancellazioni sospese per verifica.');
                 """)
         }
-        try exec(db,"DROP TABLE selective_name_detached; DROP TABLE selective_name_guard; DROP TABLE selective_name_exception; DROP INDEX idx_selective_live_identity;")
+        try exec(db,"DROP TABLE IF EXISTS selective_invalid_upload; DROP TABLE selective_name_detached; DROP TABLE selective_name_guard; DROP TABLE selective_name_exception; DROP INDEX idx_selective_live_identity;")
     }
 }

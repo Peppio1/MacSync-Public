@@ -205,6 +205,59 @@ final class SelectiveNameExceptionTests:XCTestCase {
         }
     }
 
+    func testProvenNewInvalidJobsRetireWithoutInventingDeletes()throws {
+        try lab { source,target,path,inventory,journal in
+            let fm=FileManager.default
+            let bad=source.appendingPathComponent("fresh?"),fixed=source.appendingPathComponent("fresh")
+            // Separate creation from the persisted initial scan timestamp.
+            Thread.sleep(forTimeInterval:0.03)
+            try fm.createDirectory(at:bad,withIntermediateDirectories:false)
+            try Data([8]).write(to:bad.appendingPathComponent("file.jpg"))
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:bad,eventID:1)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_invalid_upload;"),2)
+            try fm.moveItem(at:bad,to:fixed)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:bad,eventID:2)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:fixed,eventID:3)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_invalid_upload;"),0)
+            XCTAssertFalse(try journal.pending(limit:100).contains{$0.relativePath.hasPrefix("fresh?")})
+            XCTAssertTrue(try journal.pending(limit:100).contains{$0.relativePath=="fresh/file.jpg" && $0.kind == .upsert})
+            // A manually seeded legacy target spelling is not evidence of
+            // prior publication by MacSync and must not be deleted blindly.
+            try fm.createDirectory(at:target.appendingPathComponent("fresh?"),withIntermediateDirectories:false)
+            try Data([9]).write(to:target.appendingPathComponent("fresh?/legacy.jpg"))
+            XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent("fresh?/legacy.jpg")),Data([9]))
+            XCTAssertGreaterThan(try scalar(path,"SELECT COUNT(*) FROM selective_name_guard WHERE path='fresh?';"),0)
+        }
+    }
+
+    func testActualDeletionNeedsCompleteCurrentScanAndNoMovedDescendants()throws {
+        try lab { source,target,path,inventory,journal in
+            let fm=FileManager.default
+            let original=source.appendingPathComponent("phone")
+            let outside=source.appendingPathComponent("independent.jpg")
+            try fm.moveItem(at:original.appendingPathComponent("sub/photo-0.jpg"),to:outside)
+            try fm.removeItem(at:original)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:original,eventID:1)
+            let first=try XCTUnwrap(try journal.lineageAbsenceSnapshot(rootID:"photos"))
+            let rows=try LocalScanner.scan(root:source)
+            try journal.resolveLineageMissing(rootID:"photos",rows:rows,snapshot:first,shouldContinue:{true})
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception;"),1)
+            let delete=try XCTUnwrap(journal.pending(limit:100).first{$0.relativePath=="phone/sub/photo-0.jpg" && $0.kind == .delete})
+            XCTAssertFalse(try journal.deletionIsCurrent(id:delete.id,rootID:delete.rootID,relativePath:delete.relativePath))
+            try fm.removeItem(at:outside)
+            // A newer inventory checkpoint invalidates the old scan proof.
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:outside,eventID:2)
+            try journal.resolveLineageMissing(rootID:"photos",rows:try LocalScanner.scan(root:source),snapshot:first,shouldContinue:{true})
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception;"),1)
+            let current=try XCTUnwrap(try journal.lineageAbsenceSnapshot(rootID:"photos"))
+            try journal.resolveLineageMissing(rootID:"photos",rows:try LocalScanner.scan(root:source),snapshot:current,shouldContinue:{true})
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception;"),0)
+            XCTAssertTrue(try journal.deletionIsCurrent(id:delete.id,rootID:delete.rootID,relativePath:delete.relativePath))
+            // Resolution does not perform any filesystem deletion.
+            XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent("phone/sub/photo-0.jpg")),Data([0]))
+        }
+    }
+
     func testNewInvalidAndRollbackRetainEvidenceWithoutAssumingRemoteAbsence()throws {
         try lab { source,_,path,inventory,journal in
             let fm=FileManager.default
