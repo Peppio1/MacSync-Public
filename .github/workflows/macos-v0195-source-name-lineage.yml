@@ -13,6 +13,7 @@ on:
       - 'Tests/MacSyncCoreTests/SourceNameLineageQueueTests.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageSMBTests.swift'
       - 'Tests/MacSyncCoreTests/SourceNameLineageRuntimeTests.swift'
+      - 'Tests/MacSyncCoreTests/SourceNameLineagePerformanceTests.swift'
       - 'Tests/MacSyncCoreTests/SignedRollbackIntegrationTests.swift'
       - 'Sources/MacSyncCore/SeededArchiveVerifier.swift'
       - 'Sources/MacSync/RuntimeStorageGuard.swift'
@@ -44,10 +45,10 @@ jobs:
         env:
           MACSYNC_INTERNAL_NAME_LINEAGE: '1'
         run: swift test -Xswiftc -warnings-as-errors --filter SourceNameLineageRuntimeTests
-      - name: Actual signed v0.19.4 predecessor rollback
+      - name: Representative inventory, QUICK and daily workload
         env:
-          MACSYNC_V0195_ROLLBACK_LAB: '1'
-        run: swift test -Xswiftc -warnings-as-errors --filter SignedRollbackIntegrationTests
+          MACSYNC_LINEAGE_PERFORMANCE: '1'
+        run: swift test -Xswiftc -warnings-as-errors --filter SourceNameLineagePerformanceTests
       - name: Compile application and rollback helper
         run: swift build -Xswiftc -warnings-as-errors
       - name: Prepare pinned Rclone helper

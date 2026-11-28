@@ -134,4 +134,59 @@ final class SourceNameLineageStoreTests: XCTestCase {
             XCTAssertEqual(try journal.pending(limit: 100).map(\.id), before)
         }
     }
+
+    func testVerifiedRemountPreservesNamespaceAndHoldsAndRejectsCollision() throws {
+        try fixture { path, initial in
+            let db=try open(path)
+            defer { sqlite3_close(db) }
+            try SourceNameLineageStore.installProtection(db)
+            try sql(db,"CREATE TABLE directory_bindings(root_id TEXT,role TEXT,stamp TEXT); INSERT INTO directory_bindings VALUES('photos','source','source');")
+            try sql(db,"BEGIN IMMEDIATE;")
+            let saved=try SourceNameLineageStore.write(db,record:initial,expectedRevision:nil)
+            let batch=try XCTUnwrap(try SourceNameLineageStore.batch(db,key:.init(initial),create:false))
+            try batch.protectRename(initial)
+            try sql(db,"COMMIT;")
+            XCTAssertTrue(try SourceNameLineageStore.protected(db,root:"photos",path:"photo.jpg"))
+            try sql(db,"BEGIN IMMEDIATE;")
+            try SourceNameLineageStore.rebindVerifiedTarget(db,root:"photos",old:"target",new:"remounted")
+            try sql(db,"COMMIT;")
+            let new=SourceNameLineage.Record(identity:initial.identity,rootID:initial.rootID,
+                sourceBinding:initial.sourceBinding,targetBinding:"remounted",path:initial.currentPath)
+            XCTAssertNil(try SourceNameLineageStore.read(db,key:.init(initial)))
+            let moved=try XCTUnwrap(try SourceNameLineageStore.read(db,key:.init(new)))
+            XCTAssertEqual(moved.revision,saved.revision)
+            XCTAssertEqual(moved.record.recognizedPaths,initial.recognizedPaths)
+            XCTAssertTrue(try SourceNameLineageStore.protected(db,root:"photos",path:"photo.jpg"))
+            try sql(db,"BEGIN IMMEDIATE;")
+            _=try SourceNameLineageStore.write(db,record:initial,expectedRevision:nil)
+            try sql(db,"COMMIT;")
+            try sql(db,"BEGIN IMMEDIATE;")
+            XCTAssertThrowsError(try SourceNameLineageStore.rebindVerifiedTarget(db,root:"photos",old:"remounted",new:"target"))
+            try sql(db,"ROLLBACK;")
+            XCTAssertNotNil(try SourceNameLineageStore.read(db,key:.init(new)))
+            XCTAssertTrue(try SourceNameLineageStore.protected(db,root:"photos",path:"photo.jpg"))
+        }
+    }
+
+    func testUnknownHistoryHoldAndAliasAreConservative() throws {
+        try fixture { path, initial in
+            let db=try open(path)
+            defer { sqlite3_close(db) }
+            try SourceNameLineageStore.installProtection(db)
+            var record=SourceNameLineage.Record(identity:initial.identity,rootID:initial.rootID,
+                sourceBinding:initial.sourceBinding,targetBinding:initial.targetBinding,path:"Folder/photo.jpg")
+            try sql(db,"BEGIN IMMEDIATE;")
+            let first=try SourceNameLineageStore.write(db,record:record,expectedRevision:nil)
+            let batch=try XCTUnwrap(try SourceNameLineageStore.batch(db,key:.init(record),create:false))
+            try batch.protectRename(record)
+            rename(&record,"folder/photo.jpg")
+            record.recognize(path:"folder/photo.jpg")
+            _=try batch.write(record:record,expectedRevision:first.revision)
+            try batch.releaseConfirmed(record)
+            XCTAssertTrue(try batch.hasHold(record))
+            XCTAssertTrue(try SourceNameLineageStore.protected(db,root:"photos",path:"Folder"))
+            try sql(db,"COMMIT;")
+        }
+    }
+
 }

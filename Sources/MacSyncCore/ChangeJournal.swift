@@ -988,6 +988,10 @@ public final class ChangeJournal {
                     guard sqlite3_step(update) == SQLITE_DONE, sqlite3_changes(connection) == 1 else {
                         throw MountedCopyError.volumeChanged
                     }
+                    if let connection {
+                        try SourceNameLineageStore.rebindVerifiedTarget(connection,root:map.rootID,
+                            old:String(decoding:data,as:UTF8.self),new:encoded)
+                    }
                 }
             }
             try execute("COMMIT;")
@@ -1470,7 +1474,7 @@ public final class ChangeJournal {
                     // Ordinary unchanged recognized entries need no writes or
                     // fresh stat. This is historical evidence, not permission.
                     if prior.record.recognizedPaths.contains(where:{$0.utf8.elementsEqual(item.relativePath.utf8)}),
-                       try !SourceNameLineageStore.protected(connection,root:mapping.rootID,path:item.relativePath) { continue }
+                       try !batch.hasHold(prior.record) { continue }
                 }
                 sqlite3_reset(eligibility); sqlite3_clear_bindings(eligibility)
                 try bind(mapping.rootID,at:1,in:eligibility)

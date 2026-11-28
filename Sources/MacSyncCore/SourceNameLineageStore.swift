@@ -145,7 +145,7 @@ enum SourceNameLineageStore {
             SELECT i.mapping_id,i.identity,i.current_path,0 FROM source_lineage_index i
             JOIN source_lineage_mapping m ON m.id=i.mapping_id
             WHERE m.root_id=?1 AND m.source_binding=?2 AND m.target_binding=?3
-              AND i.current_path=?4 AND (i.recognized_paths IS NOT NULL OR i.uncertain=1);
+              AND i.current_path=?4 AND (i.evidence<>1 OR i.uncertain=1);
             """)
         defer { sqlite3_finalize(q) }
         try bindScope(root,source,target,q,db); try bind(path,4,q,db)
@@ -240,44 +240,45 @@ enum SourceNameLineageStore {
     static func resolveMissing(_ db: OpaquePointer,root: String,rows: [TrackedItem],
                                shouldContinue: () -> Bool) throws {
         guard try protectionInstalled(db) else { return }
-        // A symlink can hide an unobserved subtree on some enumerators.
-        // Never resolve absence from such a potentially incomplete snapshot.
-        guard !rows.contains(where:{$0.kind=="symlink"}) else { return }
-        var present=Set<Data>()
-        for row in rows {
-            guard shouldContinue() else { throw SeedVerificationError.cancelled }
-            guard let f=row.verificationFingerprint else { continue }
-            var key=Data(capacity:16)
-            for value in [f.device,f.inode] {
-                var word=value.bigEndian
-                withUnsafeBytes(of:&word){key.append(contentsOf:$0)}
-            }
-            present.insert(key)
-        }
+        // Query the sparse provisional holds FIRST. The ordinary mirror
+        // cycle does not construct an archive-sized identity set.
         let q=try prepare(db,"""
             SELECT h.mapping_id,h.identity,h.protected_path FROM source_lineage_hold h
             JOIN source_lineage_mapping m ON m.id=h.mapping_id
             JOIN source_lineage_index i ON i.mapping_id=h.mapping_id AND i.identity=h.identity
             JOIN directory_bindings s ON s.root_id=m.root_id AND s.role='source' AND s.stamp=m.source_binding
             JOIN directory_bindings t ON t.root_id=m.root_id AND t.role='target' AND t.stamp=m.target_binding
-            WHERE m.root_id=?1 AND h.reason=0 AND i.uncertain=0 AND i.evidence=2
+            WHERE m.root_id=?1 AND h.reason=0 AND i.uncertain=0 AND i.evidence IN (0,2)
               AND i.current_path=h.protected_path
               AND NOT EXISTS(SELECT 1 FROM file_inventory f WHERE f.root_id=?1 AND f.relative_path=h.protected_path);
             """)
         defer { sqlite3_finalize(q) }
         try bind(root,1,q,db)
-        var removable:[(Int64,Data,String)]=[]
+        var candidates:[(Int64,Data,String)]=[]
         var rc=sqlite3_step(q)
         while rc==SQLITE_ROW {
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
             guard sqlite3_column_bytes(q,1)==33,let p=sqlite3_column_blob(q,1),let name=sqlite3_column_text(q,2) else { throw Failure.invalid }
-            let id=Data(bytes:p,count:33)
-            if !present.contains(Data(id.prefix(16))) {
-                removable.append((sqlite3_column_int64(q,0),id,String(cString:name)))
-            }
+            candidates.append((sqlite3_column_int64(q,0),Data(bytes:p,count:33),String(cString:name)))
             rc=sqlite3_step(q)
         }
         guard rc==SQLITE_DONE else { throw failure(db) }
+        guard !candidates.isEmpty else { return }
+        // A potentially incomplete enumeration cannot prove absence.
+        // Match device+inode, including hard-linked files with fingerprints.
+        var missing=Set(candidates.map{Data($0.1.prefix(16))})
+        for row in rows {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            guard row.kind != "symlink",let f=row.verificationFingerprint else { return }
+            var key=Data(capacity:16)
+            for value in [f.device,f.inode] {
+                var word=value.bigEndian
+                withUnsafeBytes(of:&word){key.append(contentsOf:$0)}
+            }
+            missing.remove(key)
+            if missing.isEmpty { return }
+        }
+        let removable=candidates.filter{missing.contains(Data($0.1.prefix(16)))}
         let remove=try prepare(db,"DELETE FROM source_lineage_hold WHERE mapping_id=? AND identity=? AND protected_path=? AND reason=0;")
         defer { sqlite3_finalize(remove) }
         for (namespace,id,name) in removable {
@@ -287,6 +288,29 @@ enum SourceNameLineageStore {
             try bindBlob(id,2,remove,db); try bind(name,3,remove,db)
             guard sqlite3_step(remove)==SQLITE_DONE else { throw failure(db) }
         }
+    }
+
+    // Caller has independently verified the same remote directory identity
+    // and is updating directory_bindings in this same writer transaction.
+    // Keep the numeric namespace and every hold/observation intact. Never
+    // merge histories if another namespace already occupies the new binding.
+    static func rebindVerifiedTarget(_ db:OpaquePointer,root:String,old:String,new:String) throws {
+        guard sqlite3_get_autocommit(db)==0 else { throw Failure.transactionRequired }
+        if old.utf8.elementsEqual(new.utf8) { return }
+        let exists=try prepare(db,"SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_lineage_mapping';")
+        defer { sqlite3_finalize(exists) }
+        let rc=sqlite3_step(exists)
+        if rc==SQLITE_DONE { return }
+        guard rc==SQLITE_ROW else { throw failure(db) }
+        reset(exists)
+        let q=try prepare(db,"""
+            UPDATE source_lineage_mapping SET target_binding=?3
+            WHERE root_id=?1 AND target_binding=?2
+              AND source_binding=(SELECT stamp FROM directory_bindings WHERE root_id=?1 AND role='source');
+            """)
+        defer { sqlite3_finalize(q) }
+        try bind(root,1,q,db); try bind(old,2,q,db); try bind(new,3,q,db)
+        guard sqlite3_step(q)==SQLITE_DONE else { throw failure(db) }
     }
 
     // Explicit mapping retirement only. Never remove archive files.
@@ -353,6 +377,8 @@ enum SourceNameLineageStore {
         private let targetBinding: String
         private let query: OpaquePointer
         private let upsert: OpaquePointer
+        private let protectionAvailable: Bool
+        private var holdQuery: OpaquePointer?
 
         fileprivate init(_ db: OpaquePointer, key: Key, namespace: Int64) throws {
             self.db = db
@@ -360,6 +386,7 @@ enum SourceNameLineageStore {
             rootID = key.rootID
             sourceBinding = key.sourceBinding
             targetBinding = key.targetBinding
+            protectionAvailable = try protectionInstalled(db)
             let q = try prepare(db, """
                 SELECT current_path,revision,evidence,uncertain,recognized_paths
                 FROM source_lineage_index WHERE mapping_id=? AND identity=?;
@@ -381,6 +408,7 @@ enum SourceNameLineageStore {
         deinit {
             sqlite3_finalize(query)
             sqlite3_finalize(upsert)
+            if let holdQuery { sqlite3_finalize(holdQuery) }
         }
 
         private func verify(_ key: Key) throws {
@@ -419,9 +447,11 @@ enum SourceNameLineageStore {
                       let bytes = sqlite3_column_blob(query, 4) else { throw Failure.invalid }
                 paths = try JSONDecoder().decode([String].self, from: Data(bytes: bytes, count: length))
             }
+            let pathBytes=Data(bytes:path,count:Int(sqlite3_column_bytes(query,0)))
+            guard !pathBytes.contains(0),let exactPath=String(data:pathBytes,encoding:.utf8) else { throw Failure.invalid }
             let record = SourceNameLineage.Record(identity: key.identity, rootID: rootID,
                 sourceBinding: sourceBinding, targetBinding: targetBinding,
-                path: String(cString: path), evidence: evidence,
+                path: exactPath, evidence: evidence,
                 recognizedPaths: paths, uncertainPublication: uncertain == 1)
             try validate(record)
             return Versioned(record: record, revision: revision)
@@ -445,9 +475,11 @@ enum SourceNameLineageStore {
                 ON CONFLICT(mapping_id,identity,protected_path) DO UPDATE SET reason=1;
                 """)
             defer { sqlite3_finalize(q) }
-            // Also preserve an unresolved compatible publication.
+            // Unknown pre-existing archives can also contain the old copy.
+            // Never assume a compatible path was absent merely because no
+            // completed audit or transfer has been recorded yet.
             var paths=record.recognizedPaths
-            if record.uncertainPublication, WindowsPathSafety.validRelativePath(record.currentPath),
+            if (record.evidence != .neverPublished || record.uncertainPublication), WindowsPathSafety.validRelativePath(record.currentPath),
                !paths.contains(where:{$0.utf8.elementsEqual(record.currentPath.utf8)}) { paths.append(record.currentPath) }
             for path in paths {
                 reset(q)
@@ -456,18 +488,47 @@ enum SourceNameLineageStore {
             }
         }
 
-        // Release only when the exact corrected path has been confirmed.
-        // Alias-equivalent old paths cannot become separate delete targets.
+        // Reuse a single primary-key query for the whole inventory/audit
+        // batch. Most unchanged records have no holds and need no writes.
+        private func heldPaths(_ record:SourceNameLineage.Record) throws -> [String] {
+            guard protectionAvailable else { return [] }
+            if holdQuery==nil {
+                holdQuery=try prepare(db,"SELECT protected_path FROM source_lineage_hold WHERE mapping_id=? AND identity=?;")
+            }
+            guard let q=holdQuery else { throw Failure.invalid }
+            reset(q)
+            defer { reset(q) }
+            try bindIdentity(Key(record),q)
+            var paths:[String]=[]
+            var rc=sqlite3_step(q)
+            while rc==SQLITE_ROW {
+                guard let p=sqlite3_column_text(q,0),
+                      let path=String(data:Data(bytes:p,count:Int(sqlite3_column_bytes(q,0))),encoding:.utf8),
+                      !path.utf8.contains(0) else { throw Failure.invalid }
+                paths.append(path)
+                rc=sqlite3_step(q)
+            }
+            guard rc==SQLITE_DONE else { throw failure(db) }
+            return paths
+        }
+
+        func hasHold(_ record:SourceNameLineage.Record) throws -> Bool {
+            try !heldPaths(record).isEmpty
+        }
+
+        // Release only after the exact corrected path is confirmed. Check
+        // provisional unknown-history paths too, not only recognized names.
         func releaseConfirmed(_ record: SourceNameLineage.Record) throws {
             guard !record.uncertainPublication, WindowsPathSafety.validRelativePath(record.currentPath),
-                  record.recognizedPaths.contains(where:{$0.utf8.elementsEqual(record.currentPath.utf8)}),
-                  try protectionInstalled(db) else { return }
+                  record.recognizedPaths.contains(where:{$0.utf8.elementsEqual(record.currentPath.utf8)}) else { return }
+            let paths=try heldPaths(record)
+            guard !paths.isEmpty else { return }
             func fold(_ value:String)->String {
                 value.split(separator:"/",omittingEmptySubsequences:false)
                     .map{WindowsPathSafety.comparisonFold(String($0))}.joined(separator:"/")
             }
             let folded=fold(record.currentPath)
-            guard !record.recognizedPaths.contains(where:{
+            guard !(record.recognizedPaths+paths).contains(where:{
                 !$0.utf8.elementsEqual(record.currentPath.utf8) && fold($0)==folded
             }) else { return }
             let q=try prepare(db,"DELETE FROM source_lineage_hold WHERE mapping_id=? AND identity=?;")
