@@ -782,7 +782,7 @@ enum SourceNameLineageStore {
             }
             let next = (expectedRevision ?? 0).addingReportingOverflow(1)
             guard !next.overflow, next.partialValue > 0 else { throw Failure.invalid }
-            if try measured("store_compact"){try compactRecord(record,revision:next.partialValue)} {
+            if try measured("store_compact",{try compactRecord(record,revision:next.partialValue)}) {
                 return Versioned(record:record,revision:next.partialValue,compact:true)
             }
             if existing?.compact==true { try clearCompact(record) }
