@@ -1,0 +1,20 @@
+name: MacSync lineage storage layout experiment
+on:
+  push:
+    branches: [probe-v0195-inventory-lineage-layout]
+    paths:
+      - 'scripts/ci/probe-inventory-lineage-layout.py'
+      - '.github/workflows/lineage-inventory-layout.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  layout:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Compare synthetic storage layouts on the same runner
+        run: python3 scripts/ci/probe-inventory-lineage-layout.py
