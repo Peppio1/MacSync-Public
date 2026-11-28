@@ -34,6 +34,8 @@ public struct TrackedItem: Equatable, Sendable {
     public let verificationFingerprint: SeedFileFingerprint?
     // Optional diagnostic-only identity from the same existing no-follow stat.
     var sourceLineageIdentity: SourceNameLineage.Identity? = nil
+    // Stored identity is read only by the experimental inventory layout.
+    var storedLineageIdentity: Data? = nil
 
     public init(relativePath: String, kind: String, size: Int64, modifiedAt: Double, changeStamp: String? = nil,
                 verificationFingerprint: SeedFileFingerprint? = nil) {
@@ -299,6 +301,7 @@ public final class LocalInventory {
     // Same opt-in policy for monitor, audit and copy writers.
     var experimentalSourceNameLineage = SourceLineageRuntimePolicy.enabled
     var experimentalLineageQueueProtection = SourceLineageRuntimePolicy.enabled
+    var experimentalInventoryLineageLayout = ProcessInfo.processInfo.environment["MACSYNC_INTERNAL_INVENTORY_LINEAGE"] == "1"
 
     public init(path: String) throws {
         var handle: OpaquePointer?
@@ -575,7 +578,12 @@ public final class LocalInventory {
             defer { sqlite3_finalize(pin) }
             try bind(rootID,at:1,statement:pin); try bind(binding,at:2,statement:pin)
             guard sqlite3_step(pin) == SQLITE_DONE else { throw failure() }
-            let before = try readEntries(rootID: rootID, scope: fullScan ? nil : scope)
+            guard let layoutDB=db else { throw failure() }
+            if experimentalSourceNameLineage && experimentalInventoryLineageLayout {
+                try SourceNameLineageStore.installIntegratedLayout(layoutDB)
+            }
+            let integrated = try SourceNameLineageStore.integratedLayoutInstalled(layoutDB)
+            let before = try readEntries(rootID: rootID, scope: fullScan ? nil : scope,includeLineageIdentity:integrated)
             // FSEvents jobs and restart-recovery scans must never masquerade as
             // disposable bootstrap work. Decide atomically under the writer
             // lock, including old queue history without a watched_roots row.
@@ -610,6 +618,32 @@ public final class LocalInventory {
                         try enqueue(rootID: rootID, relativePath: row.relativePath, kind: .upsert, origin: jobOrigin)
                         upserts += 1
                     }
+                }
+            }
+
+            // The compact record's full identity is obtained from the same
+            // scanner stat, never inferred from an inode or path alone.
+            // Changed metadata detaches the old record via a trigger; even a
+            // replacement with equal ordinary metadata changes the identity.
+            if integrated {
+                let update = try prepare("""
+                    UPDATE file_inventory SET lineage_observed_identity=?
+                    WHERE root_id=? AND relative_path=?;
+                    """)
+                defer { sqlite3_finalize(update) }
+                for row in rows {
+                    guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                    let identity = try row.sourceLineageIdentity.map { try SourceNameLineageStore.identityBytes($0) }
+                    guard identity != before[row.relativePath]?.storedLineageIdentity else { continue }
+                    sqlite3_reset(update);sqlite3_clear_bindings(update)
+                    if let identity {
+                        let transient=unsafeBitCast(-1,to:sqlite3_destructor_type.self)
+                        guard identity.withUnsafeBytes({sqlite3_bind_blob(update,1,$0.baseAddress,Int32($0.count),transient)})==SQLITE_OK else { throw failure() }
+                    } else {
+                        guard sqlite3_bind_null(update,1)==SQLITE_OK else { throw failure() }
+                    }
+                    try bind(rootID,at:2,statement:update);try bind(row.relativePath,at:3,statement:update)
+                    guard sqlite3_step(update)==SQLITE_DONE,sqlite3_changes(layoutDB)==1 else { throw failure() }
                 }
             }
 
@@ -806,6 +840,11 @@ public final class LocalInventory {
             var record = saved?.record ?? initial
             if let saved {
                 if saved.record.currentPath.utf8.elementsEqual(row.relativePath.utf8) {
+                    if batch.integrated && !saved.compact {
+                        // Repack previously detached or legacy records only
+                        // when the exact scanned identity is present again.
+                        try batch.write(record:saved.record,expectedRevision:saved.revision)
+                    }
                     if experimentalLineageQueueProtection { try batch.rememberInvalidObservation(saved.record) }
                     continue
                 }
@@ -957,15 +996,16 @@ public final class LocalInventory {
         }
     }
 
-    private func readEntries(rootID: String, scope: String?) throws -> [String: TrackedItem] {
+    private func readEntries(rootID: String, scope: String?,includeLineageIdentity:Bool = false) throws -> [String: TrackedItem] {
         // The composite primary key (root_id, relative_path) makes this a
         // targeted index lookup for file events, even with huge local archives.
         // For scope="folder", descendants lie in ["folder/", "folder0")
         // because ASCII '/' is immediately followed by '0'.
+        let identityColumn = includeLineageIdentity ? ",lineage_observed_identity" : ""
         let sql: String
         if scope != nil {
             sql = """
-                SELECT relative_path, kind, file_size, modified_at, change_stamp
+                SELECT relative_path, kind, file_size, modified_at, change_stamp\(identityColumn)
                 FROM file_inventory
                 WHERE root_id = ? AND
                   (relative_path = ? OR
@@ -973,7 +1013,7 @@ public final class LocalInventory {
                 """
         } else {
             sql = """
-                SELECT relative_path, kind, file_size, modified_at, change_stamp
+                SELECT relative_path, kind, file_size, modified_at, change_stamp\(identityColumn)
                 FROM file_inventory WHERE root_id = ?;
                 """
         }
@@ -991,12 +1031,19 @@ public final class LocalInventory {
             if result == SQLITE_DONE { break }
             guard result == SQLITE_ROW else { throw failure() }
             let path = column(statement, 0)
-            items[path] = TrackedItem(
+            var item = TrackedItem(
                 relativePath: path, kind: column(statement, 1),
                 size: sqlite3_column_int64(statement, 2),
                 modifiedAt: sqlite3_column_double(statement, 3),
                 changeStamp: sqlite3_column_type(statement,4) == SQLITE_NULL ? nil : column(statement,4)
             )
+            if includeLineageIdentity,sqlite3_column_type(statement,5) != SQLITE_NULL {
+                guard sqlite3_column_bytes(statement,5)==33,let blob=sqlite3_column_blob(statement,5) else {
+                    throw SourceNameLineageStore.Failure.invalid
+                }
+                item.storedLineageIdentity=Data(bytes:blob,count:33)
+            }
+            items[path]=item
         }
         return items
     }

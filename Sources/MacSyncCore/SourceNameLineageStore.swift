@@ -22,6 +22,11 @@ enum SourceNameLineageStore {
     struct Versioned: Equatable, Sendable {
         let record: SourceNameLineage.Record
         let revision: Int64
+        var compact = false
+
+        static func == (lhs:Versioned,rhs:Versioned)->Bool {
+            lhs.record == rhs.record && lhs.revision == rhs.revision
+        }
     }
 
     enum Failure: Error, Equatable { case stale, invalid, transactionRequired }
@@ -62,6 +67,88 @@ enum SourceNameLineageStore {
         ) WITHOUT ROWID;
         """
 
+    // Candidate-only layout. A persisted view, not an environment variable,
+    // determines how every connection reads already-installed observations.
+    // The existing index retains detached, uncertain and multi-path records.
+    static let integratedColumns:Set<String> = [
+        "lineage_observed_identity","lineage_mapping_id","lineage_revision","lineage_evidence"
+    ]
+    static func integratedLayoutInstalled(_ db:OpaquePointer) throws -> Bool {
+        let q = try prepare(db,"SELECT 1 FROM sqlite_master WHERE type='view' AND name='source_lineage_records';")
+        defer { sqlite3_finalize(q) }
+        let rc = sqlite3_step(q)
+        guard rc == SQLITE_ROW || rc == SQLITE_DONE else { throw failure(db) }
+        return rc == SQLITE_ROW
+    }
+    static func installIntegratedLayout(_ db:OpaquePointer) throws {
+        guard sqlite3_get_autocommit(db)==0 else { throw Failure.transactionRequired }
+        if try integratedLayoutInstalled(db) { return }
+        try installProtection(db)
+        let sql = """
+            ALTER TABLE file_inventory ADD COLUMN lineage_observed_identity BLOB
+                CHECK(lineage_observed_identity IS NULL OR length(lineage_observed_identity)=33);
+            ALTER TABLE file_inventory ADD COLUMN lineage_mapping_id INTEGER;
+            ALTER TABLE file_inventory ADD COLUMN lineage_revision INTEGER CHECK(lineage_revision>0);
+            ALTER TABLE file_inventory ADD COLUMN lineage_evidence INTEGER CHECK(lineage_evidence IN (0,2));
+            CREATE UNIQUE INDEX idx_inventory_live_lineage ON file_inventory(lineage_mapping_id,lineage_observed_identity)
+                WHERE lineage_mapping_id IS NOT NULL;
+            CREATE INDEX idx_inventory_lineage_path ON file_inventory(lineage_mapping_id,relative_path)
+                WHERE lineage_mapping_id IS NOT NULL;
+            CREATE VIEW source_lineage_records AS
+                SELECT mapping_id,identity,current_path,revision,evidence,uncertain,recognized_paths,0 AS compact
+                  FROM source_lineage_index
+                UNION ALL
+                SELECT lineage_mapping_id,lineage_observed_identity,relative_path,lineage_revision,
+                       lineage_evidence,0,NULL,1
+                  FROM file_inventory WHERE lineage_mapping_id IS NOT NULL;
+            CREATE TRIGGER lineage_inventory_before_delete BEFORE DELETE ON file_inventory
+                WHEN OLD.lineage_mapping_id IS NOT NULL
+            BEGIN
+                INSERT INTO source_lineage_index(mapping_id,identity,current_path,revision,evidence,uncertain,recognized_paths)
+                VALUES(OLD.lineage_mapping_id,OLD.lineage_observed_identity,OLD.relative_path,OLD.lineage_revision,
+                       OLD.lineage_evidence,0,CASE WHEN OLD.lineage_evidence=2 THEN CAST(json_array(OLD.relative_path) AS BLOB) ELSE NULL END);
+            END;
+            CREATE TRIGGER lineage_inventory_before_change
+                BEFORE UPDATE OF root_id,relative_path,kind,file_size,modified_at,change_stamp,lineage_observed_identity ON file_inventory
+                WHEN OLD.lineage_mapping_id IS NOT NULL
+            BEGIN
+                INSERT INTO source_lineage_index(mapping_id,identity,current_path,revision,evidence,uncertain,recognized_paths)
+                VALUES(OLD.lineage_mapping_id,OLD.lineage_observed_identity,OLD.relative_path,OLD.lineage_revision,
+                       OLD.lineage_evidence,0,CASE WHEN OLD.lineage_evidence=2 THEN CAST(json_array(OLD.relative_path) AS BLOB) ELSE NULL END);
+            END;
+            CREATE TRIGGER lineage_inventory_after_change
+                AFTER UPDATE OF root_id,relative_path,kind,file_size,modified_at,change_stamp,lineage_observed_identity ON file_inventory
+                WHEN OLD.lineage_mapping_id IS NOT NULL
+            BEGIN
+                UPDATE file_inventory SET lineage_mapping_id=NULL,lineage_revision=NULL,lineage_evidence=NULL
+                WHERE root_id=NEW.root_id AND relative_path=NEW.relative_path;
+            END;
+            """
+        guard sqlite3_exec(db,sql,nil,nil,nil)==SQLITE_OK else { throw failure(db) }
+    }
+    static func removeIntegratedLayoutForRollback(_ db:OpaquePointer) throws {
+        guard sqlite3_get_autocommit(db)==0 else { throw Failure.transactionRequired }
+        guard try integratedLayoutInstalled(db) else { return }
+        // Only called AFTER backup and quarantine of protected jobs. Derived
+        // evidence is invalidated as on the established predecessor path.
+        let sql = """
+            DROP VIEW source_lineage_records;
+            DROP TRIGGER lineage_inventory_before_delete;
+            DROP TRIGGER lineage_inventory_before_change;
+            DROP TRIGGER lineage_inventory_after_change;
+            DROP INDEX idx_inventory_live_lineage;
+            DROP INDEX idx_inventory_lineage_path;
+            ALTER TABLE file_inventory DROP COLUMN lineage_mapping_id;
+            ALTER TABLE file_inventory DROP COLUMN lineage_revision;
+            ALTER TABLE file_inventory DROP COLUMN lineage_evidence;
+            ALTER TABLE file_inventory DROP COLUMN lineage_observed_identity;
+            """
+        guard sqlite3_exec(db,sql,nil,nil,nil)==SQLITE_OK else { throw failure(db) }
+    }
+    private static func recordsTable(_ db:OpaquePointer) throws -> String {
+        try integratedLayoutInstalled(db) ? "source_lineage_records" : "source_lineage_index"
+    }
+
     private static let maximumRecordBytes = 1_048_576
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     private static func failure(_ db: OpaquePointer) -> JournalError {
@@ -91,7 +178,7 @@ enum SourceNameLineageStore {
         }
     }
     /// Exact, fixed-width binary identity. Never truncate a UInt64 inode.
-    private static func identityBytes(_ id: SourceNameLineage.Identity) throws -> Data {
+    static func identityBytes(_ id: SourceNameLineage.Identity) throws -> Data {
         guard id.inode != 0, id.birthSeconds > 0, (0..<1_000_000_000).contains(id.birthNanos),
               id.kind == "file" || id.kind == "directory" else { throw Failure.invalid }
         var result = Data(capacity: 33)
@@ -140,9 +227,10 @@ enum SourceNameLineageStore {
     // Even an event containing only a disappearance is not proof of deletion.
     static func holdMissing(_ db: OpaquePointer,root: String,source: String,target: String,path: String) throws {
         guard WindowsPathSafety.validRelativePath(path) else { return }
+        let records = try recordsTable(db)
         let q = try prepare(db,"""
             INSERT OR IGNORE INTO source_lineage_hold(mapping_id,identity,protected_path,reason)
-            SELECT i.mapping_id,i.identity,i.current_path,0 FROM source_lineage_index i
+            SELECT i.mapping_id,i.identity,i.current_path,0 FROM \(records) i
             JOIN source_lineage_mapping m ON m.id=i.mapping_id
             WHERE m.root_id=?1 AND m.source_binding=?2 AND m.target_binding=?3
               AND i.current_path=?4 AND (i.evidence<>1 OR i.uncertain=1);
@@ -162,10 +250,11 @@ enum SourceNameLineageStore {
         // Only the exact invalid observation from the previous committed
         // inventory is eligible, including directories. A historical
         // recognized path is not a claim that a server spelling is absent.
+        let records = try recordsTable(db)
         let q = try prepare(db,"""
             SELECT o.identity,j.id FROM source_lineage_invalid_observation o
             JOIN source_lineage_mapping m ON m.id=o.mapping_id
-            JOIN source_lineage_index i ON i.mapping_id=o.mapping_id AND i.identity=o.identity
+            JOIN \(records) i ON i.mapping_id=o.mapping_id AND i.identity=o.identity
             JOIN change_queue j ON j.root_id=m.root_id AND j.relative_path=o.path
             WHERE m.root_id=?1 AND m.source_binding=?2 AND m.target_binding=?3
               AND o.path=?4 AND i.uncertain=0 AND i.evidence IN (1,2)
@@ -242,10 +331,11 @@ enum SourceNameLineageStore {
         guard try protectionInstalled(db) else { return }
         // Query the sparse provisional holds FIRST. The ordinary mirror
         // cycle does not construct an archive-sized identity set.
+        let records = try recordsTable(db)
         let q=try prepare(db,"""
             SELECT h.mapping_id,h.identity,h.protected_path FROM source_lineage_hold h
             JOIN source_lineage_mapping m ON m.id=h.mapping_id
-            JOIN source_lineage_index i ON i.mapping_id=h.mapping_id AND i.identity=h.identity
+            JOIN \(records) i ON i.mapping_id=h.mapping_id AND i.identity=h.identity
             JOIN directory_bindings s ON s.root_id=m.root_id AND s.role='source' AND s.stamp=m.source_binding
             JOIN directory_bindings t ON t.root_id=m.root_id AND t.role='target' AND t.stamp=m.target_binding
             WHERE m.root_id=?1 AND h.reason=0 AND i.uncertain=0 AND i.evidence IN (0,2)
@@ -321,6 +411,12 @@ enum SourceNameLineageStore {
         if rc==SQLITE_DONE { return }
         guard rc==SQLITE_ROW else { throw failure(db) }
         reset(q)
+        if try integratedLayoutInstalled(db) {
+            let clear=try prepare(db,"UPDATE file_inventory SET lineage_mapping_id=NULL,lineage_revision=NULL,lineage_evidence=NULL WHERE root_id=? AND lineage_mapping_id IS NOT NULL;")
+            defer { sqlite3_finalize(clear) }
+            try bind(root,1,clear,db)
+            guard sqlite3_step(clear)==SQLITE_DONE else { throw failure(db) }
+        }
         var tables=["source_lineage_index"]
         if try protectionInstalled(db) { tables.append("source_lineage_hold") }
         let observed=try prepare(db,"SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_lineage_invalid_observation';")
@@ -381,6 +477,11 @@ enum SourceNameLineageStore {
         private var holdQuery: OpaquePointer?
         private var holdExistsQuery: OpaquePointer?
         private var auditQuery: OpaquePointer?
+        private var compactQuery: OpaquePointer?
+        private var eraseSparse: OpaquePointer?
+        private var eraseCompact: OpaquePointer?
+        let integrated: Bool
+        private let records: String
         private let decoder = JSONDecoder()
         private let encoder = JSONEncoder()
 
@@ -391,9 +492,14 @@ enum SourceNameLineageStore {
             sourceBinding = key.sourceBinding
             targetBinding = key.targetBinding
             protectionAvailable = try protectionInstalled(db)
+            let integrated = try integratedLayoutInstalled(db)
+            self.integrated = integrated
+            let records = integrated ? "source_lineage_records" : "source_lineage_index"
+            self.records = records
+            let compactColumn = integrated ? "compact" : "0"
             let q = try prepare(db, """
-                SELECT current_path,revision,evidence,uncertain,recognized_paths
-                FROM source_lineage_index WHERE mapping_id=? AND identity=?;
+                SELECT current_path,revision,evidence,uncertain,recognized_paths,\(compactColumn)
+                FROM \(records) WHERE mapping_id=? AND identity=?;
                 """)
             do {
                 upsert = try prepare(db, """
@@ -416,6 +522,9 @@ enum SourceNameLineageStore {
             if let holdQuery { sqlite3_finalize(holdQuery) }
             if let holdExistsQuery { sqlite3_finalize(holdExistsQuery) }
             if let auditQuery { sqlite3_finalize(auditQuery) }
+            if let compactQuery { sqlite3_finalize(compactQuery) }
+            if let eraseSparse { sqlite3_finalize(eraseSparse) }
+            if let eraseCompact { sqlite3_finalize(eraseCompact) }
         }
 
         private func verify(_ key: Key) throws {
@@ -438,11 +547,12 @@ enum SourceNameLineageStore {
         func readForAudit(key: Key) throws -> (Versioned?,Bool) {
             guard protectionAvailable else { return (try read(key:key),false) }
             if auditQuery == nil {
+                let compactColumn = integrated ? "i.compact" : "0"
                 auditQuery = try prepare(db, """
-                    SELECT i.current_path,i.revision,i.evidence,i.uncertain,i.recognized_paths,
+                    SELECT i.current_path,i.revision,i.evidence,i.uncertain,i.recognized_paths,\(compactColumn),
                            EXISTS(SELECT 1 FROM source_lineage_hold h
                                   WHERE h.mapping_id=i.mapping_id AND h.identity=i.identity)
-                    FROM source_lineage_index i WHERE i.mapping_id=? AND i.identity=?;
+                    FROM \(records) i WHERE i.mapping_id=? AND i.identity=?;
                     """)
             }
             guard let auditQuery else { throw Failure.invalid }
@@ -477,12 +587,27 @@ enum SourceNameLineageStore {
             }
             let pathBytes=Data(bytes:path,count:Int(sqlite3_column_bytes(query,0)))
             guard !pathBytes.contains(0),let exactPath=String(data:pathBytes,encoding:.utf8) else { throw Failure.invalid }
+            let compact = sqlite3_column_int(query,5)
+            guard compact==0 || compact==1 else { throw Failure.invalid }
+            if compact==1 {
+                guard uncertain==0,sqlite3_column_type(query,4)==SQLITE_NULL,
+                      evidence == .unknown || evidence == .recognized else { throw Failure.invalid }
+                if evidence == .recognized { paths=[exactPath] }
+            }
             let record = SourceNameLineage.Record(identity: key.identity, rootID: rootID,
                 sourceBinding: sourceBinding, targetBinding: targetBinding,
                 path: exactPath, evidence: evidence,
                 recognizedPaths: paths, uncertainPublication: uncertain == 1)
             try validate(record)
-            return (Versioned(record: record, revision: revision),includeHold && sqlite3_column_int(query,5) != 0)
+            let hasHold = includeHold && sqlite3_column_int(query,6) != 0
+            // A duplicate live/detached identity is a corrupt layout, not
+            // permission to select one arbitrarily.
+            if integrated {
+                let next=sqlite3_step(query)
+                if next==SQLITE_ROW { throw Failure.invalid }
+                guard next==SQLITE_DONE else { throw failure(db) }
+            }
+            return (Versioned(record: record, revision: revision,compact:compact==1),hasHold)
         }
 
         func rememberInvalidObservation(_ record: SourceNameLineage.Record) throws {
@@ -575,6 +700,56 @@ enum SourceNameLineageStore {
             guard sqlite3_step(q)==SQLITE_DONE else { throw failure(db) }
         }
 
+        // Only observations independently matched to a live inventory row
+        // can occupy its compact slot. Unknown history remains unknown.
+        // Invalid, uncertain, detached and multi-path records stay sparse.
+        private func compactRecord(_ record:SourceNameLineage.Record,revision:Int64) throws -> Bool {
+            guard integrated,!record.uncertainPublication,
+                  WindowsPathSafety.validRelativePath(record.currentPath),
+                  (record.evidence == .unknown && record.recognizedPaths.isEmpty) ||
+                  (record.evidence == .recognized && record.recognizedPaths.count==1 &&
+                   record.recognizedPaths[0].utf8.elementsEqual(record.currentPath.utf8)) else { return false }
+            if compactQuery==nil {
+                compactQuery=try prepare(db,"""
+                    UPDATE file_inventory SET lineage_mapping_id=?1,lineage_revision=?4,lineage_evidence=?5
+                    WHERE root_id=?6 AND relative_path=?3 AND lineage_observed_identity=?2
+                      AND (lineage_mapping_id IS NULL OR lineage_mapping_id=?1);
+                    """)
+            }
+            guard let q=compactQuery else { throw Failure.invalid }
+            reset(q)
+            defer { reset(q) }
+            try bindIdentity(Key(record),q)
+            try bind(record.currentPath,3,q,db);try bind(rootID,6,q,db)
+            guard sqlite3_bind_int64(q,4,revision)==SQLITE_OK,
+                  sqlite3_bind_int(q,5,record.evidence == .recognized ? 2 : 0)==SQLITE_OK,
+                  sqlite3_step(q)==SQLITE_DONE else { throw failure(db) }
+            guard sqlite3_changes(db)==1 else { return false }
+            if eraseSparse==nil {
+                eraseSparse=try prepare(db,"DELETE FROM source_lineage_index WHERE mapping_id=? AND identity=?;")
+            }
+            guard let erase=eraseSparse else { throw Failure.invalid }
+            reset(erase)
+            defer { reset(erase) }
+            try bindIdentity(Key(record),erase)
+            guard sqlite3_step(erase)==SQLITE_DONE else { throw failure(db) }
+            return true
+        }
+
+        private func clearCompact(_ record:SourceNameLineage.Record) throws {
+            if eraseCompact==nil {
+                eraseCompact=try prepare(db,"""
+                    UPDATE file_inventory SET lineage_mapping_id=NULL,lineage_revision=NULL,lineage_evidence=NULL
+                    WHERE lineage_mapping_id=? AND lineage_observed_identity=?;
+                    """)
+            }
+            guard let q=eraseCompact else { throw Failure.invalid }
+            reset(q)
+            defer { reset(q) }
+            try bindIdentity(Key(record),q)
+            guard sqlite3_step(q)==SQLITE_DONE,sqlite3_changes(db)==1 else { throw Failure.stale }
+        }
+
         @discardableResult
         func write(record: SourceNameLineage.Record, expectedRevision: Int64?) throws -> Versioned {
             guard sqlite3_get_autocommit(db) == 0 else { throw Failure.transactionRequired }
@@ -584,7 +759,7 @@ enum SourceNameLineageStore {
             // existing positive revision cannot match the zero sentinel.
             // Existing records still undergo full decoding and validation.
             let existing: Versioned?
-            if let expectedRevision {
+            if expectedRevision != nil || integrated {
                 existing = try read(key: key)
                 guard existing?.revision == expectedRevision else { throw Failure.stale }
             } else {
@@ -594,10 +769,17 @@ enum SourceNameLineageStore {
                existing.record.uncertainPublication == record.uncertainPublication,
                existing.record.currentPath.utf8.elementsEqual(record.currentPath.utf8),
                existing.record.recognizedPaths.map({ Data($0.utf8) }) == record.recognizedPaths.map({ Data($0.utf8) }) {
+                if integrated,!existing.compact,try compactRecord(record,revision:existing.revision) {
+                    return Versioned(record:record,revision:existing.revision,compact:true)
+                }
                 return existing
             }
             let next = (expectedRevision ?? 0).addingReportingOverflow(1)
             guard !next.overflow, next.partialValue > 0 else { throw Failure.invalid }
+            if try compactRecord(record,revision:next.partialValue) {
+                return Versioned(record:record,revision:next.partialValue,compact:true)
+            }
+            if existing?.compact==true { try clearCompact(record) }
             reset(upsert)
             defer { reset(upsert) }
             try bindIdentity(key, upsert)

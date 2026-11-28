@@ -56,7 +56,10 @@ public enum SignedRollbackTransaction {
                 guard let name=sqlite3_column_text(stmt,1) else { throw ApplicationRollback.Failure("Colonna SQLite non riconosciuta.") }
                 actual.insert(String(cString:name));rc=sqlite3_step(stmt)
             }
-            guard rc==SQLITE_DONE,actual==expected else {
+            let knownIntegrated = table=="file_inventory" &&
+                actual==expected.union(SourceNameLineageStore.integratedColumns)
+            let compatible = actual==expected ? true : (knownIntegrated ? try SourceNameLineageStore.integratedLayoutInstalled(db) : false)
+            guard rc==SQLITE_DONE,compatible else {
                 throw ApplicationRollback.Failure("Schema non compatibile: "+table)
             }
         }
@@ -121,6 +124,7 @@ public enum SignedRollbackTransaction {
                     throw ApplicationRollback.Failure("Impossibile conservare le cancellazioni protette.")
                 }
             }
+            try SourceNameLineageStore.removeIntegratedLayoutForRollback(db)
             // The predecessor cannot maintain these derived observations.
             // Invalidate them instead of allowing stale evidence on re-upgrade.
             for table in ["source_lineage_invalid_observation","source_lineage_hold","source_lineage_index","source_lineage_mapping"] {

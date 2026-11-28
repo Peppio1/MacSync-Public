@@ -5,6 +5,8 @@ on:
     paths:
       - 'scripts/ci/probe-inventory-lineage-layout.py'
       - '.github/workflows/lineage-inventory-layout.yml'
+      - 'Sources/MacSyncCore/**'
+      - 'Tests/MacSyncCoreTests/**'
   workflow_dispatch:
 permissions:
   contents: read
@@ -18,3 +20,20 @@ jobs:
           persist-credentials: false
       - name: Compare synthetic storage layouts on the same runner
         run: python3 scripts/ci/probe-inventory-lineage-layout.py
+      - name: Compile and validate integrated inventory layout
+        env:
+          MACSYNC_INTERNAL_INVENTORY_LINEAGE: '1'
+        run: swift test -Xswiftc -warnings-as-errors --filter 'SourceNameLineageIntegratedLayoutTests|SourceNameLineageQueueTests|SourceNameLineageAuditTests|SourceNameLineageInventoryTests|SourceNameLineageTransferTests|LocalInventoryTests|MirrorDeletionTests|ApplicationRollbackTests|SignedUpdatePolicyTests'
+      - name: Shared runtime integration with inventory layout
+        env:
+          MACSYNC_INTERNAL_NAME_LINEAGE: '1'
+          MACSYNC_INTERNAL_INVENTORY_LINEAGE: '1'
+        run: swift test -Xswiftc -warnings-as-errors --filter SourceNameLineageRuntimeTests
+      - name: Compare representative QUICK on same runner
+        env:
+          MACSYNC_LINEAGE_PERFORMANCE: '1'
+        run: |
+          MACSYNC_INTERNAL_INVENTORY_LINEAGE=0 swift test -Xswiftc -warnings-as-errors --filter SourceNameLineagePerformanceTests
+          MACSYNC_INTERNAL_INVENTORY_LINEAGE=1 swift test -Xswiftc -warnings-as-errors --filter SourceNameLineagePerformanceTests
+      - name: Compile application and rollback helper
+        run: swift build -Xswiftc -warnings-as-errors

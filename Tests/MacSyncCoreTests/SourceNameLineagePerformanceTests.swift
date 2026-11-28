@@ -13,6 +13,7 @@ final class SourceNameLineagePerformanceTests: XCTestCase {
         defer { try? fm.removeItem(at:base) }
         let source=base.appendingPathComponent("source"),target=base.appendingPathComponent("target")
         let folderCount=1000,filesPerFolder=10
+        let integrated = ProcessInfo.processInfo.environment["MACSYNC_INTERNAL_INVENTORY_LINEAGE"] == "1"
         let fixed=Date(timeIntervalSince1970:1_700_000_000)
         let bytes=Data(repeating:0x42,count:64)
         for root in [source,target] {
@@ -34,6 +35,7 @@ final class SourceNameLineagePerformanceTests: XCTestCase {
         baseline.experimentalSourceNameLineage=false
         baseline.experimentalLineageQueueProtection=false
         ja.experimentalSourceNameLineage=false
+        candidate.experimentalInventoryLineageLayout=integrated
         candidate.experimentalSourceNameLineage=true
         candidate.experimentalLineageQueueProtection=true
         jb.experimentalSourceNameLineage=true
@@ -103,6 +105,6 @@ final class SourceNameLineagePerformanceTests: XCTestCase {
         }
         let bytesA=try logicalBytes(a),bytesB=try logicalBytes(b)
         XCTAssertLessThan(bytesB-bytesA,8*1024*1024)
-        print("LINEAGE_REPRESENTATIVE files=10000 directories=1000 initial_baseline=\(seedA) initial_candidate=\(seedB) quick_first_baseline=\(firstA.seconds) quick_first_candidate=\(firstB.seconds) quick_repeat_baseline=\(repeatA.seconds) quick_repeat_candidate=\(repeatB.seconds) daily_jobs=\(countB) daily_baseline=\(dailyA) daily_candidate=\(dailyB) baseline_bytes=\(bytesA) candidate_bytes=\(bytesB) target_content_bytes_read=0")
+        print("LINEAGE_REPRESENTATIVE integrated=\(integrated) files=10000 directories=1000 initial_baseline=\(seedA) initial_candidate=\(seedB) quick_first_baseline=\(firstA.seconds) quick_first_candidate=\(firstB.seconds) quick_repeat_baseline=\(repeatA.seconds) quick_repeat_candidate=\(repeatB.seconds) daily_jobs=\(countB) daily_baseline=\(dailyA) daily_candidate=\(dailyB) baseline_bytes=\(bytesA) candidate_bytes=\(bytesB) target_content_bytes_read=0")
     }
 }
