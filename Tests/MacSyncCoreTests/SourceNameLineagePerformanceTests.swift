@@ -57,6 +57,11 @@ final class SourceNameLineagePerformanceTests: XCTestCase {
         let firstB=try ab.run(mode:.quick,repair:true)
         let repeatB=try ab.run(mode:.quick,repair:true)
         let repeatA=try aa.run(mode:.quick,repair:true)
+        if ProcessInfo.processInfo.environment["MACSYNC_LINEAGE_PROFILE"] == "1" {
+            for (name,report) in [("baseline_first",firstA),("candidate_first",firstB),("candidate_repeat",repeatB),("baseline_repeat",repeatA)] {
+                print("LINEAGE_AUDIT_PHASES integrated=\(integrated) run=\(name) source_scan=\(report.sourceMetrics.scanSeconds) target_scan=\(report.destinationMetrics.scanSeconds) compare=\(report.comparisonSeconds) total=\(report.seconds)")
+            }
+        }
         func signature(_ report:ArchiveAuditReport)->[String] {
             report.findings.map{$0.relativePath+":"+$0.kind.rawValue}.sorted()
         }

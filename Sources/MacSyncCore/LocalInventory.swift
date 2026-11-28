@@ -553,14 +553,19 @@ public final class LocalInventory {
         let target = (subtree ?? root).standardizedFileURL.resolvingSymlinksInPath()
         let binding = try DirectoryBinding.encoded(root)
         let ignoreDSStore = FileExclusionPolicy.ignoreDSStore
+        let timing=SourceLineageTiming("inventory")
+        var committed=false
+        var profiledItems=0
+        defer { timing.finish(items:profiledItems,committed:committed) }
         let scanStarted=Date()
-        let rows = try LocalScanner.scan(root: root, subtree: subtree, ignoreDSStore:ignoreDSStore, shouldContinue: shouldContinue, onItem: onItem,
-            collectSourceLineageIdentity: experimentalSourceNameLineage)
+        let rows = try timing.measure("scan"){try LocalScanner.scan(root: root, subtree: subtree, ignoreDSStore:ignoreDSStore, shouldContinue: shouldContinue, onItem: onItem,
+            collectSourceLineageIdentity: experimentalSourceNameLineage)}
+        profiledItems=rows.count
         guard shouldContinue() else { throw SeedVerificationError.cancelled }
         let fullScan = target.path == root.path
         let scope = fullScan ? "" : String(target.path.dropFirst(root.path.count + 1))
 
-        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        try timing.measure("begin"){try execute("BEGIN IMMEDIATE TRANSACTION;")}
         do {
             let previousRootPath = try rootPath(rootID: rootID)
             if let previousRootPath, previousRootPath != root.path {
@@ -580,10 +585,10 @@ public final class LocalInventory {
             guard sqlite3_step(pin) == SQLITE_DONE else { throw failure() }
             guard let layoutDB=db else { throw failure() }
             if experimentalSourceNameLineage && experimentalInventoryLineageLayout {
-                try SourceNameLineageStore.installIntegratedLayout(layoutDB)
+                try timing.measure("install_layout"){try SourceNameLineageStore.installIntegratedLayout(layoutDB)}
             }
             let integrated = try SourceNameLineageStore.integratedLayoutInstalled(layoutDB)
-            let before = try readEntries(rootID: rootID, scope: fullScan ? nil : scope,includeLineageIdentity:integrated)
+            let before = try timing.measure("inventory_read"){try readEntries(rootID: rootID, scope: fullScan ? nil : scope,includeLineageIdentity:integrated)}
             // FSEvents jobs and restart-recovery scans must never masquerade as
             // disposable bootstrap work. Decide atomically under the writer
             // lock, including old queue history without a watched_roots row.
@@ -611,7 +616,7 @@ public final class LocalInventory {
             for row in rows {
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 if before[row.relativePath] != row {
-                    try store(rootID: rootID, item: row)
+                    try timing.measure("inventory_write"){try store(rootID: rootID, item: row)}
                     // Upgrade legacy metadata without re-uploading the entire archive.
                     let old = before[row.relativePath]
                     if !pristine && (old == nil || old?.changeStamp != nil || old?.kind != row.kind || old?.size != row.size || old?.modifiedAt != row.modifiedAt) {
@@ -626,6 +631,7 @@ public final class LocalInventory {
             // Changed metadata detaches the old record via a trigger; even a
             // replacement with equal ordinary metadata changes the identity.
             if integrated {
+                try timing.measure("identity_update") {
                 let update = try prepare("""
                     UPDATE file_inventory SET lineage_observed_identity=?
                     WHERE root_id=? AND relative_path=?;
@@ -644,6 +650,7 @@ public final class LocalInventory {
                     }
                     try bind(rootID,at:2,statement:update);try bind(row.relativePath,at:3,statement:update)
                     guard sqlite3_step(update)==SQLITE_DONE,sqlite3_changes(layoutDB)==1 else { throw failure() }
+                }
                 }
             }
 
@@ -759,8 +766,8 @@ public final class LocalInventory {
 
             // The name index is committed with the inventory and queue, not
             // by a separate filesystem scan or UI timer.
-            try updateNameIndex(rootID:rootID, before:before, seen:seen,
-                                fullScan:fullScan, shouldContinue:shouldContinue)
+            try timing.measure("name_index"){try updateNameIndex(rootID:rootID, before:before, seen:seen,
+                                fullScan:fullScan, shouldContinue:shouldContinue)}
 
             // Keep existing event ID if caller is doing a scan independent of FSEvents.
             let prior = try lastEventID(rootID: rootID)
@@ -769,14 +776,15 @@ public final class LocalInventory {
             else { checkpoint = prior }
             guard try DirectoryBinding.encoded(root) == binding else { throw MountedCopyError.sourceRootChanged }
             if experimentalSourceNameLineage {
-                try observeSourceNameLineage(rootID: rootID, sourceBinding: binding,
+                try timing.measure("lineage_observe"){try observeSourceNameLineage(rootID: rootID, sourceBinding: binding,
                     rows: rows, before: before, previousScan: previousScan,
                     sourceEvent: origin == .sourceMonitor && eventID != nil,
-                    shouldContinue: shouldContinue)
+                    shouldContinue: shouldContinue,timing:timing)}
             }
             try saveRoot(rootID: rootID, rootPath: root.path, eventID: checkpoint)
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
-            try execute("COMMIT;")
+            try timing.measure("commit"){try execute("COMMIT;")}
+            committed=true
             return ReconciliationResult(inspected: rows.count, queuedUpserts: upserts, queuedDeletes: deletes)
         } catch {
             try? execute("ROLLBACK;")
@@ -791,7 +799,7 @@ public final class LocalInventory {
     private func observeSourceNameLineage(rootID: String, sourceBinding: String,
                                           rows: [TrackedItem], before: [String:TrackedItem],
                                           previousScan: Date?, sourceEvent: Bool,
-                                          shouldContinue: () -> Bool) throws {
+                                          shouldContinue: () -> Bool,timing:SourceLineageTiming) throws {
         guard let db else { throw failure() }
         let query = try prepare("SELECT stamp FROM directory_bindings WHERE root_id=? AND role='target';")
         defer { sqlite3_finalize(query) }
@@ -836,14 +844,15 @@ public final class LocalInventory {
             let key = SourceNameLineageStore.Key(initial)
             if batch == nil { batch = try SourceNameLineageStore.batch(db, key: key, create: true) }
             guard let batch else { throw SourceNameLineageStore.Failure.invalid }
-            let saved = try batch.read(key: key)
+            batch.timing=timing
+            let saved = try timing.measure("inventory_lineage_lookup"){try batch.read(key: key)}
             var record = saved?.record ?? initial
             if let saved {
                 if saved.record.currentPath.utf8.elementsEqual(row.relativePath.utf8) {
                     if batch.integrated && !saved.compact {
                         // Repack previously detached or legacy records only
                         // when the exact scanned identity is present again.
-                        try batch.write(record:saved.record,expectedRevision:saved.revision)
+                        _ = try timing.measure("inventory_lineage_repack"){try batch.write(record:saved.record,expectedRevision:saved.revision)}
                     }
                     if experimentalLineageQueueProtection { try batch.rememberInvalidObservation(saved.record) }
                     continue
@@ -855,7 +864,7 @@ public final class LocalInventory {
             }
             // Unknown existing archive entries stay unknown. Never promote
             // a generic completed queue row to verified publication here.
-            try batch.write(record: record, expectedRevision: saved?.revision)
+            _ = try timing.measure("inventory_lineage_write"){try batch.write(record: record, expectedRevision: saved?.revision)}
             if experimentalLineageQueueProtection { try batch.rememberInvalidObservation(record) }
         }
     }

@@ -1421,7 +1421,10 @@ public final class ChangeJournal {
                                       cutoff: Int64, shouldContinue: () -> Bool,
                                       onProgress: (Int,Int) -> Void = {_,_ in}) throws {
         guard experimentalSourceNameLineage, !items.isEmpty, let connection else { return }
-        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        let timing=SourceLineageTiming("audit")
+        var committed=false
+        defer { timing.finish(items:items.count,committed:committed) }
+        try timing.measure("begin"){try execute("BEGIN IMMEDIATE TRANSACTION;")}
         do {
             try SourceNameLineageStore.install(connection)
             let stamps = try prepare("SELECT role,stamp FROM directory_bindings WHERE root_id=?;")
@@ -1458,23 +1461,28 @@ public final class ChangeJournal {
             onProgress(0,items.count)
             var batch: SourceNameLineageStore.Batch?
             var counts: [SourceNameLineage.Identity: Int] = [:]
-            for item in items {
-                guard shouldContinue() else { throw SeedVerificationError.cancelled }
-                if let identity = item.sourceLineageIdentity { counts[identity, default: 0] += 1 }
+            try timing.measure("count_identities") {
+                for item in items {
+                    guard shouldContinue() else { throw SeedVerificationError.cancelled }
+                    if let identity = item.sourceLineageIdentity { counts[identity, default: 0] += 1 }
+                }
             }
             for (index,item) in items.enumerated() {
                 if index > 0 && index % 256 == 0 { onProgress(index,items.count) }
                 guard shouldContinue() else { throw SeedVerificationError.cancelled }
                 guard let identity = item.sourceLineageIdentity, counts[identity] == 1,
                       let fingerprint = item.verificationFingerprint,
-                      WindowsPathSafety.validRelativePath(item.relativePath),
-                      !protection.protects(rootID:mapping.rootID,path:item.relativePath) else { continue }
+                      timing.measure("path_protection",{
+                          WindowsPathSafety.validRelativePath(item.relativePath) &&
+                          !protection.protects(rootID:mapping.rootID,path:item.relativePath)
+                      }) else { continue }
                 let initial = SourceNameLineage.Record(identity:identity,rootID:mapping.rootID,
                     sourceBinding:sourceBinding,targetBinding:targetBinding,path:item.relativePath)
                 let key = SourceNameLineageStore.Key(initial)
                 if batch == nil { batch = try SourceNameLineageStore.batch(connection,key:key,create:true) }
                 guard let batch else { throw databaseFailure() }
-                let (prior,hasHold) = try batch.readForAudit(key:key)
+                batch.timing=timing
+                let (prior,hasHold) = try timing.measure("record_lookup"){try batch.readForAudit(key:key)}
                 if let prior {
                     guard prior.record.currentPath.utf8.elementsEqual(item.relativePath.utf8),
                           !prior.record.uncertainPublication else { continue }
@@ -1483,11 +1491,12 @@ public final class ChangeJournal {
                     if prior.record.recognizedPaths.contains(where:{$0.utf8.elementsEqual(item.relativePath.utf8)}),
                        !hasHold {
                         if batch.integrated && !prior.compact {
-                            try batch.write(record:prior.record,expectedRevision:prior.revision)
+                            _ = try timing.measure("repack"){try batch.write(record:prior.record,expectedRevision:prior.revision)}
                         }
                         continue
                     }
                 }
+                let eligible = try timing.measure("eligibility") { () throws -> Int32 in
                 sqlite3_reset(eligibility); sqlite3_clear_bindings(eligibility)
                 try bind(mapping.rootID,at:1,in:eligibility)
                 try bind(item.relativePath,at:2,in:eligibility)
@@ -1496,22 +1505,24 @@ public final class ChangeJournal {
                       sqlite3_bind_double(eligibility,5,fingerprint.modifiedAt)==SQLITE_OK,
                       sqlite3_bind_int64(eligibility,7,cutoff)==SQLITE_OK else { throw databaseFailure() }
                 try bind("\(fingerprint.inode):\(fingerprint.ctimeSeconds):\(fingerprint.ctimeNanos)",at:6,in:eligibility)
-                let eligible = sqlite3_step(eligibility)
+                return sqlite3_step(eligibility)
+                }
                 if eligible == SQLITE_DONE { continue }
                 guard eligible == SQLITE_ROW else { throw databaseFailure() }
                 let url = mapping.source.appendingPathComponent(item.relativePath)
                 var live = stat()
-                guard url.resolvingSymlinksInPath().path == url.path,
-                      url.path.withCString({ lstat($0,&live) }) == 0,
-                      SourceNameLineage.Identity(stat:live) == identity,
-                      SeedFileFingerprint(fileStat:live) == fingerprint else { continue }
+                guard timing.measure("resolve_symlinks",{url.resolvingSymlinksInPath().path == url.path}),
+                      timing.measure("local_lstat",{url.path.withCString({ lstat($0,&live) }) == 0}),
+                      timing.measure("fingerprint",{SourceNameLineage.Identity(stat:live) == identity &&
+                          SeedFileFingerprint(fileStat:live) == fingerprint}) else { continue }
                 var record = prior?.record ?? initial
                 record.recognize(path:item.relativePath)
-                try batch.write(record:record,expectedRevision:prior?.revision)
-                try batch.releaseConfirmed(record)
+                _ = try timing.measure("record_write"){try batch.write(record:record,expectedRevision:prior?.revision)}
+                try timing.measure("release_check"){try batch.releaseConfirmed(record)}
             }
             guard shouldContinue() else { throw SeedVerificationError.cancelled }
-            try execute("COMMIT;")
+            try timing.measure("commit"){try execute("COMMIT;")}
+            committed=true
         } catch { try? execute("ROLLBACK;"); throw error }
     }
 

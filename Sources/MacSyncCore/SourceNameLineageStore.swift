@@ -482,6 +482,7 @@ enum SourceNameLineageStore {
         private var eraseCompact: OpaquePointer?
         let integrated: Bool
         private let records: String
+        var timing: SourceLineageTiming?
         private let decoder = JSONDecoder()
         private let encoder = JSONEncoder()
 
@@ -559,12 +560,17 @@ enum SourceNameLineageStore {
             return try readRow(key:key,statement:auditQuery,includeHold:true)
         }
 
+        private func measured<T>(_ phase:String,_ body:() throws -> T) rethrows -> T {
+            if let timing { return try timing.measure(phase,body) }
+            return try body()
+        }
+
         private func readRow(key:Key,statement:OpaquePointer,includeHold:Bool) throws -> (Versioned?,Bool) {
             let query = statement
             reset(query)
             defer { reset(query) }
-            try bindIdentity(key, query)
-            let rc = sqlite3_step(query)
+            try measured("store_bind"){try bindIdentity(key, query)}
+            let rc = measured("store_select"){sqlite3_step(query)}
             if rc == SQLITE_DONE { return (nil,false) }
             guard rc == SQLITE_ROW else { throw failure(db) }
             let revision = sqlite3_column_int64(query, 1)
@@ -583,7 +589,7 @@ enum SourceNameLineageStore {
                 let length = Int(sqlite3_column_bytes(query, 4))
                 guard length > 0, length <= maximumRecordBytes,
                       let bytes = sqlite3_column_blob(query, 4) else { throw Failure.invalid }
-                paths = try decoder.decode([String].self, from: Data(bytes: bytes, count: length))
+                paths = try measured("store_decode"){try decoder.decode([String].self, from: Data(bytes: bytes, count: length))}
             }
             let pathBytes=Data(bytes:path,count:Int(sqlite3_column_bytes(query,0)))
             guard !pathBytes.contains(0),let exactPath=String(data:pathBytes,encoding:.utf8) else { throw Failure.invalid }
@@ -598,12 +604,12 @@ enum SourceNameLineageStore {
                 sourceBinding: sourceBinding, targetBinding: targetBinding,
                 path: exactPath, evidence: evidence,
                 recognizedPaths: paths, uncertainPublication: uncertain == 1)
-            try validate(record)
+            try measured("store_validate"){try validate(record)}
             let hasHold = includeHold && sqlite3_column_int(query,6) != 0
             // A duplicate live/detached identity is a corrupt layout, not
             // permission to select one arbitrarily.
             if integrated {
-                let next=sqlite3_step(query)
+                let next=measured("store_duplicate_check"){sqlite3_step(query)}
                 if next==SQLITE_ROW { throw Failure.invalid }
                 guard next==SQLITE_DONE else { throw failure(db) }
             }
@@ -732,7 +738,7 @@ enum SourceNameLineageStore {
             reset(erase)
             defer { reset(erase) }
             try bindIdentity(Key(record),erase)
-            guard sqlite3_step(erase)==SQLITE_DONE else { throw failure(db) }
+            guard measured("store_sparse_erase",{sqlite3_step(erase)})==SQLITE_DONE else { throw failure(db) }
             return true
         }
 
@@ -760,7 +766,7 @@ enum SourceNameLineageStore {
             // Existing records still undergo full decoding and validation.
             let existing: Versioned?
             if expectedRevision != nil || integrated {
-                existing = try read(key: key)
+                existing = try measured("store_revision_read"){try read(key: key)}
                 guard existing?.revision == expectedRevision else { throw Failure.stale }
             } else {
                 existing = nil
@@ -776,7 +782,7 @@ enum SourceNameLineageStore {
             }
             let next = (expectedRevision ?? 0).addingReportingOverflow(1)
             guard !next.overflow, next.partialValue > 0 else { throw Failure.invalid }
-            if try compactRecord(record,revision:next.partialValue) {
+            if try measured("store_compact"){try compactRecord(record,revision:next.partialValue)} {
                 return Versioned(record:record,revision:next.partialValue,compact:true)
             }
             if existing?.compact==true { try clearCompact(record) }
@@ -794,7 +800,7 @@ enum SourceNameLineageStore {
             } else {
                 try bindBlob(encoder.encode(record.recognizedPaths), 7, upsert, db)
             }
-            guard sqlite3_step(upsert) == SQLITE_DONE else { throw failure(db) }
+            guard measured("store_sparse_upsert",{sqlite3_step(upsert)}) == SQLITE_DONE else { throw failure(db) }
             guard sqlite3_changes(db) == 1 else { throw Failure.stale }
             return Versioned(record: record, revision: next.partialValue)
         }

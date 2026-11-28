@@ -35,5 +35,12 @@ jobs:
         run: |
           MACSYNC_INTERNAL_INVENTORY_LINEAGE=0 swift test -Xswiftc -warnings-as-errors --filter SourceNameLineagePerformanceTests
           MACSYNC_INTERNAL_INVENTORY_LINEAGE=1 swift test -Xswiftc -warnings-as-errors --filter SourceNameLineagePerformanceTests
+      - name: Profile both layouts with detailed phase timings
+        env:
+          MACSYNC_LINEAGE_PERFORMANCE: '1'
+          MACSYNC_LINEAGE_PROFILE: '1'
+        run: |
+          MACSYNC_INTERNAL_INVENTORY_LINEAGE=1 swift test -Xswiftc -warnings-as-errors --filter SourceNameLineagePerformanceTests
+          MACSYNC_INTERNAL_INVENTORY_LINEAGE=0 swift test -Xswiftc -warnings-as-errors --filter SourceNameLineagePerformanceTests
       - name: Compile application and rollback helper
         run: swift build -Xswiftc -warnings-as-errors
