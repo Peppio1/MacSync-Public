@@ -258,6 +258,72 @@ final class SelectiveNameExceptionTests:XCTestCase {
         }
     }
 
+    func testCleanBaselineRestorationAvoidsCopiesAndLeavesQuickQueueUntouched()throws {
+        try lab { source,target,path,inventory,journal in
+            let fm=FileManager.default
+            let original=source.appendingPathComponent("phone"),bad=source.appendingPathComponent("phone.")
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_clean_baseline;"),1)
+            try fm.moveItem(at:original,to:bad)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:original,eventID:1)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_restore_proof;"),10)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:bad,eventID:2)
+            try fm.moveItem(at:bad,to:original)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:bad,eventID:3)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:original,eventID:4)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_restore_proof WHERE restore_job IS NOT NULL;"),10)
+            XCTAssertFalse(try journal.pending(limit:100).contains{$0.relativePath.hasPrefix("phone.")})
+            let map=try MountedFolderMapping(rootID:"photos",source:source,target:target)
+            let ids=try journal.pending(limit:100).map(\.id)
+            let report=try ArchiveAudit(journal:journal,mappings:[map]).run(mode:.quick,repair:true)
+            XCTAssertEqual(report.bytesRead,0)
+            XCTAssertEqual(try journal.pending(limit:100).map(\.id),ids)
+            let log=try SyncActivityLog(path:path)
+            let worker=try MountedFolderCopyWorker(journal:journal,log:log,mappings:[map],minimumStableAge:0)
+            let result=try worker.runCycle(enabled:true)
+            XCTAssertEqual(result.copied,0)
+            XCTAssertEqual(result.reconciled,10)
+            XCTAssertEqual(result.bytes,0)
+            XCTAssertTrue(try journal.pending().isEmpty)
+            _=try ArchiveAudit(journal:journal,mappings:[map]).run(mode:.quick,repair:true)
+            XCTAssertEqual(try scalar(path,"SELECT COUNT(*) FROM selective_name_exception;"),0)
+            for k in 0..<8 {
+                XCTAssertEqual(try Data(contentsOf:target.appendingPathComponent("phone/sub/photo-\(k).jpg")),Data([UInt8(k)]))
+            }
+        }
+    }
+
+    func testRestorationProofRejectsChangedAndUncertainJobs()throws {
+        try lab { source,target,path,inventory,journal in
+            let fm=FileManager.default
+            let original=source.appendingPathComponent("phone"),bad=source.appendingPathComponent("phone.")
+            try fm.moveItem(at:original,to:bad)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:original,eventID:1)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:bad,eventID:2)
+            try Data([90,91]).write(to:bad.appendingPathComponent("sub/photo-0.jpg"))
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:bad,eventID:3)
+            try fm.moveItem(at:bad,to:original)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:bad,eventID:4)
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:original,eventID:5)
+            let map=try MountedFolderMapping(rootID:"photos",source:source,target:target)
+            let jobs=try journal.pending(limit:100)
+            let changed=try XCTUnwrap(jobs.first{$0.relativePath=="phone/sub/photo-0.jpg" && $0.kind == .upsert})
+            let unchanged=try XCTUnwrap(jobs.first{$0.relativePath=="phone/sub/photo-1.jpg" && $0.kind == .upsert})
+            XCTAssertFalse(try journal.selectiveRestoredCandidate(changed,mapping:map))
+            XCTAssertTrue(try journal.selectiveRestoredCandidate(unchanged,mapping:map))
+            try journal.recordPublicationIntent(unchanged)
+            XCTAssertFalse(try journal.selectiveRestoredCandidate(unchanged,mapping:map))
+            XCTAssertGreaterThan(try scalar(path,"SELECT COUNT(*) FROM selective_name_guard;"),0)
+            try journal.clearPublicationIntent(unchanged)
+            XCTAssertTrue(try journal.selectiveRestoredCandidate(unchanged,mapping:map))
+            // A genuine new modification supersedes the exact marked job.
+            try Data([88,89]).write(to:original.appendingPathComponent("sub/photo-1.jpg"))
+            _=try inventory.reconcile(rootID:"photos",root:source,subtree:original,eventID:6)
+            XCTAssertFalse(try journal.selectiveRestoredCandidate(unchanged,mapping:map))
+            let new=try XCTUnwrap(journal.pending(limit:100).first{$0.relativePath=="phone/sub/photo-1.jpg" && $0.kind == .upsert})
+            XCTAssertFalse(try journal.selectiveRestoredCandidate(new,mapping:map))
+        }
+    }
+
     func testNewInvalidAndRollbackRetainEvidenceWithoutAssumingRemoteAbsence()throws {
         try lab { source,_,path,inventory,journal in
             let fm=FileManager.default

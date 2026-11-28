@@ -666,7 +666,12 @@ public final class LocalInventory {
                 if changed && !pristine &&
                     (old == nil || old?.changeStamp != nil || old?.kind != row.kind ||
                      old?.size != row.size || old?.modifiedAt != row.modifiedAt) {
+                    let restoredID = selective && old == nil ?
+                        try SelectiveNameExceptionStore.restoreCandidate(layoutDB,root:rootID,source:binding,row:row) : nil
                     let job=try enqueue(rootID:rootID,relativePath:row.relativePath,kind:.upsert,origin:jobOrigin)
+                    if let restoredID {
+                        try SelectiveNameExceptionStore.markRestoredUpload(layoutDB,id:restoredID,path:row.relativePath,job:job)
+                    }
                     if markSpeculative {
                         try SelectiveNameExceptionStore.markSpeculative(layoutDB,root:rootID,source:binding,row:row,job:job)
                     }
@@ -748,6 +753,9 @@ public final class LocalInventory {
                     if retired { continue }
                 }
                 let jobID=try enqueue(rootID: rootID, relativePath: path, kind: .delete, origin: .sourceMonitor)
+                if selective {
+                    try SelectiveNameExceptionStore.markOriginalDelete(layoutDB,root:rootID,source:binding,old:oldItem,job:jobID)
+                }
                 deletes += 1
                 // Only automatic rectifications of incompatible components
                 // can have receipts. Retain the FSEvents delete unchanged.

@@ -311,6 +311,9 @@ public final class ArchiveAudit {
         let shadowLineage = repair && journal.experimentalSourceNameLineage &&
             (mode == .quick || mode == .intelligent)
         let shadowCutoff = shadowLineage ? try journal.queueSequence() : 0
+        let selectiveAudit=repair && (mode == .quick || mode == .intelligent) ?
+            try journal.selectiveNameExceptionsInstalled() : false
+        var selectiveSnapshots:[String:ChangeJournal.LineageAbsenceSnapshot]=[:]
         if queueExtras { try journal.verifyDirectoryBindings(mappings) }
         // One indexed read of the already-approved SQLite rename plan.
         // Its relationships are NOT inferred from equal size or timestamps.
@@ -357,8 +360,9 @@ public final class ArchiveAudit {
             }
             let sourceStamp = try Self.rootStamp(mapping.source)
             let targetStamp = try Self.rootStamp(mapping.target)
-            let sourceBinding = (queueExtras || shadowLineage) ? try DirectoryBinding.encoded(mapping.source) : nil
-            let targetBinding = (queueExtras || shadowLineage) ? try DirectoryBinding.encoded(mapping.target) : nil
+            let sourceBinding = (queueExtras || shadowLineage || selectiveAudit) ? try DirectoryBinding.encoded(mapping.source) : nil
+            let targetBinding = (queueExtras || shadowLineage || selectiveAudit) ? try DirectoryBinding.encoded(mapping.target) : nil
+            if selectiveAudit { selectiveSnapshots[mapping.rootID]=try journal.lineageAbsenceSnapshot(rootID:mapping.rootID) }
             var scanStart = ProcessInfo.processInfo.systemUptime
             func scanned(_ item: TrackedItem) {
                 if state.scanningDestination { state.destination.record(item) }
@@ -811,6 +815,27 @@ public final class ArchiveAudit {
                         state.phase="Attesa sicurezza storico rinomine"; report(force:true)
                     }
                 }
+            }
+        }
+        if selectiveAudit {
+            // No per-file historical record; reuse the current audit result.
+            // A changed source checkpoint or queued operation defeats the
+            // single clean-root certificate and leaves the normal queue alone.
+            for pair in pairs {
+                try check()
+                guard cancellation.awaitCommitWindow(onWaiting:{
+                    state.phase="Attesa sicurezza eccezioni"; report(force:true)
+                }) else { throw SeedVerificationError.cancelled }
+                guard let src=pair.sourceBinding,let dst=pair.targetBinding,
+                      try DirectoryBinding.encoded(pair.mapping.source)==src,
+                      try DirectoryBinding.encoded(pair.mapping.target)==dst else { throw MountedCopyError.volumeChanged }
+                let allMatching=pair.source.count==pair.target.count &&
+                    !findings.contains(where:{$0.rootID==pair.mapping.rootID &&
+                        ($0.kind != .matching || !WindowsPathSafety.validRelativePath($0.relativePath))})
+                try journal.finishSelectiveAudit(mapping:pair.mapping,sourceBinding:src,targetBinding:dst,
+                    sourceRows:Array(pair.source.values),targetRows:Array(pair.target.values),
+                    allMatching:allMatching,snapshot:selectiveSnapshots[pair.mapping.rootID],
+                    shouldContinue:{cancellation.mayCommit})
             }
         }
         state.phase="Salvataggio operazioni nel database · completato"; report(force:true)

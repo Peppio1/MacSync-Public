@@ -2269,6 +2269,89 @@ public final class ChangeJournal {
         } catch { try? execute("ROLLBACK;"); throw error }
     }
 
+    func selectiveNameExceptionsInstalled()throws->Bool {
+        guard let connection else { return false }
+        return try SelectiveNameExceptionStore.installed(connection)
+    }
+
+    func finishSelectiveAudit(mapping:MountedFolderMapping,sourceBinding:String,targetBinding:String,
+                              sourceRows:[TrackedItem],targetRows:[TrackedItem],allMatching:Bool,
+                              snapshot:LineageAbsenceSnapshot?,shouldContinue:()->Bool)throws {
+        guard let connection,let snapshot else { return }
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            // Schema migration is normally installed by inventory; do not
+            // write a certificate if the scan/checkpoint changed.
+            try SelectiveNameExceptionStore.install(connection)
+            try SelectiveNameExceptionStore.invalidateCertificate(connection,root:mapping.rootID)
+            guard allMatching,try lineageAbsenceSnapshot(rootID:mapping.rootID)==snapshot,
+                  try queueRebuildToken()==nil,
+                  try !SelectiveNameExceptionStore.rootUncertain(connection,root:mapping.rootID) else {
+                try execute("COMMIT;");return
+            }
+            let q=try prepare("""
+                SELECT 1 WHERE EXISTS(SELECT 1 FROM directory_bindings WHERE root_id=?1 AND role='source' AND stamp=?2)
+                  AND EXISTS(SELECT 1 FROM directory_bindings WHERE root_id=?1 AND role='target' AND stamp=?3)
+                  AND NOT EXISTS(SELECT 1 FROM change_queue WHERE root_id=?1 AND completed=0);
+                """)
+            defer { sqlite3_finalize(q) }
+            try bind(mapping.rootID,at:1,in:q);try bind(sourceBinding,at:2,in:q);try bind(targetBinding,at:3,in:q)
+            let rc=sqlite3_step(q)
+            guard rc==SQLITE_ROW || rc==SQLITE_DONE else { throw databaseFailure() }
+            guard rc==SQLITE_ROW,try inventoryMatchesForShutdown(rootID:mapping.rootID,scanned:sourceRows) else {
+                try execute("COMMIT;");return
+            }
+            sqlite3_reset(q)
+            // Native target only: SMB enumeration is not literal proof
+            // for hidden incompatible legacy spellings.
+            if ["apfs","hfs"].contains(mapping.targetVolume.fileSystem.lowercased()) {
+                try SelectiveNameExceptionStore.resolveAuditedNativeRestorations(connection,root:mapping.rootID,
+                    source:sourceBinding,target:targetBinding,sourceRows:sourceRows,targetRows:targetRows,shouldContinue:shouldContinue)
+            }
+            try SelectiveNameExceptionStore.certifyCleanBaseline(connection,root:mapping.rootID,
+                source:sourceBinding,target:targetBinding,snapshot:snapshot)
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            try execute("COMMIT;")
+        } catch { try? execute("ROLLBACK;");throw error }
+    }
+
+    func selectiveRestoredCandidate(_ job:QueuedChange,mapping:MountedFolderMapping)throws->Bool {
+        guard let connection,try SelectiveNameExceptionStore.hasRestoredJob(connection,job:job.id) else { return false }
+        return try SelectiveNameExceptionStore.restoredUploadEligible(connection,job:job,
+            source:DirectoryBinding.encoded(mapping.source),target:DirectoryBinding.encoded(mapping.target))
+    }
+
+    func acknowledgeSelectiveRestoration(_ job:QueuedChange,mapping:MountedFolderMapping,
+                    sourceURL:URL,sourceFingerprint:SeedFileFingerprint,
+                    sourceIdentity:SourceNameLineage.Identity,sourceBinding:String,targetBinding:String,
+                    shouldContinue:()->Bool)throws->Bool {
+        guard let connection else { return false }
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            guard shouldContinue(),try queueRebuildToken()==nil,
+                  try !NameRectification.pendingProtection(journal:self).protects(rootID:job.rootID,path:job.relativePath),
+                  try SelectiveNameExceptionStore.restoredUploadEligible(connection,job:job,source:sourceBinding,target:targetBinding,
+                      identity:SourceNameLineageStore.identityBytes(sourceIdentity),fingerprint:sourceFingerprint) else {
+                try execute("COMMIT;");return false
+            }
+            // Local revalidation in the writer transaction. Remote metadata
+            // and names were verified outside the SQLite lock by the worker.
+            var live=stat()
+            guard sourceURL.resolvingSymlinksInPath().path==sourceURL.path,
+                  sourceURL.path.withCString({lstat($0,&live)})==0,
+                  SourceNameLineage.Identity(stat:live)==sourceIdentity,
+                  SeedFileFingerprint(fileStat:live)==sourceFingerprint,
+                  try DirectoryBinding.encoded(mapping.source)==sourceBinding else {
+                try execute("COMMIT;");return false
+            }
+            let accepted=try acknowledgeUpload(job)
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            try execute("COMMIT;")
+            return accepted
+        } catch { try? execute("ROLLBACK;");throw error }
+    }
+
     // Shadow publication evidence is never derived from a generic completed
     // job. The worker supplies the exact local source identity before transfer.
     struct LineageTransferToken {

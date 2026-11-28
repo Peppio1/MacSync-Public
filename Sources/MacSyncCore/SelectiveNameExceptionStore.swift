@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import Darwin
 
 /// Candidate laboratory: persistent, sparse vetoes for suspicious source
 /// transitions. Never grants delete, publication or queue acknowledgement
@@ -54,6 +55,7 @@ enum SelectiveNameExceptionStore {
         guard sqlite3_get_autocommit(db)==0 else { throw SourceNameLineageStore.Failure.transactionRequired }
         if try installed(db) {
             try installSpeculativeJobs(db)
+            try installRestorationProof(db)
             return
         }
         try SourceNameLineageStore.installIntegratedLayout(db)
@@ -86,6 +88,211 @@ enum SelectiveNameExceptionStore {
             ) WITHOUT ROWID;
             """)
         try installSpeculativeJobs(db)
+        try installRestorationProof(db)
+    }
+
+    private static func restorationInstalled(_ db:OpaquePointer)throws->Bool {
+        let q=try prepare(db,"SELECT 1 FROM sqlite_master WHERE type='table' AND name='selective_restore_proof';")
+        defer { sqlite3_finalize(q) }
+        let rc=sqlite3_step(q)
+        guard rc==SQLITE_ROW || rc==SQLITE_DONE else { throw fail(db) }
+        return rc==SQLITE_ROW
+    }
+
+    private static func installRestorationProof(_ db:OpaquePointer)throws {
+        try exec(db,"""
+            CREATE TABLE IF NOT EXISTS selective_clean_baseline(
+                root_id TEXT PRIMARY KEY,source_binding TEXT NOT NULL,target_binding TEXT NOT NULL,
+                scan TEXT NOT NULL,event TEXT NOT NULL,sequence INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS selective_restore_proof(
+                exception_id INTEGER NOT NULL,path TEXT NOT NULL,
+                delete_job INTEGER UNIQUE,restore_job INTEGER UNIQUE,
+                PRIMARY KEY(exception_id,path)
+            ) WITHOUT ROWID;
+            """)
+    }
+
+    // One conservative certificate per clean, completely matching root.
+    // It is not a permanent file history. A changed inventory checkpoint
+    // or queue sequence makes it ineligible for NEW exception capture.
+    static func certifyCleanBaseline(_ db:OpaquePointer,root:String,source:String,target:String,
+                                    snapshot:ChangeJournal.LineageAbsenceSnapshot)throws {
+        guard sqlite3_get_autocommit(db)==0 else { throw SourceNameLineageStore.Failure.transactionRequired }
+        try installRestorationProof(db)
+        let q=try prepare(db,"""
+            INSERT INTO selective_clean_baseline(root_id,source_binding,target_binding,scan,event,sequence)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(root_id) DO UPDATE SET source_binding=excluded.source_binding,
+              target_binding=excluded.target_binding,scan=excluded.scan,event=excluded.event,sequence=excluded.sequence;
+            """)
+        defer { sqlite3_finalize(q) }
+        try bind(root,1,q,db);try bind(source,2,q,db);try bind(target,3,q,db)
+        try bind(snapshot.scan,4,q,db);try bind(snapshot.event,5,q,db)
+        guard sqlite3_bind_int64(q,6,snapshot.sequence)==SQLITE_OK,sqlite3_step(q)==SQLITE_DONE else { throw fail(db) }
+    }
+
+    static func invalidateCertificate(_ db:OpaquePointer,root:String)throws {
+        let q=try prepare(db,"DELETE FROM selective_clean_baseline WHERE root_id=?;")
+        defer { sqlite3_finalize(q) }
+        try bind(root,1,q,db)
+        guard sqlite3_step(q)==SQLITE_DONE else { throw fail(db) }
+    }
+
+    // Fail closed on all unresolved publication/rectification state in this
+    // root. This is deliberately stricter than normal copy eligibility.
+    static func rootUncertain(_ db:OpaquePointer,root:String)throws->Bool {
+        let q=try prepare(db,"""
+            SELECT 1 WHERE EXISTS(SELECT 1 FROM publication_intents WHERE root_id=?1)
+               OR EXISTS(SELECT 1 FROM transfer_recovery WHERE root_id=?1)
+               OR EXISTS(SELECT 1 FROM upload_retry WHERE root_id=?1)
+               OR EXISTS(SELECT 1 FROM retired_publication_evidence r JOIN change_queue c ON c.id=r.job_id WHERE c.root_id=?1)
+               OR EXISTS(SELECT 1 FROM queue_rebuild_hold)
+               OR EXISTS(SELECT 1 FROM name_rectification_batch)
+               OR EXISTS(SELECT 1 FROM name_rectification_groups WHERE root_id=?1);
+            """)
+        defer { sqlite3_finalize(q) }
+        try bind(root,1,q,db)
+        let rc=sqlite3_step(q)
+        guard rc==SQLITE_ROW || rc==SQLITE_DONE else { throw fail(db) }
+        return rc==SQLITE_ROW
+    }
+
+    private static func captureRestoreProof(_ db:OpaquePointer,id:Int64,root:String,source:String,target:String)throws {
+        guard try !rootUncertain(db,root:root) else { return }
+        let q=try prepare(db,"""
+            INSERT INTO selective_restore_proof(exception_id,path)
+            SELECT d.exception_id,d.relative_path FROM selective_name_detached d
+            JOIN selective_clean_baseline b ON b.root_id=?2
+            JOIN watched_roots w ON w.root_id=b.root_id
+            WHERE d.exception_id=?1 AND d.identity IS NOT NULL AND d.kind IN ('file','directory')
+              AND b.source_binding=?3 AND b.target_binding=?4
+              AND b.scan=CAST(w.last_scan_at AS TEXT) AND b.event=COALESCE(w.last_event_id,'')
+              AND b.sequence=COALESCE((SELECT seq FROM sqlite_sequence WHERE name='change_queue'),0)
+              AND NOT EXISTS(SELECT 1 FROM change_queue c WHERE c.root_id=?2 AND c.completed=0);
+            """)
+        defer { sqlite3_finalize(q) }
+        guard sqlite3_bind_int64(q,1,id)==SQLITE_OK else { throw fail(db) }
+        try bind(root,2,q,db);try bind(source,3,q,db);try bind(target,4,q,db)
+        guard sqlite3_step(q)==SQLITE_DONE else { throw fail(db) }
+    }
+
+    static func markOriginalDelete(_ db:OpaquePointer,root:String,source:String,old:TrackedItem,job:Int64)throws {
+        guard let identity=old.storedLineageIdentity else { return }
+        let q=try prepare(db,"""
+            UPDATE selective_restore_proof SET delete_job=?1
+            WHERE path=?2 AND delete_job IS NULL AND restore_job IS NULL
+              AND exception_id IN (SELECT e.id FROM selective_name_exception e
+                JOIN directory_bindings t ON t.root_id=e.root_id AND t.role='target' AND t.stamp=e.target_binding
+                JOIN selective_name_detached d ON d.exception_id=e.id AND d.relative_path=?2 AND d.identity=?5
+                WHERE e.root_id=?3 AND e.source_binding=?4);
+            """)
+        defer { sqlite3_finalize(q) }
+        guard sqlite3_bind_int64(q,1,job)==SQLITE_OK else { throw fail(db) }
+        try bind(old.relativePath,2,q,db);try bind(root,3,q,db);try bind(source,4,q,db);try bind(identity,5,q,db)
+        guard sqlite3_step(q)==SQLITE_DONE else { throw fail(db) }
+    }
+
+    // The old generated DELETE must still be the exact pending job. A
+    // genuinely edited/replaced file, preexisting or superseding job,
+    // collision, or uncertain publication can never get this capability.
+    static func restoreCandidate(_ db:OpaquePointer,root:String,source:String,row:TrackedItem)throws->Int64? {
+        guard WindowsPathSafety.validRelativePath(row.relativePath),
+              let identity=row.sourceLineageIdentity else { return nil }
+        let q=try prepare(db,"""
+            SELECT p.exception_id FROM selective_restore_proof p
+            JOIN selective_name_exception e ON e.id=p.exception_id
+            JOIN selective_name_detached d ON d.exception_id=p.exception_id AND d.relative_path=p.path
+            JOIN directory_bindings t ON t.root_id=e.root_id AND t.role='target' AND t.stamp=e.target_binding
+            JOIN change_queue c ON c.id=p.delete_job AND c.root_id=e.root_id AND c.relative_path=p.path
+            WHERE e.root_id=?1 AND e.source_binding=?2 AND e.state='returned' AND e.current_path=e.original_path
+              AND p.path=?3 AND p.restore_job IS NULL AND d.identity=?4 AND d.kind=?5
+              AND (d.kind='directory' OR (d.file_size=?6 AND d.modified_at=?7 AND d.change_stamp=?8))
+              AND c.completed=0 AND c.kind='delete' AND c.origin='source_monitor'
+              AND NOT EXISTS(SELECT 1 FROM change_queue other WHERE other.root_id=?1 AND other.relative_path=?3
+                  AND other.id<>c.id AND (other.completed=0 OR other.id>c.id))
+              AND NOT EXISTS(SELECT 1 FROM mirror_attempts m WHERE m.job_id=c.id)
+              AND NOT EXISTS(SELECT 1 FROM retired_delete_evidence r WHERE r.job_id=c.id)
+              AND NOT EXISTS(SELECT 1 FROM selective_name_exception other WHERE other.id<>e.id AND other.root_id=e.root_id
+                  AND other.identity=e.identity);
+            """)
+        defer { sqlite3_finalize(q) }
+        try bind(root,1,q,db);try bind(source,2,q,db);try bind(row.relativePath,3,q,db)
+        try bind(try SourceNameLineageStore.identityBytes(identity),4,q,db);try bind(row.kind,5,q,db)
+        guard sqlite3_bind_int64(q,6,row.size)==SQLITE_OK,sqlite3_bind_double(q,7,row.modifiedAt)==SQLITE_OK else { throw fail(db) }
+        if let stamp=row.changeStamp { try bind(stamp,8,q,db) }
+        else { guard sqlite3_bind_null(q,8)==SQLITE_OK else { throw fail(db) } }
+        let rc=sqlite3_step(q)
+        if rc==SQLITE_DONE { return nil }
+        guard rc==SQLITE_ROW else { throw fail(db) }
+        let id=sqlite3_column_int64(q,0)
+        let next=sqlite3_step(q)
+        if next==SQLITE_ROW { return nil }
+        guard next==SQLITE_DONE else { throw fail(db) }
+        guard try !rootUncertain(db,root:root) else { return nil }
+        return id
+    }
+
+    static func markRestoredUpload(_ db:OpaquePointer,id:Int64,path:String,job:Int64)throws {
+        let q=try prepare(db,"UPDATE selective_restore_proof SET restore_job=? WHERE exception_id=? AND path=? AND restore_job IS NULL;")
+        defer { sqlite3_finalize(q) }
+        guard sqlite3_bind_int64(q,1,job)==SQLITE_OK,sqlite3_bind_int64(q,2,id)==SQLITE_OK else { throw fail(db) }
+        try bind(path,3,q,db)
+        guard sqlite3_step(q)==SQLITE_DONE,sqlite3_changes(db)==1 else { throw SourceNameLineageStore.Failure.stale }
+    }
+
+    static func hasRestoredJob(_ db:OpaquePointer,job:Int64)throws->Bool {
+        guard try installed(db),try restorationInstalled(db) else { return false }
+        let q=try prepare(db,"SELECT 1 FROM selective_restore_proof WHERE restore_job=?;")
+        defer { sqlite3_finalize(q) }
+        guard sqlite3_bind_int64(q,1,job)==SQLITE_OK else { throw fail(db) }
+        let rc=sqlite3_step(q)
+        guard rc==SQLITE_ROW || rc==SQLITE_DONE else { throw fail(db) }
+        return rc==SQLITE_ROW
+    }
+
+    // The worker has to prove an exact live source and an exact metadata
+    // match on the already mounted destination before consuming this marker.
+    // No blanket QUICK acknowledgment of source-monitor jobs.
+    static func restoredUploadEligible(_ db:OpaquePointer,job:QueuedChange,source:String,target:String,
+                                       identity:Data?=nil,fingerprint:SeedFileFingerprint?=nil)throws->Bool {
+        guard try installed(db),try restorationInstalled(db) else { return false }
+        let q=try prepare(db,"""
+            SELECT d.identity,d.kind,d.file_size,d.modified_at,d.change_stamp
+            FROM selective_restore_proof p
+            JOIN selective_name_exception e ON e.id=p.exception_id
+            JOIN selective_name_detached d ON d.exception_id=p.exception_id AND d.relative_path=p.path
+            JOIN change_queue c ON c.id=p.restore_job AND c.root_id=e.root_id AND c.relative_path=p.path
+            JOIN file_inventory f ON f.root_id=e.root_id AND f.relative_path=p.path AND f.lineage_observed_identity=d.identity
+            JOIN directory_bindings s ON s.root_id=e.root_id AND s.role='source' AND s.stamp=e.source_binding
+            JOIN directory_bindings t ON t.root_id=e.root_id AND t.role='target' AND t.stamp=e.target_binding
+            WHERE c.id=?1 AND c.root_id=?2 AND c.relative_path=?3 AND c.completed=0 AND c.kind='upsert'
+              AND c.origin='source_monitor' AND e.source_binding=?4 AND e.target_binding=?5
+              AND e.state='returned' AND e.current_path=e.original_path AND f.kind=d.kind
+              AND (d.kind='directory' OR (f.file_size=d.file_size AND f.modified_at=d.modified_at AND f.change_stamp=d.change_stamp))
+              AND NOT EXISTS(SELECT 1 FROM change_queue other WHERE other.root_id=?2 AND other.relative_path=?3
+                    AND other.id<>c.id AND (other.completed=0 OR other.id>c.id))
+              AND NOT EXISTS(SELECT 1 FROM blocked_name_jobs b WHERE b.job_id=c.id);
+            """)
+        defer { sqlite3_finalize(q) }
+        guard sqlite3_bind_int64(q,1,job.id)==SQLITE_OK else { throw fail(db) }
+        try bind(job.rootID,2,q,db);try bind(job.relativePath,3,q,db);try bind(source,4,q,db);try bind(target,5,q,db)
+        let rc=sqlite3_step(q)
+        if rc==SQLITE_DONE { return false }
+        guard rc==SQLITE_ROW,sqlite3_column_bytes(q,0)==33,let p=sqlite3_column_blob(q,0) else { throw fail(db) }
+        if let identity,let fingerprint {
+            guard Data(bytes:p,count:33)==identity else { return false }
+            let kind=try string(q,1)
+            if kind=="file" {
+                guard fingerprint.size==sqlite3_column_int64(q,2),
+                      abs(fingerprint.modifiedAt-sqlite3_column_double(q,3))<0.002,
+                      try string(q,4)=="\(fingerprint.inode):\(fingerprint.ctimeSeconds):\(fingerprint.ctimeNanos)" else { return false }
+            }
+        }
+        let next=sqlite3_step(q)
+        if next==SQLITE_ROW { return false }
+        guard next==SQLITE_DONE else { throw fail(db) }
+        return try !rootUncertain(db,root:job.rootID)
     }
 
     private static func installSpeculativeJobs(_ db:OpaquePointer)throws {
@@ -109,11 +316,17 @@ enum SelectiveNameExceptionStore {
             SELECT 1 FROM watched_roots w
             JOIN directory_bindings s ON s.root_id=w.root_id AND s.role='source' AND s.stamp=?2
             JOIN directory_bindings t ON t.root_id=w.root_id AND t.role='target' AND length(t.stamp)>0
-            WHERE w.root_id=?1 AND w.last_scan_at<?5
+            WHERE w.root_id=?1 AND
+              ((w.last_scan_at<?5
+                AND NOT EXISTS(SELECT 1 FROM selective_name_detached d JOIN selective_name_exception e ON e.id=d.exception_id
+                    WHERE e.root_id=?1 AND d.identity=?4))
+               OR EXISTS(SELECT 1 FROM selective_name_detached d JOIN selective_name_exception e ON e.id=d.exception_id
+                    WHERE e.root_id=?1 AND e.source_binding=?2 AND e.target_binding=t.stamp
+                      AND d.identity=?4 AND e.state='incompatible' AND e.current_path IS NOT NULL
+                      AND (d.relative_path=e.original_path OR instr(d.relative_path,e.original_path||'/')=1)
+                      AND ?3=e.current_path||substr(d.relative_path,length(e.original_path)+1)))
               AND NOT EXISTS(SELECT 1 FROM change_queue c WHERE c.root_id=?1 AND c.relative_path=?3)
               AND NOT EXISTS(SELECT 1 FROM file_inventory f WHERE f.root_id=?1 AND f.lineage_observed_identity=?4)
-              AND NOT EXISTS(SELECT 1 FROM selective_name_detached d JOIN selective_name_exception e ON e.id=d.exception_id
-                WHERE e.root_id=?1 AND d.identity=?4)
               AND NOT EXISTS(SELECT 1 FROM publication_intents p WHERE p.root_id=?1 AND p.relative_path=?3)
               AND NOT EXISTS(SELECT 1 FROM transfer_recovery r WHERE r.root_id=?1 AND r.relative_path=?3)
               AND NOT EXISTS(SELECT 1 FROM upload_retry r WHERE r.root_id=?1 AND r.scope='root');
@@ -334,6 +547,7 @@ enum SelectiveNameExceptionStore {
                 try bind(root,2,detach,db);try bind(path,3,detach,db)
                 try bind(path+"/",5,detach,db);try bind(path+"0",6,detach,db)
                 guard sqlite3_step(detach)==SQLITE_DONE else { throw fail(db) }
+                try captureRestoreProof(db,id:id,root:root,source:source,target:target)
             }
             return Entry(id:id,original:path,current:current,kind:kind)
         }
@@ -536,6 +750,7 @@ enum SelectiveNameExceptionStore {
                                            shouldContinue:()->Bool)throws {
         guard try installed(db) else { return }
         guard sqlite3_get_autocommit(db)==0 else { throw SourceNameLineageStore.Failure.transactionRequired }
+        try installRestorationProof(db)
         let q=try prepare(db,"""
             SELECT e.id,e.original_path FROM selective_name_exception e
             JOIN directory_bindings s ON s.root_id=e.root_id AND s.role='source' AND s.stamp=e.source_binding
@@ -604,7 +819,71 @@ enum SelectiveNameExceptionStore {
             guard absent,count>0 else { continue }
             // Remove ONLY this exception's veto. Normal mirror rules,
             // copy-first, current job validation and other guards still apply.
-            for table in ["selective_name_detached","selective_name_guard","selective_name_exception"] {
+            for table in ["selective_restore_proof","selective_name_detached","selective_name_guard","selective_name_exception"] {
+                let column=table=="selective_name_exception" ? "id":"exception_id"
+                let remove=try prepare(db,"DELETE FROM "+table+" WHERE "+column+"=?;")
+                defer { sqlite3_finalize(remove) }
+                guard sqlite3_bind_int64(remove,1,id)==SQLITE_OK,sqlite3_step(remove)==SQLITE_DONE else { throw fail(db) }
+            }
+        }
+    }
+
+    static func resolveAuditedNativeRestorations(_ db:OpaquePointer,root:String,
+                    source:String,target:String,sourceRows:[TrackedItem],targetRows:[TrackedItem],
+                    shouldContinue:()->Bool)throws {
+        guard try installed(db),try restorationInstalled(db),sqlite3_get_autocommit(db)==0,
+              try !rootUncertain(db,root:root) else { return }
+        // Caller proved a fully matching, current audit, no pending jobs and
+        // a native target. Require exact root identity in live inventory.
+        let q=try prepare(db,"""
+            SELECT e.id,e.original_path,e.current_path FROM selective_name_exception e
+            JOIN file_inventory f ON f.root_id=e.root_id AND f.relative_path=e.current_path
+              AND f.lineage_observed_identity=e.identity AND f.kind=e.kind
+            WHERE e.root_id=?1 AND e.source_binding=?2 AND e.target_binding=?3
+              AND e.state IN ('returned','moved') AND e.identity IS NOT NULL
+              AND NOT EXISTS(SELECT 1 FROM selective_name_exception other WHERE other.id<>e.id AND other.root_id=e.root_id AND other.identity=e.identity);
+            """)
+        defer { sqlite3_finalize(q) }
+        try bind(root,1,q,db);try bind(source,2,q,db);try bind(target,3,q,db)
+        var entries:[(Int64,String,String)]=[]
+        var rc=sqlite3_step(q)
+        while rc==SQLITE_ROW {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            entries.append((sqlite3_column_int64(q,0),try string(q,1),try string(q,2)))
+            rc=sqlite3_step(q)
+        }
+        guard rc==SQLITE_DONE else { throw fail(db) }
+        guard !entries.isEmpty else { return }
+        let sourcePaths=Set(sourceRows.map{Data($0.relativePath.utf8)})
+        let targetPaths=Set(targetRows.map{Data($0.relativePath.utf8)})
+        let guards=try prepare(db,"SELECT path FROM selective_name_guard WHERE exception_id=?;")
+        defer { sqlite3_finalize(guards) }
+        for (id,original,current) in entries {
+            guard shouldContinue() else { throw SeedVerificationError.cancelled }
+            guard WindowsPathSafety.validRelativePath(current),
+                  sourcePaths.contains(Data(current.utf8)),targetPaths.contains(Data(current.utf8)) else { continue }
+            // Native complete enumeration reveals literal spellings. Do not
+            // use this release path on SMB, where a legacy name may be hidden.
+            sqlite3_reset(guards);sqlite3_clear_bindings(guards)
+            guard sqlite3_bind_int64(guards,1,id)==SQLITE_OK else { throw fail(db) }
+            var safe=true
+            var step=sqlite3_step(guards)
+            while step==SQLITE_ROW {
+                let path=try string(guards,0)
+                if !exact(path,current) {
+                    let prefix=Data((path+"/").utf8),key=Data(path.utf8)
+                    if sourcePaths.contains(key) || targetPaths.contains(key) ||
+                       sourcePaths.contains(where:{$0.starts(with:prefix)}) ||
+                       targetPaths.contains(where:{$0.starts(with:prefix)}) { safe=false }
+                }
+                step=sqlite3_step(guards)
+            }
+            guard step==SQLITE_DONE else { throw fail(db) }
+            guard safe else { continue }
+            // A name reuse or overlapping unresolved exception must not
+            // lose its independent veto. Only remove this exact record.
+            _ = original
+            for table in ["selective_restore_proof","selective_name_detached","selective_name_guard","selective_name_exception"] {
                 let column=table=="selective_name_exception" ? "id":"exception_id"
                 let remove=try prepare(db,"DELETE FROM "+table+" WHERE "+column+"=?;")
                 defer { sqlite3_finalize(remove) }
@@ -650,6 +929,6 @@ enum SelectiveNameExceptionStore {
                    VALUES(1,'Rollback: eccezioni rinomina conservate nel backup; cancellazioni sospese per verifica.');
                 """)
         }
-        try exec(db,"DROP TABLE IF EXISTS selective_invalid_upload; DROP TABLE selective_name_detached; DROP TABLE selective_name_guard; DROP TABLE selective_name_exception; DROP INDEX idx_selective_live_identity;")
+        try exec(db,"DROP TABLE IF EXISTS selective_clean_baseline; DROP TABLE IF EXISTS selective_restore_proof; DROP TABLE IF EXISTS selective_invalid_upload; DROP TABLE selective_name_detached; DROP TABLE selective_name_guard; DROP TABLE selective_name_exception; DROP INDEX idx_selective_live_identity;")
     }
 }

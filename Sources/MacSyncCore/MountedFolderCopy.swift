@@ -439,6 +439,13 @@ public final class MountedFolderCopyWorker {
                 // content comparison. Never infer completion from size alone.
                 try journal.adoptRetiredPublication(job)
                 let previousPublication = try journal.hasPublicationIntent(job)
+                if !previousPublication,try reconcileSelectiveRestoration(job,mapping:mapping,shouldContinue:shouldContinue) {
+                    summary.reconciled += 1
+                    emit(.noChange,job:job,mapping:mapping,detail:"Ripristino nome verificato: nessuna nuova copia")
+                    try? log.record(level:.success,rootID:job.rootID,action:"selective_restore_avoided",
+                        relativePath:job.relativePath,message:"Identità e metadati verificati; nessuna lettura del contenuto")
+                    continue
+                }
                 // Only hash an ordinary existing queued file if its size and
                 // mtime look equal. A same-size/same-date edit still copies
                 // if the actual bytes differ.
@@ -595,6 +602,44 @@ public final class MountedFolderCopyWorker {
             }
         }
         return true
+    }
+
+    private func reconcileSelectiveRestoration(_ job:QueuedChange,mapping:MountedFolderMapping,
+                                               shouldContinue:()->Bool)throws->Bool {
+        guard try journal.selectiveRestoredCandidate(job,mapping:mapping) else { return false }
+        try mapping.verify()
+        let sourceBinding=try DirectoryBinding.encoded(mapping.source)
+        let targetBinding=try DirectoryBinding.encoded(mapping.target)
+        let src=try mapping.fileURL(relativePath:job.relativePath,destination:false)
+        let dst=try mapping.fileURL(relativePath:job.relativePath,destination:true)
+        do {
+            try WindowsPathSafety.checkNames(relativePath:job.relativePath,under:mapping.source)
+            try WindowsPathSafety.checkNames(relativePath:job.relativePath,under:mapping.target)
+            try ensureSafeParents(src,under:mapping.source,create:false)
+            try ensureSafeParents(dst,under:mapping.target,create:false)
+            var local=stat(),remote=stat()
+            guard src.resolvingSymlinksInPath().path==src.path,
+                  src.path.withCString({lstat($0,&local)})==0,
+                  dst.path.withCString({lstat($0,&remote)})==0,
+                  let id=SourceNameLineage.Identity(stat:local) else { return false }
+            let localKind=local.st_mode & mode_t(S_IFMT),remoteKind=remote.st_mode & mode_t(S_IFMT)
+            guard localKind==remoteKind,localKind==mode_t(S_IFREG) || localKind==mode_t(S_IFDIR) else { return false }
+            let first=SeedFileFingerprint(fileStat:local),other=SeedFileFingerprint(fileStat:remote)
+            guard localKind==mode_t(S_IFDIR) || (first.size==other.size && abs(first.modifiedAt-other.modifiedAt)<=2) else { return false }
+            try mapping.verify()
+            guard try DirectoryBinding.encoded(mapping.source)==sourceBinding,
+                  try DirectoryBinding.encoded(mapping.target)==targetBinding,
+                  try SeededArchiveVerifier.fingerprint(dst,directory:localKind==mode_t(S_IFDIR))==other,
+                  shouldContinue(),operationAllowed() else { return false }
+            return try journal.acknowledgeSelectiveRestoration(job,mapping:mapping,sourceURL:src,
+                sourceFingerprint:first,sourceIdentity:id,sourceBinding:sourceBinding,targetBinding:targetBinding,
+                shouldContinue:{shouldContinue() && self.operationAllowed()})
+        } catch SeedVerificationError.cancelled { throw SeedVerificationError.cancelled }
+        catch {
+            // Fall back to the existing protected transfer/reconciliation
+            // path, never infer success from an unavailable target.
+            try mapping.verify();return false
+        }
     }
 
     private func metadataMayMatch(_ job:QueuedChange,mapping:MountedFolderMapping) throws -> Bool {
